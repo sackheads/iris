@@ -162,7 +162,7 @@ final class SubagentManager: @unchecked Sendable {
             appState.registerSubagent(id: subagentId, role: role, owner: appState.delegationRoot(of: parentConversationId))
             // #239 3b: on another family, what it spends in a job run is priced at its own rate.
             if let route, route.providerId != ProviderSlug.id(of: LLMProvider(rawValue: config.primaryProvider) ?? .gemini) {
-                appState.setDelegatedPricing(DelegatedPricing(route: route, endpoints: config.subagentEndpoints), for: subagentId)
+                appState.setDelegatedPricing(DelegatedPricing(route: route, endpoints: config.subagentEndpoints, openAIBaseURL: config.openAIBaseURL), for: subagentId)
             }
             // Delegation must not drop the workspace the parent is bound to. Without this the
             // subagent's run_command inherits the process cwd (the Iris repo) while the parent

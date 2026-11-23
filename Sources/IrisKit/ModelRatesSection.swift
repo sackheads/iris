@@ -61,7 +61,7 @@ struct ModelRatesSection: View {
     func rows() -> [Row] {
         let primary = LLMProvider(rawValue: config.primaryProvider) ?? .gemini
         var out = config.tierModels(of: primary).uniqued().map {
-            Row(key: TypedRates.primaryKey(model: $0), label: "Primary", model: $0, family: PriceFamily.of(primary),
+            Row(key: TypedRates.primaryKey(model: $0), label: "Primary", model: $0, family: PriceFamily.of(primary, openAIBaseURL: config.openAIBaseURL),
                 side: .primary, loopback: false)
         }
         for provider in registry where provider.usable && !provider.isPrimary {

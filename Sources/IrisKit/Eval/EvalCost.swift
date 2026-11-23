@@ -36,9 +36,11 @@ enum EvalCost {
         }
     }
 
-    /// The listed rate for a provider's model, or nil when #239's list has none.
-    static func rates(provider: LLMProvider, model: String, table: PriceTable = .snapshot) -> TokenRates? {
-        table.rate(family: provider.rawValue.lowercased(), model: model)
+    /// The listed rate for a provider's model, or nil when #239's list has none. The OpenAI provider's family is
+    /// its host's (#1355): a canary sent through it to DeepSeek is priced from DeepSeek's rows.
+    static func rates(provider: LLMProvider, model: String, table: PriceTable = .snapshot,
+                      openAIBaseURL: String = ConfigManager.shared.openAIBaseURL) -> TokenRates? {
+        table.rate(family: PriceFamily.of(provider, openAIBaseURL: openAIBaseURL), model: model)
     }
 
     /// Dollars for `tokens` at `rates`; nil when there is no rate.

@@ -188,10 +188,10 @@ struct DelegatedPricing: Equatable, Sendable {
         self.endpointName = endpointName
     }
 
-    init(route: ProviderRoute, endpoints: [ProviderEndpoint]) {
+    init(route: ProviderRoute, endpoints: [ProviderEndpoint], openAIBaseURL: String = "") {
         switch route.target {
         case .builtIn(let provider):
-            self.init(providerId: route.providerId, model: route.model, family: PriceFamily.of(provider))
+            self.init(providerId: route.providerId, model: route.model, family: PriceFamily.of(provider, openAIBaseURL: openAIBaseURL))
         case .endpoint(let baseURL, _):
             let endpoint = endpoints.first { $0.id == route.providerId }
             self.init(providerId: route.providerId, model: route.model,
@@ -208,6 +208,18 @@ enum PriceFamily {
         case .gemini: "gemini"
         case .openai: "openai"
         }
+    }
+
+    /// #1355: the family of a built-in provider's calls. The OpenAI provider sends its calls to `openAIBaseURL`
+    /// when one is set, so a DeepSeek host prices from DeepSeek's rows, not OpenAI's; an unknown host, or none,
+    /// is OpenAI's family, as before.
+    static func of(_ provider: LLMProvider, openAIBaseURL: String) -> String {
+        provider == .openai ? forHost(of: openAIBaseURL) ?? of(provider) : of(provider)
+    }
+
+    /// The same, for an `LLMProvider` raw value ("OpenAI"); anything else is its own name in lower case.
+    static func of(providerName: String, openAIBaseURL: String) -> String {
+        LLMProvider(rawValue: providerName).map { of($0, openAIBaseURL: openAIBaseURL) } ?? providerName.lowercased()
     }
 
     /// The family of a provider's own API host, for an endpoint set up without a preset. Exact
