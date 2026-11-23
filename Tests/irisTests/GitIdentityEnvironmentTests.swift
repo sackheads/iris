@@ -506,7 +506,9 @@ struct RealGitIsolationScanTests {
             let text = try String(contentsOf: file, encoding: .utf8)
             guard text.contains(#"["credential", "fill"]"#) else { continue }
             checked += 1
-            #expect(text.contains(#""GIT_CONFIG_NOSYSTEM": "1""#) && text.contains(#""GIT_TERMINAL_PROMPT": "0""#),
+            // Built, not literal, so this file's own scan cannot satisfy itself.
+            let nosystem = "\"GIT_CONFIG_" + "NOSYSTEM\": \"1\"", noPrompt = "\"GIT_TERMINAL_" + "PROMPT\": \"0\""
+            #expect(text.contains(nosystem) && text.contains(noPrompt),
                     "\(file.lastPathComponent) runs git credential fill without isolating it")
         }
         #expect(checked >= 1, "the scan found the real-git tests")
