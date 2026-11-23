@@ -13,8 +13,10 @@ struct ConversationCost: Equatable {
     var hasLedger = false
 
     /// `provider` is an `LLMProvider` raw value ("Anthropic"); the price list keys families in lower case.
-    static func estimate(usage: TokenUsage, provider: String, model: String, book: PriceBook = .shared) -> ConversationCost {
-        let rate = book.resolve(family: provider.lowercased(), model: model, side: .primary)
+    /// `openAIBaseURL`: where the OpenAI provider sends its calls, which decides its price family (#1355).
+    static func estimate(usage: TokenUsage, provider: String, model: String, openAIBaseURL: String = "",
+                         book: PriceBook = .shared) -> ConversationCost {
+        let rate = book.resolve(family: PriceFamily.of(providerName: provider, openAIBaseURL: openAIBaseURL), model: model, side: .primary)
         // #1057: what a model spent is priced at the rate it was spent at; the rest, at the current model.
         let dollars = usage.byModel.reduce(ModelPricing.dollars(usage.unattributed.components, rate.rates)) {
             $0 + ModelPricing.dollars($1.usage.components, $1.rates)
@@ -180,7 +182,8 @@ extension AppState {
     func conversationCost(for conversationId: UUID, config: ConfigManager = .shared) -> ConversationCost? {
         guard let conv = conversations.first(where: { $0.id == conversationId }), conv.tokenUsage.totalTokenCount > 0 else { return nil }
         let model = config.getModel(for: effectiveTier(for: conversationId).tier)
-        return ConversationCost.estimate(usage: conv.tokenUsage, provider: config.primaryProvider, model: model, book: priceBook)
+        return ConversationCost.estimate(usage: conv.tokenUsage, provider: config.primaryProvider, model: model,
+                                         openAIBaseURL: config.openAIBaseURL, book: priceBook)
     }
 }
 

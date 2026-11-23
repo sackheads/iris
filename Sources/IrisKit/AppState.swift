@@ -1173,6 +1173,8 @@ class AppState {
     @ObservationIgnored private var backgroundRunOtherModels: [UUID: [String: (DelegatedPricing, UsageComponents)]] = [:]
     /// Where a routed subagent's tokens are priced. Injectable for tests.
     @ObservationIgnored var priceBook: PriceBook = .shared
+    /// #1355: where the OpenAI provider sends its calls, which decides the price family a round is charged at.
+    @ObservationIgnored var openAIBaseURL: () -> String = { ConfigManager.shared.openAIBaseURL }
     /// #1146: the conversation the Diagnostics window's Conversation mode shows, set by the toolbar
     /// cost popover just before it opens the window. `diagnosticsRequest` counts those asks, so asking
     /// again for the same conversation still switches the open window to that mode. Transient: never
@@ -4567,7 +4569,8 @@ class AppState {
         if let idx = conversations.firstIndex(where: { $0.id == conversationId }) {
             conversations[idx].tokenUsage.add(usage)
             if let model {
-                let rate = priceBook.resolve(family: model.provider.lowercased(), model: model.model, side: .primary)
+                let rate = priceBook.resolve(family: PriceFamily.of(providerName: model.provider, openAIBaseURL: openAIBaseURL()),
+                                             model: model.model, side: .primary)
                 var number: Int?
                 if let turn {
                     // A user turn is numbered when its first round is charged (#1146).
