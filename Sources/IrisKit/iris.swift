@@ -1273,14 +1273,16 @@ actor IrisEngine {
     /// sanitisation rather than a second, driftable copy of these two lines.
     /// `chargeTo`: the conversation the arrival is for, which a cloud guard call on it is charged
     /// to (#689, #700 review). The arrival is checked before any turn there binds its own sink.
+    /// `fidelity`: `.off` unless the caller passes otherwise; only a direct peer message does (#1329).
     private func sanitizeArrival(_ message: String, source: String, chargeTo conversationId: UUID,
-                                 maxTier: InjectionGuard.SanitizationTier = .tier3_canary) async -> String {
+                                 maxTier: InjectionGuard.SanitizationTier = .tier3_canary,
+                                 fidelity: InjectionGuard.FidelityMode = .off) async -> String {
         // #813: a peer's message or a background post-back is someone else's text.
         await markReadUntrusted(conversationId)
         let sink = await MainActor.run { [state] in GuardUsage.charging(conversationId, in: state) }
         return await GuardUsage.$sink.withValue(sink) {
             await InjectionGuard.sanitizeUntrusted(message, contextTag: "system_event_\(source)", maxTier: maxTier,
-                                          protectionEnabled: protectionEnabled)
+                                          protectionEnabled: protectionEnabled, fidelity: fidelity)
         }
     }
 
@@ -1339,8 +1341,11 @@ actor IrisEngine {
         // system's highest trust label. The `isPeer` flag on the queued entry is what stops that.
         // #696: a topic message's body was judged once at publish, so each subscriber's copy takes
         // the structural pass only, not one more tier-2/3 check per subscriber.
+        // #1329: a peer's report keeps the headings and rules a tier judged safe. A topic body (#1337) is judged at
+        // publish and gets only the structural pass here, where nothing is judged, so it stays stripped either way.
         let safe = await sanitizeArrival(attributed, source: Self.peerSource, chargeTo: targetId,
-                                         maxTier: bodyAlreadyGuarded ? .tier1_structural : .tier3_canary)
+                                         maxTier: bodyAlreadyGuarded ? .tier1_structural : .tier3_canary,
+                                         fidelity: bodyAlreadyGuarded ? .off : .preserveStructureWhenJudged)
         // §5.2: a second turn on one history produces empty or rejected provider responses, so a
         // busy target takes the same #172 inbox a user message would. Peer messaging must not make
         // that hazard agent-triggerable.
