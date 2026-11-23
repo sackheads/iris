@@ -18,7 +18,7 @@ struct LoginPathCaptureTests {
 
     @Test("a shell's PATH is split into entries")
     func splits() throws {
-        let shell = try script("echo /a/bin:/b/bin::/c/bin")
+        let shell = try script(#"PATH=/a/bin:/b/bin::/c/bin; eval "$2""#)
         #expect(BinaryResolver.captureLoginPath(shell: shell) == ["/a/bin", "/b/bin", "/c/bin"])
     }
 
@@ -38,7 +38,7 @@ struct LoginPathCaptureTests {
     @MainActor
     @Test("waiting on the shell does not run the main run loop")
     func doesNotPumpRunLoop() throws {
-        let shell = try script("sleep 0.5; echo /a/bin")
+        let shell = try script(#"sleep 0.5; PATH=/a/bin; eval "$2""#)
         let fired = OSAllocatedUnfairLock(initialState: false)
         // A timer in the default mode: `waitUntilExit()` services it while it waits, which is how a
         // SwiftUI body re-entered mid-initialisation. A semaphore wait does not.
@@ -47,6 +47,34 @@ struct LoginPathCaptureTests {
         defer { timer.invalidate() }
         _ = BinaryResolver.captureLoginPath(shell: shell)
         #expect(!fired.withLock { $0 })
+    }
+
+    /// #1162: a process the login files start can keep nothing of ours open. Before, it inherited the stdout
+    /// pipe and the read waited for it, at zero CPU, under the cache's lock.
+    @Test("a process the login shell leaves running does not hold up the answer")
+    func backgroundChildDoesNotBlock() async throws {
+        let shell = try script(#"sleep 300 & PATH=/a:/b; eval "$2""#)
+        let start = TestClock.now()
+        let entries = try await value(of: Task.detached { BinaryResolver.captureLoginPath(shell: shell, timeout: 5) }, within: 15)
+        #expect(entries == ["/a", "/b"])
+        #expect(TestClock.seconds(since: start) < 10, "the answer came on the shell's exit, not the child's")
+    }
+
+    @Test("what isn't one line of absolute paths gives no entries", arguments: [
+        "relative/bin:/usr/bin", "/usr/bin\n/opt/bin", "Welcome back! /usr/bin", "", "/usr/bin /opt/homebrew/bin",
+    ])
+    func malformedIsEmpty(_ value: String) {
+        #expect(BinaryResolver.pathEntries(value).isEmpty, "\(value)")
+    }
+
+    @Test("the shell's PATH file is written in a private folder that is gone afterwards")
+    func tempFolderIsRemoved() throws {
+        let note = FileManager.default.temporaryDirectory.appendingPathComponent("iris-1162-note-\(UUID().uuidString)").path
+        defer { try? FileManager.default.removeItem(atPath: note) }
+        let shell = try script(#"echo "$IRIS_PATH_OUT" > '"# + note + #"'; PATH=/a; eval "$2""#)
+        #expect(BinaryResolver.captureLoginPath(shell: shell) == ["/a"])
+        let out = try String(contentsOfFile: note, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines)
+        #expect(!out.isEmpty && !FileManager.default.fileExists(atPath: (out as NSString).deletingLastPathComponent), "\(out)")
     }
 
     @Test("HomeMount.reason still takes an explicit login PATH, and the home folder is refused")
