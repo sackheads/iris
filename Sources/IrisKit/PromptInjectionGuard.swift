@@ -106,10 +106,10 @@ struct PromptInjectionGuard {
     }
 
     /// #1329: a line that is only a role word once Markdown and punctuation are set aside (`system`, `### Human`,
-    /// `User.`). A turn header split across lines (`---⏎system⏎---`) shows on no single line, so a structure line
+    /// `User.`, `role: system`, `System message`, `### Developer`). A turn header split across lines (`---⏎system⏎---`) shows on no single line, so a structure line
     /// next to one of these stays stripped too (`bordersBareRoleWord`).
     private static let bareRoleWord = try! NSRegularExpression(
-        pattern: #"^[\s\p{P}\p{S}]*(system(\s+prompt)?|assistant|user|model|instruction|human|ai)[\s\p{P}\p{S}]*$"#,
+        pattern: #"^[\s\p{P}\p{S}]*(role\s*[:=]\s*)?(system|assistant|user|model|instructions?|human|ai|developer|tool|function)(\s+(message|prompt|instructions|turn|response))?[\s\p{P}\p{S}]*$"#,
         options: [.caseInsensitive])
 
     static func isBareRoleWordLine(_ normalizedLine: String) -> Bool {
