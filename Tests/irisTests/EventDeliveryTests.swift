@@ -2,22 +2,6 @@ import Testing
 import Foundation
 @testable import IrisKit
 
-/// Releases waiting callers on demand so a scripted round can be held open deterministically.
-/// Mirrors `SteerInboxTests`' private `Gate` — file-private there, so this file needs its own.
-private actor EventGate {
-    private var waiters: [CheckedContinuation<Void, Never>] = []
-    private var open = false
-    func wait() async {
-        if open { return }
-        await withCheckedContinuation { waiters.append($0) }
-    }
-    func release() {
-        open = true
-        let w = waiters; waiters = []
-        w.forEach { $0.resume() }
-    }
-}
-
 private func eventually(_ timeoutMs: Int = 3000, _ condition: @MainActor @Sendable () -> Bool) async -> Bool {
     for _ in 0..<(timeoutMs / 10) {
         if await condition() { return true }
@@ -195,8 +179,8 @@ struct EventDeliveryTests {
     /// passed their drain point, so no model round can quietly do the flush's job instead.
     @Test("a completing UI task flushes the queue even while another turn is still in flight")
     func trackedTaskCompletionFlushes() async {
-        let firstGate = EventGate()
-        let renameGate = EventGate()
+        let firstGate = TestGate()
+        let renameGate = TestGate()
         let client = ScriptedStreamClient([
             [.event(.textDelta("one")), .block { await firstGate.wait() }, .event(.done(finishReason: nil))],
             [.event(.textDelta("renamed")), .block { await renameGate.wait() }, .event(.done(finishReason: nil))]
@@ -218,12 +202,12 @@ struct EventDeliveryTests {
         await app.deliverEvent(c, to: id)
         #expect(historyHits(app, id, c.historyLine) == 0, "two turns are in flight; the line waits")
 
-        await renameGate.release()
+        renameGate.open()
         #expect(await eventually { self.historyHits(app, id, c.historyLine) == 1 },
                 "the rename task completing must flush — the other turn keeps the engine count off zero")
         #expect(app.hasTurnInFlight(for: id), "the first turn is still held, so this was not endEngineTurn's doing")
 
-        await firstGate.release()
+        firstGate.open()
         #expect(await eventually { !app.isThinking })
         #expect(historyHits(app, id, c.historyLine) == 1, "and the first turn's own end must not add a second copy")
         #expect(client.calls == 2, "no delivery, and no flush, woke a model turn")
@@ -248,8 +232,8 @@ struct EventDeliveryTests {
     /// the shape assertion below also catches.
     @Test("a card delivered mid-turn joins the history after the tool result, never between the call and its response")
     func midTurnDeliveryLandsAfterTheToolResult() async throws {
-        let roundOne = EventGate()
-        let roundTwo = EventGate()
+        let roundOne = TestGate()
+        let roundTwo = TestGate()
         let call = FunctionCall(name: "run_command", args: ["command": .string("echo hi")], id: "c1")
         let client = ScriptedStreamClient([
             [.event(.functionCall(call)), .block { await roundOne.wait() }, .event(.done(finishReason: "tool_use"))],
@@ -277,12 +261,12 @@ struct EventDeliveryTests {
         #expect(conv(app, id).history.allSatisfy { $0.parts.allSatisfy { ($0.text ?? "").isEmpty || !($0.text ?? "").contains(midTurn.historyLine) } },
                 "the line waits for the boundary")
 
-        await roundOne.release()
+        roundOne.open()
         #expect(await eventually { client.calls == 2 })
 
         // Round two is the last one, so this card's line has no round left to join.
         await app.deliverEvent(lateTurn, to: id)
-        await roundTwo.release()
+        roundTwo.open()
         _ = try await value(of: turn)
         #expect(await eventually { !app.isThinking })
 

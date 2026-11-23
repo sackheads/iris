@@ -4,21 +4,6 @@ import SwiftUI
 import AppKit
 @testable import IrisKit
 
-/// Releases waiting callers on demand so a scripted round can be held open deterministically.
-private actor Gate {
-    private var waiters: [CheckedContinuation<Void, Never>] = []
-    private var open = false
-    func wait() async {
-        if open { return }
-        await withCheckedContinuation { waiters.append($0) }
-    }
-    func release() {
-        open = true
-        let w = waiters; waiters = []
-        w.forEach { $0.resume() }
-    }
-}
-
 private func eventually(_ timeoutMs: Int = 3000, _ condition: @MainActor @Sendable () -> Bool) async -> Bool {
     for _ in 0..<(timeoutMs / 10) {
         if await condition() { return true }
@@ -77,7 +62,7 @@ struct SteerInboxTests {
 
     @Test("a send while a turn is in flight shows the bubble at once and does not start a second turn")
     func sendQueuesWhileRunning() async {
-        let gate = Gate()
+        let gate = TestGate()
         let client = ScriptedStreamClient([
             [.event(.textDelta("one")), .block { await gate.wait() }, .event(.done(finishReason: nil))],
             [.event(.textDelta("two")), .event(.done(finishReason: nil))]
@@ -90,7 +75,7 @@ struct SteerInboxTests {
         #expect(app.hasTurnInFlight(for: id))
         #expect(app.pendingUserMessageCount(for: id) == 1)
         #expect(client.calls == 1)
-        await gate.release()
+        gate.open()
         // Round one had no tool call, so the turn ends; the queued message follows as its own turn.
         #expect(await eventually { client.calls == 2 && !app.isThinking })
         #expect(texts(app, id, .agent) == ["one", "two"])
@@ -100,7 +85,7 @@ struct SteerInboxTests {
 
     @Test("a message that arrives between model rounds joins the running turn after the tool result")
     func steerJoinsRunningTurn() async {
-        let gate = Gate()
+        let gate = TestGate()
         let call = FunctionCall(name: "run_command", args: ["command": .string("echo steered")], id: "c1")
         let client = ScriptedStreamClient([
             [.event(.functionCall(call)), .block { await gate.wait() }, .event(.done(finishReason: "tool_use"))],
@@ -110,7 +95,7 @@ struct SteerInboxTests {
         app.sendMessage("first")
         #expect(await eventually { client.calls == 1 })
         app.sendMessage("also check /tmp")
-        await gate.release()
+        gate.open()
         #expect(await eventually { client.calls == 2 && !app.isThinking })
         #expect(client.calls == 2)
         #expect(texts(app, id, .agent) == ["ok"])
@@ -145,7 +130,7 @@ struct SteerInboxTests {
     /// thing that can hand the queue on; without it the bubble appears and is silently ignored.
     @Test("a message typed during an arrival turn is drained when that turn ends")
     func arrivalTurnDrainsQueue() async throws {
-        let gate = Gate()
+        let gate = TestGate()
         let client = ScriptedStreamClient([
             [.event(.textDelta("arrival")), .block { await gate.wait() }, .event(.done(finishReason: nil))],
             [.event(.textDelta("answer")), .event(.done(finishReason: nil))]
@@ -170,7 +155,7 @@ struct SteerInboxTests {
         #expect(app.pendingUserMessageCount(for: id) == 1, "the arrival turn is in flight, so it queues")
         #expect(client.calls == 1)
 
-        await gate.release()
+        gate.open()
         _ = try await value(of: arrival)
         #expect(await eventually { client.calls == 2 && !app.isThinking })
         #expect(app.pendingUserMessageCount(for: id) == 0, "the arrival's end hop drained it")
@@ -192,7 +177,7 @@ struct SteerInboxTests {
 
     @Test("sending with queue: true waits for a multi-round turn to finish and merges queued messages (#1064)")
     func queuedMessageWaitsForMultiRoundTurnToFinish() async {
-        let gate = Gate()
+        let gate = TestGate()
         let call = FunctionCall(name: "run_command", args: ["command": .string("echo round1")], id: "c1")
         let client = ScriptedStreamClient([
             [.event(.functionCall(call)), .block { await gate.wait() }, .event(.done(finishReason: "tool_use"))],
@@ -210,7 +195,7 @@ struct SteerInboxTests {
             "and also this:true"
         ])
 
-        await gate.release()
+        gate.open()
         #expect(await eventually { client.calls == 3 && !app.isThinking })
         #expect(texts(app, id, .agent) == ["finished first turn", "answered queued turn"])
         #expect(historyShape(app, id) == [

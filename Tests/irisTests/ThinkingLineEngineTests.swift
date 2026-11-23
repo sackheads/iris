@@ -12,10 +12,10 @@ struct ThinkingLineEngineTests {
     private final class ScriptedStream: LLMClientProtocol, @unchecked Sendable {
         let head: [LLMStreamEvent]
         let tail: [LLMStreamEvent]
-        private let gate = AsyncGate()
+        private let gate = TestGate()
         var supportsStreaming: Bool { true }
         init(head: [LLMStreamEvent], tail: [LLMStreamEvent]) { self.head = head; self.tail = tail }
-        func release() { let gate = gate; Task { await gate.open() } }
+        func release() { gate.open() }
         func generateContent(request: GeminiRequest, tier: ModelTier) async throws -> GeminiResponse {
             GeminiResponse(candidates: nil, usageMetadata: nil)
         }
@@ -30,13 +30,6 @@ struct ThinkingLineEngineTests {
                 continuation.onTermination = { _ in task.cancel() }
             }
         }
-    }
-
-    private actor AsyncGate {
-        private var isOpen = false
-        private var waiters: [CheckedContinuation<Void, Never>] = []
-        func open() { isOpen = true; waiters.forEach { $0.resume() }; waiters = [] }
-        func wait() async { if isOpen { return }; await withCheckedContinuation { waiters.append($0) } }
     }
 
     /// Polls up to 10 s on the main actor's own turns; true as soon as `condition` holds.

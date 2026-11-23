@@ -218,20 +218,13 @@ struct TopicPublishTests {
         #expect(await eventually { !app.isTopicTurn(subs[0]) })
     }
 
-    private actor Gate {
-        private var waiters: [CheckedContinuation<Void, Never>] = []
-        private var open = false
-        func wait() async { if open { return }; await withCheckedContinuation { waiters.append($0) } }
-        func release() { open = true; let w = waiters; waiters = []; w.forEach { $0.resume() } }
-    }
-
     @Test("an idle subscriber's woken turn is a topic turn while it runs, and a plain peer message's is not")
     func idleClaimMarksTheTurn() async {
         for topic in [true, false] {
             let app = AppState(); app.conversations.removeAll()
             let sender = UUID(), target = UUID()
             app.createNewConversation(id: sender); app.createNewConversation(id: target)
-            let gate = Gate()
+            let gate = TestGate()
             let client = ScriptedStreamClient([[.block { await gate.wait() }, .event(.textDelta("done")), .event(.done(finishReason: nil))]])
             let engine = IrisEngine(state: app, tier: .medium, client: client, streamResponses: false, protectionEnabled: false)
             var envelope = PeerEnvelope(msgId: "aaaa0001", contextId: "c", depth: 1, expectsReply: false, replyTo: nil)
@@ -239,7 +232,7 @@ struct TopicPublishTests {
             let outcome = await engine.deliverPeerMessage("hi", from: sender, senderName: "p", to: target, envelope: envelope)
             #expect(outcome == .delivered)
             #expect(app.isTopicTurn(target) == topic, topic ? "the woken turn may not publish" : "a direct peer message does not mark it")
-            await gate.release()
+            gate.open()
             #expect(await eventually { !app.isTopicTurn(target) && !app.hasTurnInFlight(for: target) })
         }
     }

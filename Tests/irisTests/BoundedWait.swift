@@ -143,3 +143,157 @@ func polled(within seconds: Double, _ condition: @escaping @Sendable () -> Bool)
         return true
     }
 }
+
+/// Thrown by `TestGate.waitOrThrow` when the gate's deadline passed first. The issue is already recorded.
+struct TestGateDeadline: Error, CustomStringConvertible {
+    let seconds: Double
+    var description: String { "the gate was not released within \(seconds)s" }
+}
+
+/// A gate a test parks its stubs on and releases itself (#1343). A hand-rolled gate parks a bare
+/// continuation, and most are awaited inside a turn the engine started (a `ScriptedStreamClient`
+/// `.block`, a stub's method), which the test's cancellation never reaches: a test that fails before
+/// its release left the turn parked for good (#428). A wait here ends on whichever comes first: a
+/// release, its own task's cancellation, or the gate's deadline. A deadline hit is a failing test,
+/// never a pass: it is reported in the waiter's own task when the wait resumes, at the caller's
+/// source location, because Swift Testing finds the current test through the task (a report from
+/// the timer's queue would belong to no test). A waiter in a detached task has no current test, and
+/// its report fails the run instead. The deadline is uptime (`DispatchTime`), so the Mac's sleep
+/// does not count, and it never waits on the pool or the main actor (#605, #634).
+final class TestGate: @unchecked Sendable {
+    private enum Outcome { case released, cancelled, deadline }
+
+    let deadline: Double
+    private let onTimeout: @Sendable (String, SourceLocation) -> Void
+    private let lock = NSLock()
+    private var opened = false
+    private var banked = 0
+    private var arrived = 0
+    private var nextID: UInt64 = 0
+    private var parked: [(id: UInt64, continuation: CheckedContinuation<Outcome, Never>)] = []
+    private var arrivalWaiters: [UInt64: (count: Int, continuation: CheckedContinuation<Void, Never>)] = [:]
+
+    /// `onTimeout` reports a missed deadline; a test of the gate itself injects one, since the default
+    /// records an issue and a known issue fails CI's summary gate (#1348).
+    init(deadline seconds: Double = 30, onTimeout: (@Sendable (String, SourceLocation) -> Void)? = nil) {
+        deadline = seconds
+        self.onTimeout = onTimeout ?? { message, location in Issue.record(Comment(rawValue: message), sourceLocation: location) }
+    }
+
+    /// Parks until a release, this task's cancellation or the deadline. Never throws, so a `.block`
+    /// step or a non-throwing stub keeps its signature; a deadline hit is reported all the same.
+    func wait(sourceLocation: SourceLocation = #_sourceLocation) async {
+        if await park() == .deadline { onTimeout(TestGateDeadline(seconds: deadline).description, sourceLocation) }
+    }
+
+    /// `wait()` for a throwing stub: a cancellation throws `CancellationError`, a deadline `TestGateDeadline`.
+    func waitOrThrow(sourceLocation: SourceLocation = #_sourceLocation) async throws {
+        switch await park() {
+        case .released: return
+        case .cancelled: throw CancellationError()
+        case .deadline:
+            let error = TestGateDeadline(seconds: deadline)
+            onTimeout(error.description, sourceLocation)
+            throw error
+        }
+    }
+
+    /// Latches: every parked and later wait passes.
+    func open() {
+        let all = lock.withLock { () -> [CheckedContinuation<Outcome, Never>] in
+            opened = true
+            defer { parked = [] }
+            return parked.map(\.continuation)
+        }
+        all.forEach { $0.resume(returning: .released) }
+    }
+
+    /// Frees the oldest parked waiters, one per permit; a permit with nobody parked is kept for the next arrival.
+    func release(_ permits: Int = 1) {
+        let freed = lock.withLock { () -> [CheckedContinuation<Outcome, Never>] in
+            let n = min(permits, parked.count)
+            banked += permits - n
+            defer { parked.removeFirst(n) }
+            return parked.prefix(n).map(\.continuation)
+        }
+        freed.forEach { $0.resume(returning: .released) }
+    }
+
+    /// Frees whoever is parked now, without latching: a later wait parks again.
+    func releaseWaiting() {
+        let all = lock.withLock { () -> [CheckedContinuation<Outcome, Never>] in
+            defer { parked = [] }
+            return parked.map(\.continuation)
+        }
+        all.forEach { $0.resume(returning: .released) }
+    }
+
+    /// How many waits are parked now.
+    var waiting: Int { lock.withLock { parked.count } }
+
+    /// How many waits have begun, whether they parked or passed.
+    var arrivals: Int { lock.withLock { arrived } }
+
+    /// Returns once `count` waits have begun; at `seconds` it reports a timeout and throws `BoundedWaitTimeout`.
+    func waitForArrivals(_ count: Int, within seconds: Double = 30,
+                         sourceLocation: SourceLocation = #_sourceLocation) async throws {
+        let reached: Bool? = await firstOf(seconds) { [self] in await arrivalsReached(count); return true }
+        guard reached != nil else {
+            let error = BoundedWaitTimeout(seconds: seconds)
+            onTimeout("\(count) arrivals at the gate did not come within \(seconds)s (\(arrivals) did)", sourceLocation)
+            throw error
+        }
+    }
+
+    private func arrivalsReached(_ count: Int) async {
+        let id = lock.withLock { nextID += 1; return nextID }
+        await withTaskCancellationHandler {
+            await withCheckedContinuation { (c: CheckedContinuation<Void, Never>) in
+                let now = lock.withLock { () -> Bool in
+                    if arrived >= count || Task.isCancelled { return true }
+                    arrivalWaiters[id] = (count, c)
+                    return false
+                }
+                if now { c.resume() }
+            }
+        } onCancel: {
+            lock.withLock { arrivalWaiters.removeValue(forKey: id) }?.continuation.resume()
+        }
+    }
+
+    /// One wait, resumed exactly once by whichever claimant takes it out of `parked` first: a release, the
+    /// cancel handler or the deadline. A cancel that lands before the park is seen by `Task.isCancelled`.
+    private func park() async -> Outcome {
+        let id = lock.withLock { nextID += 1; return nextID }
+        return await withTaskCancellationHandler {
+            await withCheckedContinuation { (c: CheckedContinuation<Outcome, Never>) in
+                let (now, arrivedWaiters) = lock.withLock { () -> (Outcome?, [CheckedContinuation<Void, Never>]) in
+                    arrived += 1
+                    let reached = arrivalWaiters.filter { $0.value.count <= arrived }
+                    reached.keys.forEach { arrivalWaiters.removeValue(forKey: $0) }
+                    let waiters = reached.values.map(\.continuation)
+                    if opened { return (.released, waiters) }
+                    if banked > 0 { banked -= 1; return (.released, waiters) }
+                    if Task.isCancelled { return (.cancelled, waiters) }
+                    parked.append((id, c))
+                    return (nil, waiters)
+                }
+                arrivedWaiters.forEach { $0.resume() }
+                if let now {
+                    c.resume(returning: now)
+                } else {
+                    DispatchQueue.global().asyncAfter(deadline: .now() + deadline) { [self] in take(id)?.resume(returning: .deadline) }
+                }
+            }
+        } onCancel: {
+            take(id)?.resume(returning: .cancelled)
+        }
+    }
+
+    private func take(_ id: UInt64) -> CheckedContinuation<Outcome, Never>? {
+        lock.withLock {
+            guard let i = parked.firstIndex(where: { $0.id == id }) else { return nil }
+            return parked.remove(at: i).continuation
+        }
+    }
+}

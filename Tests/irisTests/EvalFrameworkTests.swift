@@ -1396,7 +1396,7 @@ struct EvalCloudTests {
         defer { try? FileManager.default.removeItem(at: root) }
         let dataset = root.appendingPathComponent("ds")
         try writeDataset([sample("b1", "code", text: "let x = 1")], to: dataset)
-        let due = CanaryHedgeTests.Latch(), secondOut = CanaryHedgeTests.Latch()
+        let due = TestGate(), secondOut = TestGate()
         let calls = HedgeCallCounter()
         let answer: @Sendable () -> GeminiResponse = {
             let part = Part(text: "SAFE", functionCall: nil, functionResponse: nil, thought_signature: nil, thoughtSignature: nil)
@@ -1407,9 +1407,9 @@ struct EvalCloudTests {
         engine.role = CloudAuxiliaryEngine.canaryRole
         engine.model = { "gemini-3.8-flash" }
         engine.hedgeAfter = 20
-        engine.hedgeSleep = { _ in try await due.wait() }
+        engine.hedgeSleep = { _ in try await due.waitOrThrow() }
         engine.send = { _, _ in
-            if calls.next() == 1 { try await secondOut.wait() } else { secondOut.open() }
+            if calls.next() == 1 { try await secondOut.waitOrThrow() } else { secondOut.open() }
             return answer()
         }
         due.open()
@@ -1433,7 +1433,7 @@ struct EvalCloudTests {
         defer { try? FileManager.default.removeItem(at: root) }
         let dataset = root.appendingPathComponent("ds")
         try writeDataset([sample("b1", "code", text: "let x = 1")], to: dataset)
-        let loserParked = CanaryHedgeTests.Latch()
+        let loserParked = TestGate()
         var engine = CloudAuxiliaryEngine()
         engine.role = CloudAuxiliaryEngine.canaryRole
         engine.model = { "gemini-3.8-flash" }
@@ -1444,7 +1444,7 @@ struct EvalCloudTests {
             if calls.next() == 1 {
                 // The primary: parks until cancelled by the hedge's win, like CanaryHedgeTests'
                 // loserIsCancelled, so it never reports usage.
-                do { try await loserParked.wait() } catch { throw CancellationError() }
+                do { try await loserParked.waitOrThrow() } catch { throw CancellationError() }
             }
             let part = Part(text: "SAFE", functionCall: nil, functionResponse: nil, thought_signature: nil, thoughtSignature: nil)
             let usage = UsageMetadata(promptTokenCount: 100, candidatesTokenCount: 2, totalTokenCount: 102)
