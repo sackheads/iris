@@ -1,64 +1,194 @@
 import Testing
 import Foundation
 
-/// #1162 / #428: a test never awaits an unstructured task bare. `await task.value` ignores the waiter's
-/// cancellation, so `.timeLimit` cannot end a test parked on it, and one lost wakeup hangs the whole
-/// serial run at zero CPU. Await it through `value(of:within:)` (`BoundedWait.swift`). This scan reads
-/// the test sources for `await <name>.value` and fails on any that is not on the list below, each of
-/// which is named with why it is safe. Not `@MainActor`: a scan of every test file is heavy synchronous
-/// work (#642).
-@Suite("Tests never await an unstructured task's value bare (#1162)", .timeLimit(.minutes(1)))
+/// #1162 / #428 / #1340: a test never waits where `.timeLimit` cannot reach it. Three shapes do:
+/// - `await task.value` (or `.result`) on an unstructured task ignores the waiter's cancellation: `await t.value`,
+///   `await self.t.value`, `await tasks[0].value`, `await t!.value`, `await Task.detached { … }.value`, or a
+///   `}.value` on the line after the closure. Await it through `value(of:within:)` (`BoundedWait.swift`).
+/// - a bare `withChecked`/`withUnsafe` (`Throwing`) `Continuation` waits for whatever resumes it, and nothing else.
+/// - a blocking `.wait()` with no timeout (a semaphore, a group, a condition) parks a thread for good.
+/// This scan reads every test source, subfolders included (`MCPProvider/`), and fails on any such line that
+/// is not on the list below. The list is keyed by file and the line itself, with how many such lines that
+/// file may hold, so a new wait is caught even in a listed file, and a copy of a listed line is too. A line
+/// is allowed because it is bounded (named how), or because it is a gate the test releases itself, which
+/// hangs only a test that already failed (#1343 tracks a cancel-aware gate for those). Not `@MainActor`: a
+/// scan of every test file is heavy synchronous work (#642).
+@Suite("Tests never wait where .timeLimit can't end them (#1162, #1340)", .timeLimit(.minutes(1)))
 struct NoBareTaskValueAwaitScanTests {
-    /// `file: receiver` pairs that are not an unbounded wait on a task.
-    private static let allowed: Set<String> = [
-        // The wait is inside `finished(_:within:)`, raced against a detached timer.
-        "JobRetryTests.swift: task",
-        // A watcher task: the test polls its result with a bounded yield loop and never awaits it.
-        "SessionStatusTests.swift: ask",
-        // Inside `bounded(_:_:)`, which returns at its deadline whatever the task does.
-        "ConversationRotationTests.swift: task",
-        // The bounded helper itself: its wait is raced against the deadline.
-        "BoundedWait.swift: task",
-        // An actor property, not a task.
-        "LLMRetryTests.swift: counter",
-        // Opt-in (`IRIS_REAL_VM`), skipped by default and in CI; its driver is a child process wrapper.
-        "ExitNowRealVMTests.swift: driver",
-    ]
+    /// `"<path under irisTests>: <trimmed line>"`: how many such lines the file may hold, and why each is safe.
+    static let allowed: [String: (count: Int, why: String)] = [
+        #"BlockingSpawnTests.swift: await withCheckedContinuation { (c: CheckedContinuation<Void, Never>) in"#: (1, #"resumed after done.wait(), which BlockingSpawn.detached(timeoutSeconds: 10) signals"#),
+        #"BlockingSpawnTests.swift: DispatchQueue(label: "iris.test.wait").async { done.wait(); c.resume() }"#: (1, #"done is signalled by BlockingSpawn.detached(timeoutSeconds: 10) completion"#),
+        #"BoundedWait.swift: let outcome = await firstOf(seconds) { await task.value }"#: (1, #"inside firstOf's race"#),
+        #"BoundedWait.swift: let outcome = await firstOf(seconds) { await task.result }"#: (1, #"inside firstOf's race (the throwing form)"#),
+        #"BoundedWait.swift: await withCheckedContinuation { first.install($0) }"#: (1, #"firstOf: onCancel and the SuspendingClock timer both resolve"#),
+        #"BoundedWait.swift: await withCheckedContinuation { continuation in"#: (1, #"offPool: resumed after `blocking`, which its contract requires be bounded"#),
+        #"CLISignalTests.swift: static func park(_ gate: DispatchSemaphore) { gate.wait() }"#: (1, #"never signalled by design; used only inside a `processExitsWith` child, which `_exit()`s"#),
+        #"CanaryHedgeTests.swift: try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, any Error>) in"#: (1, #"Latch.wait: withTaskCancellationHandler onCancel resumes throwing"#),
+        #"CatchUpTests.swift: await withCheckedContinuation { openWaiters.append($0) }"#: (1, #"test-released gate, #1343: Gate.arriveAndWait: resumed only by open(); no deadline or cancel path"#),
+        #"CatchUpTests.swift: await withCheckedContinuation { entryWaiters.append($0) }"#: (1, #"Gate.entry() is only reached via waitForEntry's value(of:within:)"#),
+        #"ChangeTrackingTests.swift: await withCheckedContinuation { waiters.append($0) }"#: (1, #"inside withTaskCancellationHandler whose onCancel resumes (via MainActor hop)"#),
+        #"ContainerExecGroupKillTests.swift: await withCheckedContinuation { done in"#: (1, #"resumed after BlockingSpawn.run(timeoutSeconds:) on its own queue"#),
+        #"ConversationRotationTests.swift: try await bounded("rotation to finish") { await task.value }"#: (1, #"inside bounded(), raced against a timer"#),
+        #"DirectoryReadRuleTests.swift: _ = await withCheckedContinuation { (continuation: CheckedContinuation<Bool, Never>) in"#: (1, #"resumed synchronously in the same closure"#),
+        #"EventDeliveryTests.swift: await withCheckedContinuation { waiters.append($0) }"#: (1, #"test-released gate, #1343: EventGate.wait: resumed only by release(); no cancel path"#),
+        #"ExitNowRealVMTests.swift: let outcome = await driver.value"#: (1, #"drive() is bounded polling loops (600/600/300 iterations)"#),
+        #"GitHubIdentityMonitorTests.swift: await Task.detached { held.awaitStarted() }.value"#: (1, #"`awaitStarted()` is bounded by `started.wait(timeout: 20)` (#1340)"#),
+        #"GuardTestIsolationTests.swift: }.value"#: (1, #"task body is a mock-model InjectionGuard.sanitize call; no external wait (but no deadline)"#),
+        #"HeadlessModeTests.swift: sawInsideDetached = await Task.detached { HeadlessMode.isEnabled }.value"#: (1, #"detached body is a synchronous property read"#),
+        #"JobRetryTests.swift: return await withCheckedContinuation { continuation in"#: (1, #"Signal.reach: detached timer resumes with false after `seconds`"#),
+        #"JobRetryTests.swift: await withCheckedContinuation { continuation in"#: (2, #"`finished()`'s `FirstAnswer`, raced against a detached sleep timer; and the stub stream that parks until `releaseAll()`, deaf on purpose (the test waits through `finished(within:)`)"#),
+        #"JobRetryTests.swift: Task { answer.resolve(await task.value) }"#: (1, #"inside finished()'s race; the timer resolves the outer wait"#),
+        #"JobSchedulerTests.swift: await withCheckedContinuation { openWaiters.append($0) }"#: (1, #"test-released gate, #1343: Gate.arriveAndWait: resumed only by open()"#),
+        #"JobSchedulerTests.swift: await withCheckedContinuation { entryWaiters.append($0) }"#: (1, #"Gate.entry() is only reached via waitForEntry's value(of:within:)"#),
+        #"KillEscalationPoolStarvationTests.swift: gate.wait()"#: (1, #"PoolHold: `release()` signals on every exit of its time-bounded body"#),
+        #"LLMRetryTests.swift: #expect(await counter.value == 1)"#: (1, #"actor Int property, not a Task"#),
+        #"LedgerAttentionTests.swift: await withCheckedContinuation { held = $0; isRunning = true }"#: (1, #"test-released gate, #1343: HeldCall.run parks until release() (test releases; defer Task release)"#),
+        #"LedgerAttentionTests.swift: if reads == 1 { await withCheckedContinuation { held = $0; firstIsHeld = true } }"#: (1, #"test-released gate, #1343: CountedRead first read parks until release() (defer Task release)"#),
+        #"MessageStreamerTests.swift: func wait() async { await withCheckedContinuation { waiters.append($0) } }"#: (1, #"test-released gate, #1343: Gate.wait: resumed only by release()"#),
+        #"ModelLoadStatusTests.swift: await withCheckedContinuation { c in"#: (1, #"test-released gate, #1343: Gate.wait: resumed only by release()"#),
+        #"NotificationInstallTests.swift: if holdRequest { await withCheckedContinuation { heldRequest = $0 } }"#: (1, #"test-released gate, #1343: FakeCenter holdRequest: resumed only when test resumes heldRequest"#),
+        #"NotificationInstallTests.swift: if holdAdd { await withCheckedContinuation { heldAdd = $0 } }"#: (1, #"test-released gate, #1343: FakeCenter holdAdd: resumed only when test resumes heldAdd"#),
+        #"NotificationInstallTests.swift: if calls.holdRequest { await withCheckedContinuation { calls.held = $0 } }"#: (1, #"test-released gate, #1343: holdRequest: resumed only when test resumes calls.held"#),
+        #"PeerDeliveryTests.swift: await withCheckedContinuation { waiters.append($0) }"#: (1, #"test-released gate, #1343: PeerDeliveryGate.wait: resumed only by release()"#),
+        #"RawHTMLSanitizerTests.swift: let task = Task<Void, Never> { await withCheckedContinuation { self.continuation = $0 } }"#: (1, #"#1340 part 2 (dev-1's PR): inside a Task awaited with value(of:within: 10)"#),
+        #"RunDelegateCloseTests.swift: await withCheckedContinuation { (c: CheckedContinuation<Void, Never>) in"#: (1, #"test-released gate, #1343: deliberately deaf: onCancel only counts, does not resume; released by test"#),
+        #"RunJobURLTests.swift: await withCheckedContinuation { parked[n] = $0 }"#: (1, #"test-released gate, #1343: Turnstile.arrive parks until release()"#),
+        #"RunJobURLTests.swift: await withCheckedContinuation { arrivalWaiters.append((n, $0)) }"#: (1, #"arrivals() only reached via waitForArrivals' value(of:)"#),
+        #"SandboxTimeoutTests.swift: await withCheckedContinuation { (done: CheckedContinuation<Void, Never>) in"#: (1, #"resumed after CLIProcessRunner.enforce (fixed-grace synchronous ladder) on a dispatch thread"#),
+        #"SandboxTimeoutTests.swift: await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in"#: (2, #"`untilParked`, reached only through `waitUntilParked`'s `value(of:within: 20)` (#1340); and the barrier create, a test-released gate, #1343"#),
+        #"SecretsUpdateTests.swift: group.wait()"#: (1, #"group members are finite loops of local writes; no external event"#),
+        #"SessionStatusTests.swift: let watcher = Task { @MainActor in resumed.value = await ask.value }"#: (1, #"the watcher is awaited through `value(of:)`, and the deny resumes `ask`"#),
+        #"SteerInboxTests.swift: await withCheckedContinuation { waiters.append($0) }"#: (1, #"test-released gate, #1343: Gate.wait: resumed only by release()"#),
+        #"StoreLockTests.swift: let reclaimed = await withCheckedContinuation { (c: CheckedContinuation<StoreLock.Claim?, Never>) in"#: (1, #"resumed unconditionally after done.wait(timeout: 5) on a dispatch thread"#),
+        #"SyncCoalescerTests.swift: if hold { await withCheckedContinuation { parked.append($0) } }"#: (1, #"test-released gate, #1343: Probe.run parks until releaseOne/releaseAll; no deadline or cancel path"#),
+        #"ThinkingLineEngineTests.swift: func wait() async { if isOpen { return }; await withCheckedContinuation { waiters.append($0) } }"#: (1, #"test-released gate, #1343: AsyncGate.wait: resumed only by open(); task cancel on stream termination does not reach it"#),
+        #"TimeoutTests.swift: let result = await caller.result"#: (4, #"caller pre-cancelled withTimeout; body never runs"#),
+        #"TimeoutTests.swift: await withCheckedContinuation { (c: CheckedContinuation<Void, Never>) in"#: (1, #"resumed by DispatchQueue.asyncAfter(seconds) timer"#),
+        #"TopicTests.swift: func wait() async { if open { return }; await withCheckedContinuation { waiters.append($0) } }"#: (1, #"test-released gate, #1343: Gate.wait: resumed only by release()"#),
+        #"ViewerConfigurationTests.swift: await withCheckedContinuation { continuation = $0 }"#: (1, #"#1340 part 2 (dev-1's PR): resumed only by a WKNavigationDelegate callback"#),
+        #"ViewerContentRulesTests.swift: try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<WKContentRuleList, Error>) in"#: (1, #"#1340 part 2 (dev-1's PR): resumed only by WebKit compileContentRuleList completion"#),
+        #"ViewerContentRulesTests.swift: return await withCheckedContinuation { continuation = $0 }"#: (1, #"#1340 part 2 (dev-1's PR): resumed only by a WKNavigationDelegate callback"#),
+        #"ViewerDocumentInitiatedNavigationTests.swift: await withCheckedContinuation { continuation = $0 }"#: (1, #"#1340 part 2 (dev-1's PR): resumed only by a WKNavigationDelegate callback"#),
+        #"ViewerZeroConnectionsTests.swift: await withCheckedContinuation { continuation = $0 }"#: (1, #"#1340 part 2 (dev-1's PR): resumed only by a WKNavigationDelegate callback"#),
+        #"ViewerZeroLookupTests.swift: let task = Task<Void, Never> { await withCheckedContinuation { self.continuation = $0 } }"#: (2, #"#1340 part 2 (dev-1's PR): inside a Task awaited with value(of:within: 10)"#),
+        #"WatchCoordinatorTests.swift: await withCheckedContinuation { openWaiters.append($0) }"#: (1, #"test-released gate, #1343: Gate.arriveAndWait: resumed only by open()"#),
+        #"MCPProvider/GuestSessionDriverTests.swift: await withCheckedContinuation { waiters.append($0) }"#: (1, #"#1340 part 2 (dev-1's PR): Latch.wait resumed only by open()"#),
+        #"MCPProvider/IrisMCPProviderServerTests.swift: try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in"#: (2, #"#1340 part 2 (dev-1's PR): resumed only on NWConnection .ready/.failed state"#),
+        #"MCPProvider/IrisMCPProviderServerTests.swift: await withCheckedContinuation { (continuation: CheckedContinuation<String?, Never>) in"#: (1, #"#1340 part 2 (dev-1's PR): OneShotResumer raced against asyncAfter(timeout)"#),
+        #"MCPProvider/LoopbackHTTPListenerTests.swift: let connected = await withCheckedContinuation { (continuation: CheckedContinuation<Bool, Never>) in"#: (1, #"#1340 part 2 (dev-1's PR): OneShotResumer raced against asyncAfter(3)"#),
+        #"MCPProvider/LoopbackHTTPListenerTests.swift: let outcome = await withCheckedContinuation { (continuation: CheckedContinuation<Bool, Never>) in"#: (1, #"#1340 part 2 (dev-1's PR): OneShotResumer raced against asyncAfter(3)"#),
+        #"MCPProvider/LoopbackHTTPListenerTests.swift: try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in"#: (2, #"#1340 part 2 (dev-1's PR): resumed only on NWConnection .ready/.failed state"#),
+        #"MCPProvider/LoopbackHTTPListenerTests.swift: await withCheckedContinuation { (continuation: CheckedContinuation<String?, Never>) in"#: (1, #"#1340 part 2 (dev-1's PR): OneShotResumer raced against asyncAfter(timeout)"#),
+        #"MCPProvider/LoopbackHTTPListenerTests.swift: await withCheckedContinuation { (continuation: CheckedContinuation<Bool, Never>) in"#: (1, #"#1340 part 2 (dev-1's PR): OneShotResumer raced against asyncAfter(timeout)"#),    ]
 
-    static func offences(in text: String, file: String) -> [String] {
-        let pattern = try! NSRegularExpression(pattern: #"await\s+([A-Za-z_][A-Za-z0-9_]*)\.value\b(?!\()"#)
+    private static let continuation = try! NSRegularExpression(pattern: #"\bwith(Checked|Unsafe)(Throwing)?Continuation\b"#)
+    private static let blockingWait = try! NSRegularExpression(pattern: #"\.wait\(\s*\)"#)
+    /// `await` applied straight to a task's `.value`/`.result`: a plain chain (`t`, `self.t`, `t!`, `ts[0]`) or a
+    /// `Task { … }` / `Task.detached { … }` closure. Not `.value(…)`, a call, and not a `.value` that is only an
+    /// argument inside the awaited call (`await waitFor { ready.value != nil }`).
+    private static let taskValue = try! NSRegularExpression(
+        pattern: #"await\s+(?:try[?!]?\s+)?(?:[A-Za-z_][\w.!\[\]]*|Task(?:\.detached)?\s*(?:<[^>]*>)?\s*(?:\([^)]*\))?\s*\{.*\})\s*\.(value|result)\b(?!\s*\()"#)
+    /// A closure's `.value` on the line after it: `}.value`, or a line that is only `.value`.
+    private static let leadingValue = try! NSRegularExpression(pattern: #"^\}?\s*\.(value|result)\b(?!\s*\()"#)
+
+    /// What the line does that `.timeLimit` can't end, or nil.
+    static func kinds(of line: String) -> [String] {
+        let trimmed = line.trimmingCharacters(in: .whitespaces)
+        if trimmed.hasPrefix("//") { return [] }
+        func hit(_ r: NSRegularExpression, _ s: String) -> NSTextCheckingResult? {
+            r.firstMatch(in: s, range: NSRange(s.startIndex..., in: s))
+        }
         var out: [String] = []
-        for (n, line) in text.split(separator: "\n", omittingEmptySubsequences: false).enumerated() {
+        if hit(continuation, line) != nil { out.append("bare continuation") }
+        // An `await gate.wait()` is the gate's own async wait, caught at its continuation; only a blocking one counts.
+        let range = NSRange(line.startIndex..., in: line)
+        if blockingWait.matches(in: line, range: range).contains(where: { m in
+            guard let r = Range(m.range, in: line) else { return false }
+            return !line[..<r.lowerBound].contains("await")
+        }) { out.append("blocking .wait() with no timeout") }
+        if hit(leadingValue, trimmed) != nil || hit(taskValue, line) != nil { out.append("bare await of a task's value") }
+        return out
+    }
+
+    /// Every flagged line in `text`, as `(key, report)`; `file` is the path under `irisTests`.
+    static func flagged(in text: String, file: String) -> [(key: String, report: String)] {
+        text.split(separator: "\n", omittingEmptySubsequences: false).enumerated().compactMap { n, raw in
+            let line = String(raw)
+            let kinds = kinds(of: line)
+            guard !kinds.isEmpty else { return nil }
             let trimmed = line.trimmingCharacters(in: .whitespaces)
-            if trimmed.hasPrefix("//") { continue }
-            let range = NSRange(line.startIndex..., in: line)
-            for match in pattern.matches(in: String(line), range: range) {
-                guard let r = Range(match.range(at: 1), in: line) else { continue }
-                let receiver = String(line[r])
-                if !allowed.contains("\(file): \(receiver)") { out.append("\(file):\(n + 1): await \(receiver).value") }
-            }
+            return ("\(file): \(trimmed)", "\(file):\(n + 1): \(kinds.joined(separator: ", ")): \(trimmed)")
+        }
+    }
+
+    /// The offences across `files` (path under `irisTests` → contents): any line not on `allowed`, and any
+    /// listed line that occurs more often than its count.
+    static func offences(_ files: [(path: String, text: String)], allowed: [String: (count: Int, why: String)] = allowed) -> [String] {
+        var seen: [String: [String]] = [:]
+        for file in files {
+            for f in flagged(in: file.text, file: file.path) { seen[f.key, default: []].append(f.report) }
+        }
+        return seen.keys.sorted().flatMap { key -> [String] in
+            let reports = seen[key]!
+            guard let entry = allowed[key] else { return reports }
+            return reports.count > entry.count ? ["\(reports.count) such lines, \(entry.count) allowed: \(reports[0])"] : []
+        }
+    }
+
+    static let dir = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+
+    static func testSources() throws -> [(path: String, text: String)] {
+        let base = dir.standardizedFileURL.path + "/"
+        let walk = try #require(FileManager.default.enumerator(at: dir, includingPropertiesForKeys: nil))
+        var out: [(path: String, text: String)] = []
+        for case let url as URL in walk where url.pathExtension == "swift" && url.lastPathComponent != "NoBareTaskValueAwaitScanTests.swift" {
+            let path = url.standardizedFileURL.path
+            out.append((path.hasPrefix(base) ? String(path.dropFirst(base.count)) : url.lastPathComponent, try String(contentsOf: url, encoding: .utf8)))
         }
         return out
     }
 
-    @Test("no test file awaits `<task>.value` bare outside the listed, bounded cases")
-    func noBareAwait() throws {
-        let dir = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
-        let files = try FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil)
-            .filter { $0.pathExtension == "swift" && $0.lastPathComponent != "NoBareTaskValueAwaitScanTests.swift" }
+    @Test("no test waits where .timeLimit can't end it, outside the listed lines")
+    func noUnboundedWait() throws {
+        let files = try Self.testSources()
         #expect(files.count > 100, "the scan found the test sources")
-        var found: [String] = []
-        for file in files {
-            found += Self.offences(in: try String(contentsOf: file, encoding: .utf8), file: file.lastPathComponent)
-        }
-        #expect(found.isEmpty, "bare `await task.value` in a test (use `value(of:within:)`, #428): \(found)")
+        #expect(files.contains { $0.path.hasPrefix("MCPProvider/") }, "the scan reached a subfolder")
+        let found = Self.offences(files)
+        #expect(found.isEmpty, "a wait .timeLimit can't end (bound it, e.g. `value(of:within:)`, or list it with why, #428): \(found)")
     }
 
-    @Test("the scan sees a bare await, and ignores a bounded one and a comment")
+    @Test("every listed line still exists, so the list can't quietly grow stale")
+    func noStaleEntries() throws {
+        var seen: [String: Int] = [:]
+        for file in try Self.testSources() {
+            for f in Self.flagged(in: file.text, file: file.path) { seen[f.key, default: 0] += 1 }
+        }
+        let stale = Self.allowed.filter { seen[$0.key] != $0.value.count }.map { "\($0.key) (listed \($0.value.count), found \(seen[$0.key] ?? 0))" }
+        #expect(stale.isEmpty, "allowlist rows whose line count no longer matches: \(stale.sorted())")
+    }
+
+    @Test("the scan sees each shape, and ignores a bounded wait, an argument's .value and a comment")
     func scanSelfCheck() {
-        #expect(Self.offences(in: "        await fire.value\n", file: "X.swift") == ["X.swift:1: await fire.value"])
-        #expect(Self.offences(in: "        #expect(await child.value.status == .x)\n", file: "X.swift").count == 1)
-        #expect(Self.offences(in: "        try await value(of: fire)\n", file: "X.swift").isEmpty)
-        #expect(Self.offences(in: "        // await fire.value is the thing to avoid\n", file: "X.swift").isEmpty)
+        for line in ["await fire.value", "#expect(await child.value.status == .x)", "await self.t.value", "await tasks[0].value",
+                     "await t!.value", "x = await Task.detached { 1 }.value", "}.value", "let r = await caller.result",
+                     "await withCheckedContinuation { c in", "try await withCheckedThrowingContinuation { c in",
+                     "await withUnsafeContinuation { c in", "sema.wait()", "group.wait( )"] {
+            #expect(!Self.kinds(of: line).isEmpty, "\(line)")
+        }
+        for line in ["try await value(of: fire)", "// await fire.value is the thing to avoid", "await gate.wait()",
+                     "_ = sema.wait(timeout: .now() + 5)", "#expect(await waitFor { ready.value != nil })",
+                     "rec.value(forHTTPHeaderField: \"x\")", "await dispatch(call).result", "x.result.contains(\"y\")"] {
+            #expect(Self.kinds(of: line).isEmpty, "\(line)")
+        }
+    }
+
+    @Test("a listed line is counted: one more copy of it fails, and so does an unlisted one")
+    func countsAndKeys() {
+        let allowed: [String: (count: Int, why: String)] = ["A.swift: sema.wait()": (1, "x")]
+        #expect(Self.offences([("A.swift", "sema.wait()\n")], allowed: allowed).isEmpty)
+        #expect(Self.offences([("A.swift", "sema.wait()\nsema.wait()\n")], allowed: allowed).count == 1)
+        #expect(Self.offences([("B.swift", "sema.wait()\n")], allowed: allowed).count == 1, "keyed by file too")
+        #expect(Self.offences([("A.swift", "other.wait()\n")], allowed: allowed).count == 1, "and by the line")
     }
 }
