@@ -85,6 +85,14 @@ struct LoginPathCaptureTests {
         #expect(BinaryResolver.pathEntries(row.0) == row.1, "\(row.0)")
     }
 
+    /// dev-2's review: a relative entry must not cost #616's refusal of a sandbox write mount over a folder
+    /// a login-PATH entry is in.
+    @Test("a relative entry beside it still leaves a login-PATH folder refused as a write mount")
+    func writeMountRefusalSurvivesRelativeEntry() {
+        let entries = BinaryResolver.pathEntries("/Users/x/.cargo/bin:./node_modules/.bin:/usr/bin")
+        #expect(JobGrant.loginPathEntry(touching: "/Users/x/.cargo", loginPath: entries) == "/Users/x/.cargo/bin")
+    }
+
     @Test("a path with a space in it is kept")
     func spaceInPathKept() {
         #expect(BinaryResolver.pathEntries("/Applications/My App/bin:/usr/bin") == ["/Applications/My App/bin", "/usr/bin"])
