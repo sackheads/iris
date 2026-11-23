@@ -187,7 +187,8 @@ and the dataset's sha256 in a header row. `--joins` adds each benign category jo
 32 KB; `--latency` times a cold call, five warm and three rounds of three at once; `--baseline`
 re-judges, `--flip-repeats` times (3), every text whose first verdict differs from that arm's.
 `--think off` asks a thinking Ollama model not to think. A cloud arm makes paid calls. It needs
-`--allow-paid`, prints its estimate before the first call, and never passes `--max-dollars` (5):
+`--allow-paid` and a model the price list has a row for (one without is refused before any call, as
+`iris --eval` refuses it, #1346), prints its estimate before the first call, and never passes `--max-dollars` (5):
 each call first reserves the most it could cost in the spend ledger, and settles what it did cost
 after. `--spend-ledger FILE` makes one cap for every arm naming that file, even running at once:
 the file is append-only (a line per reserve and per settled call, with its tokens and dollars) and
