@@ -157,7 +157,10 @@ wolf (#301, #303).
 cancellation, so `.timeLimit` cannot end a test parked on it and one lost wakeup hangs the whole
 run (#428). Await it through `value(of:within:)` (`Tests/irisTests/BoundedWait.swift`), which fails
 the test at its bound instead, and give a suite that starts tasks or processes
-`.timeLimit(.minutes(1))` (#435).
+`.timeLimit(.minutes(1))` (#435). A stub the test holds and releases by hand parks on a `TestGate`
+(same file), not a hand-rolled continuation: it usually waits inside a turn the engine started,
+which the test's cancellation never reaches, so the gate ends the wait on its release, its task's
+cancellation or its own deadline, and a missed deadline fails the test that waited (#1343).
 
 **A test's real-time bound never waits on the main actor.** For the first seconds of a parallel
 run the main actor is seconds behind, while dozens of `@MainActor` suites set up their stores at
