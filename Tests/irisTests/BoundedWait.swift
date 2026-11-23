@@ -90,7 +90,8 @@ private final class FirstOf<T: Sendable>: @unchecked Sendable {
 /// A one-shot answer that main-actor callbacks (a WebKit navigation delegate) settle and a test awaits with a
 /// bound (#1340), instead of a bare `withCheckedContinuation`, which `.timeLimit` cannot end (#428). A settle
 /// that lands before the wait, or before the continuation exists, is kept: the continuation is installed and the
-/// answer re-checked in one main-actor step. A wait that times out records an issue through `value(of:within:)`
+/// answer re-checked in one main-actor step. A wait that times out records an issue (unless `recordsTimeout` is
+/// false, for a test of the bound itself: a known issue turns the run's summary line into one CI's gate rejects)
 /// and leaves nothing parked.
 @MainActor
 final class MainActorSignal<Value: Sendable> {
@@ -104,14 +105,18 @@ final class MainActorSignal<Value: Sendable> {
         continuation = nil
     }
 
-    func wait(within seconds: Double = 10, sourceLocation: SourceLocation = #_sourceLocation) async -> Value? {
+    func wait(within seconds: Double = 10, recordsTimeout: Bool = true,
+              sourceLocation: SourceLocation = #_sourceLocation) async -> Value? {
         if let answer { return answer }
         let task = Task { @MainActor [self] () -> Value? in
             await withCheckedContinuation { c in
                 if let answer { c.resume(returning: answer) } else { continuation = c }
             }
         }
-        let result = try? await value(of: task, within: seconds, sourceLocation: sourceLocation)
+        let result = await firstOf(seconds) { await task.value }
+        if result == nil, recordsTimeout {
+            Issue.record("the signal was not settled within \(seconds)s", sourceLocation: sourceLocation)
+        }
         continuation?.resume(returning: nil)
         continuation = nil
         return result ?? nil
