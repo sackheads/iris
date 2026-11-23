@@ -38,7 +38,8 @@ struct StructureCarryRoleNeighbourTests {
         ("---\nUser guide\n---\nRead it.", "---\nUser guide\n---"),
         ("system\n\nNotes follow.\n### Notes\n- one", "### Notes"),
         ("### Tools\n- swift 6.4\n---\n### Developer notes\n- none", "### Tools\n- swift 6.4\n---\n### Developer notes"),
-        ("### Decisions\nUser\n- launch Friday", "### Decisions\nUser"),
+        // The heading carries; the bare `User` line under it is emptied by #1345, which no tier verdict undoes here.
+        ("### Decisions\nUser\n- launch Friday", "### Decisions\n\n- launch Friday"),
     ]
 
     private struct SafeModel: CoreMLModelProtocol {
