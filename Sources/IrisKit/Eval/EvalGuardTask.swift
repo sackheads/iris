@@ -428,7 +428,7 @@ extension EvalRunner {
         return lines.joined(separator: "\n")
     }
 
-    static func runGuard(_ run: GuardRun, repoRoot: URL, now: Date = Date(),
+    static func runGuard(_ run: GuardRun, repoRoot: URL, now: Date = Date(), models: CloudModels.Catalog? = nil,
                          canaryFor: ((EvalModelSpec, EvalGuardTask.Think, String?, TimeInterval?) async throws -> EvalGuardTask.Canary)? = nil,
                          prices: PriceTable = .snapshot,
                          loadTier2: (EvalModelSpec) async throws -> CoreMLModelProtocol = { try await EvalClassifierTask.loadModel($0) }) async throws -> URL {
@@ -448,7 +448,8 @@ extension EvalRunner {
             }
             // #1346: the model's row, its listed price, and a price still current, or the cap means nothing.
             if let provider = run.canary.cloudProvider,
-               let why = CloudModels.paidRefusal(provider: provider, id: run.canary.cloudModelId, now: now, table: prices) {
+               let why = CloudModels.paidRefusal(provider: provider, id: run.canary.cloudModelId, now: now, catalog: models ?? .init(
+                   rows: CloudModels.rows, asOf: ModelPriceSnapshot.asOf, prices: prices)) {
                 throw EvalError.usage(why)
             }
             guard let provider = run.canary.cloudProvider, let rates = EvalCost.rates(provider: provider, model: run.canary.cloudModelId, table: prices) else {
