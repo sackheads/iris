@@ -18,12 +18,17 @@ enum BinaryResolver {
     private final class LoginPathCache: @unchecked Sendable {
         private let lock = NSLock()
         private var value: [String]?
+        /// #1162: the shell runs outside the lock, so a slow login shell holds up only the callers that
+        /// need its answer, never one that already has it. Two first callers may both capture; the first
+        /// answer published is the one everyone keeps.
         func get() -> [String] {
-            lock.lock(); defer { lock.unlock() }
-            if let value { return value }
+            if let cached = lock.withLock({ value }) { return cached }
             let captured = BinaryResolver.captureLoginPath()
-            value = captured
-            return captured
+            return lock.withLock {
+                if let value { return value }
+                value = captured
+                return captured
+            }
         }
     }
 
@@ -35,18 +40,32 @@ enum BinaryResolver {
         DispatchQueue.global(qos: .utility).async { _ = cache.get() }
     }
 
-    /// Runs `shell -lc 'echo $PATH'` and returns its entries; empty on any failure or after
-    /// `timeout`. Waits on the process's termination handler, never `waitUntilExit()`, so a caller
-    /// on the main thread does not pump the run loop while it waits.
+    /// Runs the login shell to write its `PATH` to a file and returns the entries; empty on any failure,
+    /// after `timeout`, or when the file is not one line of absolute paths. Waits on the process's
+    /// termination handler, never `waitUntilExit()`, so a caller on the main thread does not pump the run
+    /// loop while it waits (#1001).
+    ///
+    /// #1162: no pipe. The shell's stdin, stdout and stderr are `/dev/null`, so whatever its login files
+    /// start inherits nothing to hold open: a pipe read used to block for good on such a process (a
+    /// daemon started "if not running"), under the cache's lock, and hung every later caller. The file is
+    /// read only after the shell exits, so a partial write is never seen; a timeout terminates the shell
+    /// itself and returns empty, and nothing else of the person's is touched.
     static func captureLoginPath(shell: String = ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh",
                                  timeout: TimeInterval = 5) -> [String] {
+        var template = Array((NSTemporaryDirectory() as NSString).appendingPathComponent("iris-loginpath-XXXXXX").utf8CString)
+        guard let made = mkdtemp(&template) else { return [] }
+        let dir = String(cString: made)
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+        let out = (dir as NSString).appendingPathComponent("path")
         let process = Process()
         process.executableURL = URL(fileURLWithPath: shell)
-        process.arguments = ["-lc", "echo $PATH"]
-        let pipe = Pipe()
-        process.standardOutput = pipe
-        process.standardError = FileHandle.nullDevice
+        process.arguments = ["-lc", #"printf "%s" "$PATH" > "$IRIS_PATH_OUT""#]
+        var environment = ProcessInfo.processInfo.environment
+        environment["IRIS_PATH_OUT"] = out
+        process.environment = environment
         process.standardInput = FileHandle.nullDevice
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
         let exited = DispatchSemaphore(value: 0)
         process.terminationHandler = { _ in exited.signal() }
         do {
@@ -59,10 +78,17 @@ enum BinaryResolver {
             _ = exited.wait(timeout: .now() + 1)
             return []
         }
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
-        guard let output = String(data: data, encoding: .utf8) else { return [] }
-        return output.trimmingCharacters(in: .whitespacesAndNewlines)
-            .components(separatedBy: ":").filter { !$0.isEmpty }
+        guard let text = try? String(contentsOfFile: out, encoding: .utf8) else { return [] }
+        return pathEntries(text)
+    }
+
+    /// The entries of a `PATH` value, or empty unless it is one line of absolute paths (a login file that
+    /// printed into it, or a shell whose `$PATH` is not colon-separated, gives nothing rather than garbage).
+    static func pathEntries(_ text: String) -> [String] {
+        let line = text.trimmingCharacters(in: .whitespaces)
+        guard !line.isEmpty, !line.contains(where: \.isNewline) else { return [] }
+        let entries = line.components(separatedBy: ":").filter { !$0.isEmpty }
+        return entries.allSatisfy { $0.hasPrefix("/") } ? entries : []
     }
 
     static func defaultSearchDirs() -> [String] {
