@@ -24,15 +24,15 @@ struct MainActorSignalTests {
         #expect(await signal.wait(within: 5) == 1)
     }
 
-    @Test("with no answer, the wait ends at its bound with nil and records the timeout")
+    /// `recordsTimeout: false`, not `withKnownIssue`: a known issue turns the run's summary into
+    /// `━ … passed … with 1 known issue`, which CI's `✔ … passed` gate reads as a failure (#1348 CI).
+    @Test("with no answer, the wait ends at its bound with nil")
     func boundedWithoutAnswer() async {
         let signal = MainActorSignal<Int>()
         let clock = SuspendingClock()
         let start = clock.now
-        await withKnownIssue("the bound records the timeout") {
-            let result = await signal.wait(within: 0.3)
-            #expect(result == nil)
-        }
-        #expect(clock.now - start < .seconds(5), "returned at the bound, not later")
+        #expect(await signal.wait(within: 0.3, recordsTimeout: false) == nil)
+        let elapsed = clock.now - start
+        #expect(elapsed >= .milliseconds(250) && elapsed < .seconds(5), "returned at the bound: \(elapsed)")
     }
 }
