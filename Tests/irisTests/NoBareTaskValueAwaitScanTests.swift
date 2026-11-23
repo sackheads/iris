@@ -6,7 +6,7 @@ import Foundation
 ///   `await self.t.value`, `await tasks[0].value`, `await t!.value`, `await Task.detached { … }.value`, or a
 ///   `}.value` on the line after the closure. Await it through `value(of:within:)` (`BoundedWait.swift`).
 /// - a bare `withChecked`/`withUnsafe` (`Throwing`) `Continuation` waits for whatever resumes it, and nothing else.
-/// - a blocking `.wait()` with no timeout (a semaphore, a group, a condition) parks a thread for good.
+/// - a blocking `.wait()` with no timeout, or one of `.distantFuture` (a semaphore, a group, a condition), parks a thread for good.
 /// This scan reads every test source, subfolders included (`MCPProvider/`), and fails on any such line that
 /// is not on the list below. The list is keyed by file and the line itself, with how many such lines that
 /// file may hold, so a new wait is caught even in a listed file, and a copy of a listed line is too. A line
@@ -38,7 +38,7 @@ struct NoBareTaskValueAwaitScanTests {
         #"GitHubIdentityMonitorTests.swift: await Task.detached { held.awaitStarted() }.value"#: (1, #"[bounded] `awaitStarted()` is bounded by `started.wait(timeout: 20)` (#1340)"#),
         #"HeadlessModeTests.swift: sawInsideDetached = await Task.detached { HeadlessMode.isEnabled }.value"#: (1, #"[synchronous] detached body is a synchronous property read"#),
         #"JobRetryTests.swift: return await withCheckedContinuation { continuation in"#: (1, #"[bounded] Signal.reach: detached timer resumes with false after `seconds`"#),
-        #"JobRetryTests.swift: await withCheckedContinuation { continuation in"#: (2, #"[bounded] `finished()`'s `FirstAnswer`, raced against a detached sleep timer; and the stub stream that parks until `releaseAll()`, deaf on purpose (the test waits through `finished(within:)`)"#),
+        #"JobRetryTests.swift: await withCheckedContinuation { continuation in"#: (2, #"[gate #1343] `finished()`'s `FirstAnswer`, raced against a detached sleep timer; and the stub stream that parks until `releaseAll()`, deaf on purpose (the test waits through `finished(within:)`)"#),
         #"JobRetryTests.swift: Task { answer.resolve(await task.value) }"#: (1, #"[bounded] inside finished()'s race; the timer resolves the outer wait"#),
         #"JobSchedulerTests.swift: await withCheckedContinuation { openWaiters.append($0) }"#: (1, #"[gate #1343] test-released gate, #1343: Gate.arriveAndWait: resumed only by open()"#),
         #"JobSchedulerTests.swift: await withCheckedContinuation { entryWaiters.append($0) }"#: (1, #"[bounded] Gate.entry() is only reached via waitForEntry's value(of:within:)"#),
@@ -64,7 +64,7 @@ struct NoBareTaskValueAwaitScanTests {
         #"StoreLockTests.swift: let reclaimed = await withCheckedContinuation { (c: CheckedContinuation<StoreLock.Claim?, Never>) in"#: (1, #"[bounded] resumed unconditionally after done.wait(timeout: 5) on a dispatch thread"#),
         #"SyncCoalescerTests.swift: if hold { await withCheckedContinuation { parked.append($0) } }"#: (1, #"[gate #1343] test-released gate, #1343: Probe.run parks until releaseOne/releaseAll; no deadline or cancel path"#),
         #"ThinkingLineEngineTests.swift: func wait() async { if isOpen { return }; await withCheckedContinuation { waiters.append($0) } }"#: (1, #"[gate #1343] test-released gate, #1343: AsyncGate.wait: resumed only by open(); task cancel on stream termination does not reach it"#),
-        #"TimeoutTests.swift: let result = await caller.result"#: (4, #"[bounded] caller pre-cancelled withTimeout; body never runs"#),
+        #"TimeoutTests.swift: let result = await caller.result"#: (4, #"[bounded] withTimeout returns on the caller's cancel, which each test sends (two before the body starts); the body is at most a 30 s sleep"#),
         #"TimeoutTests.swift: await withCheckedContinuation { (c: CheckedContinuation<Void, Never>) in"#: (1, #"[bounded] resumed by DispatchQueue.asyncAfter(seconds) timer"#),
         #"TopicTests.swift: func wait() async { if open { return }; await withCheckedContinuation { waiters.append($0) } }"#: (1, #"[gate #1343] test-released gate, #1343: Gate.wait: resumed only by release()"#),
         #"ViewerContentRulesTests.swift: try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<WKContentRuleList, Error>) in"#: (1, #"[completion] resumed by compileContentRuleList's completion, which WebKit calls with the list or an error"#),
@@ -77,15 +77,17 @@ struct NoBareTaskValueAwaitScanTests {
         #"MCPProvider/LoopbackHTTPListenerTests.swift: let outcome = await withCheckedContinuation { (continuation: CheckedContinuation<Bool, Never>) in"#: (1, #"[bounded] OneShotResumer raced against asyncAfter(3)"#),
         #"MCPProvider/LoopbackHTTPListenerTests.swift: try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in"#: (2, #"[completion] rawConnect's is inside a Task awaited with value(of:within: 10); send's is resumed by .contentProcessed, which Network calls once the bytes are taken or the connection fails"#),
         #"MCPProvider/LoopbackHTTPListenerTests.swift: await withCheckedContinuation { (continuation: CheckedContinuation<String?, Never>) in"#: (1, #"[bounded] OneShotResumer raced against asyncAfter(timeout)"#),
-        #"MCPProvider/LoopbackHTTPListenerTests.swift: await withCheckedContinuation { (continuation: CheckedContinuation<Bool, Never>) in"#: (1, #"[bounded] OneShotResumer raced against asyncAfter(timeout)"#),    ]
+        #"MCPProvider/LoopbackHTTPListenerTests.swift: await withCheckedContinuation { (continuation: CheckedContinuation<Bool, Never>) in"#: (1, #"[bounded] OneShotResumer raced against asyncAfter(timeout)"#),
+    ]
 
     /// Every allowlisted row says which kind of safe it is, so a reviewer can check each against its tag: `[bounded]`
     /// names the timer, race or bounded wait that ends it; `[gate #1343]` is a test-released gate tracked by #1343;
-    /// `[completion]` is a system completion handler that is called with a result or an error; `[not a task]`, `[synchronous]` and `[exit-test child]` say why no wait exists.
+    /// `[completion]` is a system completion handler that is called with a result or an error; `[not a task]`, `[synchronous]`
+    /// and `[exit-test child]` say why no wait exists. A row covering same-text lines of different kinds carries the weaker tag.
     static let reasonTags = ["[bounded] ", "[gate #1343] ", "[completion] ", "[not a task] ", "[synchronous] ", "[exit-test child] "]
 
     private static let continuation = try! NSRegularExpression(pattern: #"\bwith(Checked|Unsafe)(Throwing)?Continuation\b"#)
-    private static let blockingWait = try! NSRegularExpression(pattern: #"\.wait\(\s*\)"#)
+    private static let blockingWait = try! NSRegularExpression(pattern: #"\.wait\(\s*\)|\.wait\([^)]*\bdistantFuture\b"#)
     /// `await` applied straight to a task's `.value`/`.result`: a plain chain (`t`, `self.t`, `t!`, `ts[0]`) or a
     /// `Task { … }` / `Task.detached { … }` closure. Not `.value(…)`, a call, and not a `.value` that is only an
     /// argument inside the awaited call (`await waitFor { ready.value != nil }`).
@@ -183,7 +185,7 @@ struct NoBareTaskValueAwaitScanTests {
         for line in ["await fire.value", "#expect(await child.value.status == .x)", "await self.t.value", "await tasks[0].value",
                      "await t!.value", "x = await Task.detached { 1 }.value", "}.value", "let r = await caller.result",
                      "await withCheckedContinuation { c in", "try await withCheckedThrowingContinuation { c in",
-                     "await withUnsafeContinuation { c in", "sema.wait()", "group.wait( )"] {
+                     "await withUnsafeContinuation { c in", "sema.wait()", "group.wait( )", "_ = sema.wait(timeout: .distantFuture)", "cond.wait(until: Date.distantFuture)"] {
             #expect(!Self.kinds(of: line).isEmpty, "\(line)")
         }
         for line in ["try await value(of: fire)", "// await fire.value is the thing to avoid", "await gate.wait()",
