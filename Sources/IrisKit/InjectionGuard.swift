@@ -842,7 +842,8 @@ public struct InjectionGuard {
         let originalLines = rawOriginal.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
 
         func strippedForm(_ normalized: String) -> String {
-            PromptInjectionGuard.stripRecording(normalized, patterns: PromptInjectionGuard.malRolePatterns).text
+            // `bareRoleLines`, as the pre-strip does (#1345): the judged form of a bare role line is empty there.
+            PromptInjectionGuard.stripRecording(normalized, patterns: PromptInjectionGuard.malRolePatterns, bareRoleLines: true).text
         }
         func singleLineJudgedForm(_ rawLine: String) -> String {
             escapeWrapperBreakout(strippedForm(PromptInjectionGuard.normalize(rawLine)))
