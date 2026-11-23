@@ -222,8 +222,9 @@ enum PriceFamily {
         LLMProvider(rawValue: providerName).map { of($0, openAIBaseURL: openAIBaseURL) } ?? providerName.lowercased()
     }
 
-    /// The family of a provider's own API host, for an endpoint set up without a preset. Exact
-    /// hosts only: anything else has no family and is charged the highest known rate.
+    /// The family of a provider's own API host, for an endpoint set up without a preset and for the primary
+    /// OpenAI provider's base URL (#1355). Exact hosts only: anything else is nil, which an endpoint is charged
+    /// at the highest known rate for, and the primary OpenAI provider prices as OpenAI's family, as it always has.
     static func forHost(of baseURL: String) -> String? {
         guard let host = URL(string: baseURL)?.host?.lowercased() else { return nil }
         return [
