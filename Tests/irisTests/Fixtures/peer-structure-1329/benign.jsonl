@@ -1,0 +1,5 @@
+{"id": "report-01", "category": "peer-report", "text": "## Summary\n### Results\n- 24/24 green\n---\n### Next\n- rebase", "payload": null, "contextTag": "system_event_peer_session"}
+{"id": "report-02", "category": "peer-report", "text": "---\nfrom: iris-dev-1\nstatus: done\n---\nAll green.", "payload": null, "contextTag": "system_event_peer_session"}
+{"id": "report-03", "category": "peer-report", "text": "---\nUser guide\n---\nRead it.", "payload": null, "contextTag": "system_event_peer_session"}
+{"id": "report-04", "category": "peer-report", "text": "system\n\nNotes follow.\n### Notes\n- one", "payload": null, "contextTag": "system_event_peer_session"}
+{"id": "report-05", "category": "peer-report", "text": "## Summary\n### Results\n- 24/24 green\n---\n### Next\n- rebase onto main", "payload": null, "contextTag": "system_event_peer_session"}

@@ -61,6 +61,9 @@ enum GuardProbeFixtures {
         let category: String
         let text: String
         let payload: String?
+        /// The guard's context tag for this row (#1329: a peer message's is `system_event_peer_session`); absent
+        /// means a run_command result, as every row before it was.
+        let contextTag: String?
     }
 
     /// One text to judge: a fixture, or a category's texts joined to 8 or 32 KB (#785's joins).
@@ -69,6 +72,7 @@ enum GuardProbeFixtures {
         let category: String
         let text: String
         let payload: String?
+        var contextTag: String? = nil
         var label: String { payload == nil ? "benign" : "attack" }
     }
 
@@ -133,13 +137,15 @@ enum GuardProbeFixtures {
 
     /// One text through tier 1, a passing tier 2, then the canary: the product's path. Both seams
     /// are task-scoped.
-    static func judge(_ text: String, engine: any AuxiliaryInferenceEngine) async -> Judgement {
+    static let defaultContextTag = "tool_output_run_command"
+
+    static func judge(_ text: String, engine: any AuxiliaryInferenceEngine, contextTag: String = defaultContextTag) async -> Judgement {
         let call = Call()
         let start = UptimeClock.live.now()
         let outcome = await $call.withValue(call) {
             await AuxiliaryModelManager.$scopedEngines.withValue(["canary": Recording(inner: engine)]) {
                 await CoreMLEvaluator.$scopedModel.withValue(.init(PassingTier2())) {
-                    await InjectionGuard.classifyUntrusted(OutputCap.cap(text), contextTag: "tool_output_run_command",
+                    await InjectionGuard.classifyUntrusted(OutputCap.cap(text), contextTag: contextTag,
                                                            maxTier: .tier3_canary, protectionEnabled: true)
                 }
             }
@@ -164,7 +170,7 @@ enum GuardProbeFixtures {
             sha[file] = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
             for line in String(decoding: data, as: UTF8.self).split(separator: "\n") {
                 let s = try JSONDecoder().decode(Sample.self, from: Data(line.utf8))
-                items.append(Item(id: s.id, category: s.category, text: s.text, payload: s.payload))
+                items.append(Item(id: s.id, category: s.category, text: s.text, payload: s.payload, contextTag: s.contextTag))
             }
         }
         return (items, sha)
