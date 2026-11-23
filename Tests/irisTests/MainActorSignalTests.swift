@@ -15,7 +15,9 @@ struct MainActorSignalTests {
     @Test("an answer settled while the wait is parked resumes it, and only the first settle counts")
     func settledDuring() async {
         let signal = MainActorSignal<Int>()
+        // Late enough that the wait has installed its continuation, so this is the parked case, not the early one.
         Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(200))
             signal.settle(1)
             signal.settle(2)
         }
