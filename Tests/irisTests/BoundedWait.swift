@@ -87,6 +87,37 @@ private final class FirstOf<T: Sendable>: @unchecked Sendable {
     }
 }
 
+/// A one-shot answer that main-actor callbacks (a WebKit navigation delegate) settle and a test awaits with a
+/// bound (#1340), instead of a bare `withCheckedContinuation`, which `.timeLimit` cannot end (#428). A settle
+/// that lands before the wait, or before the continuation exists, is kept: the continuation is installed and the
+/// answer re-checked in one main-actor step. A wait that times out records an issue through `value(of:within:)`
+/// and leaves nothing parked.
+@MainActor
+final class MainActorSignal<Value: Sendable> {
+    private var answer: Value?
+    private var continuation: CheckedContinuation<Value?, Never>?
+
+    func settle(_ value: Value) {
+        guard answer == nil else { return }
+        answer = value
+        continuation?.resume(returning: value)
+        continuation = nil
+    }
+
+    func wait(within seconds: Double = 10, sourceLocation: SourceLocation = #_sourceLocation) async -> Value? {
+        if let answer { return answer }
+        let task = Task { @MainActor [self] () -> Value? in
+            await withCheckedContinuation { c in
+                if let answer { c.resume(returning: answer) } else { continuation = c }
+            }
+        }
+        let result = try? await value(of: task, within: seconds, sourceLocation: sourceLocation)
+        continuation?.resume(returning: nil)
+        continuation = nil
+        return result ?? nil
+    }
+}
+
 /// `blocking`'s answer, run on a dispatch queue of its own, so a bounded blocking wait (a
 /// `usleep` poll, `LiveProcessGroups.waitUntilEmpty`) never parks a cooperative thread: CI's pool
 /// is 3 threads. `blocking` must be bounded itself, since the continuation waits for it.

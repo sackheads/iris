@@ -77,8 +77,7 @@ struct ViewerZeroConnectionsTests {
 /// on why a test must never let a real `WKWebView` attempt top-level navigation to anything else.
 @MainActor
 private final class TrustedOnlyNavigationWaiter: NSObject, WKNavigationDelegate {
-    private var continuation: CheckedContinuation<Void, Never>?
-    private var finished = false
+    private let finished = MainActorSignal<Void>()
 
     // The async overload, not the completion-handler one: the SDK's completion-handler type is
     // `@MainActor @Sendable`, which a `@MainActor` class's plain override never exactly matches
@@ -95,17 +94,13 @@ private final class TrustedOnlyNavigationWaiter: NSObject, WKNavigationDelegate 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) { resume() }
     func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) { resume() }
     func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) { resume() }
+    /// #1340: a crashed web content process sends neither didFinish nor didFail.
+    func webViewWebContentProcessDidTerminate(_ webView: WKWebView) { resume() }
 
-    func waitForFinish() async {
-        if finished { return }
-        await withCheckedContinuation { continuation = $0 }
-    }
+    /// Bounded (#1340): `.timeLimit` cannot end a test parked on a bare continuation (#428).
+    func waitForFinish() async { _ = await finished.wait() }
 
-    private func resume() {
-        finished = true
-        continuation?.resume()
-        continuation = nil
-    }
+    private func resume() { finished.settle(()) }
 }
 
 /// A TCP listener on loopback that counts connections and otherwise does nothing — modeled on

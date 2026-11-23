@@ -7,7 +7,7 @@ import Foundation
 /// `status`) is tested on its own because the precedence between a denial, an `[LLM_ERROR]` and a
 /// soft stop is the part that decides whether a person is told something went wrong.
 @MainActor
-@Suite("JobRunner (#187)")
+@Suite("JobRunner (#187)", .timeLimit(.minutes(1)))
 struct JobRunnerTests {
 
     // MARK: Fixtures

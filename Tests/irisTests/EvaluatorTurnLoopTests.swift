@@ -8,7 +8,7 @@ import Foundation
 /// iterate INSIDE the turn (`iris.swift`, `while !turnFinished`). Only a terminal tool ends it.
 /// A grader scripted to submit on its first round cannot detect a regression here.
 @MainActor
-@Suite("Evaluator turn loop", .serialized)
+@Suite("Evaluator turn loop", .serialized, .timeLimit(.minutes(1)))
 struct EvaluatorTurnLoopTests {
     private final class InspectThenSubmitGrader: LLMClientProtocol, @unchecked Sendable {
         private let lock = NSLock()

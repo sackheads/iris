@@ -7,7 +7,7 @@ import Security
 /// client. Each test has its own `ConfigManager` over its own suite and its own in-memory
 /// `KeychainManager` (Invariant 7); no real key is used, and none is written to a global store.
 @MainActor
-@Suite("Subagent providers (#239)")
+@Suite("Subagent providers (#239)", .timeLimit(.minutes(1)))
 struct SubagentProvidersTests {
     private func harness() -> (ConfigManager, KeychainManager, String) {
         let suite = "iris-subagentproviders-\(UUID().uuidString)"
