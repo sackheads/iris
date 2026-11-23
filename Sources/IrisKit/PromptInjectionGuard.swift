@@ -98,10 +98,35 @@ struct PromptInjectionGuard {
     /// anything (`IG###NORE`, `sys---tem:`): such a line stays stripped whatever a tier said.
     static func isStructureOnlyMarkerLine(_ normalizedLine: String) -> Bool {
         let whole = NSRange(normalizedLine.startIndex..., in: normalizedLine)
-        guard delimiterBeforeRole.firstMatch(in: normalizedLine, range: whole) == nil else { return false }
+        guard delimiterBeforeRole.firstMatch(in: normalizedLine, range: whole) == nil,
+              !isBareRoleWordLine(normalizedLine) else { return false }
         let remainder = standaloneStructure.stringByReplacingMatches(in: normalizedLine, range: whole, withTemplate: "")
         guard !remainder.contains("---"), !remainder.contains("###") else { return false }
         return stripRecording(remainder, patterns: roleOnlyPatterns).text == remainder
+    }
+
+    /// #1329: a line that is only a role word once Markdown and punctuation are set aside (`system`, `### Human`,
+    /// `User.`). A turn header split across lines (`---⏎system⏎---`) shows on no single line, so a structure line
+    /// next to one of these stays stripped too (`bordersBareRoleWord`).
+    private static let bareRoleWord = try! NSRegularExpression(
+        pattern: #"^[\s\p{P}\p{S}]*(system(\s+prompt)?|assistant|user|model|instruction|human|ai)[\s\p{P}\p{S}]*$"#,
+        options: [.caseInsensitive])
+
+    static func isBareRoleWordLine(_ normalizedLine: String) -> Bool {
+        bareRoleWord.firstMatch(in: normalizedLine, range: NSRange(normalizedLine.startIndex..., in: normalizedLine)) != nil
+    }
+
+    /// #1329: whether the nearest non-blank line above or below `index` is a bare role word. Blank lines are
+    /// skipped, so `---⏎⏎system` borders it as `---⏎system` does.
+    static func bordersBareRoleWord(_ normalizedLines: [String], at index: Int) -> Bool {
+        func nearest(_ indices: some Sequence<Int>) -> Bool {
+            for i in indices where !normalizedLines[i].trimmingCharacters(in: .whitespaces).isEmpty {
+                return isBareRoleWordLine(normalizedLines[i])
+            }
+            return false
+        }
+        guard normalizedLines.indices.contains(index) else { return false }
+        return nearest(stride(from: index - 1, through: 0, by: -1)) || nearest(index + 1 ..< normalizedLines.count)
     }
 
     /// A role word's pattern (`system:`, `user:`, `System Prompt:` …) matches only as a whole word
