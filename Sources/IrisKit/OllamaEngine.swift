@@ -258,14 +258,19 @@ actor OllamaEngine: AuxiliaryInferenceEngine {
     }
     
     /// Ollama's timings from a `/api/generate` reply, in ms, for #778's log: `load_duration` is
-    /// the model load the request waited on. Ollama reports durations in nanoseconds. Empty when
-    /// the body has none.
+    /// the model load the request waited on. Ollama reports durations in nanoseconds. Then the
+    /// prompt and output token counts, so a slower call can be told apart as a longer reply or a
+    /// slower machine (#1356). Empty when the body has none.
     static func timings(from data: Data) -> String {
         guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return "" }
-        return ["load_duration", "prompt_eval_duration", "eval_duration", "total_duration"].compactMap { key in
+        let durations = ["load_duration", "prompt_eval_duration", "eval_duration", "total_duration"].compactMap { key -> String? in
             guard let ns = (json[key] as? NSNumber)?.doubleValue else { return nil }
             return "\(key)_ms=\(Int((ns / 1_000_000).rounded()))"
-        }.joined(separator: " ")
+        }
+        let counts = ["prompt_eval_count", "eval_count"].compactMap { key -> String? in
+            (json[key] as? NSNumber).map { "\(key)=\($0.intValue)" }
+        }
+        return (durations + counts).joined(separator: " ")
     }
 
     /// The preload in flight, for a test to await.
