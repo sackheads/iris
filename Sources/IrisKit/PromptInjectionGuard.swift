@@ -54,6 +54,8 @@ struct PromptInjectionGuard {
         "system:",
         "assistant:",
         "user:",
+        // #1336: the other half of the `Human:`/`Assistant:` turn format. Not `AI:`, which is no template's role.
+        "human:",
         "model:",
         "---",
         "###",
