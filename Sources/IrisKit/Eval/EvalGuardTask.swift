@@ -446,6 +446,11 @@ extension EvalRunner {
             guard let cap = run.maxDollars else {
                 throw EvalError.usage("a paid run needs --max-dollars N, the most it may spend; --estimate-only prints the expected cost without one")
             }
+            // #1346: the model's row, its listed price, and a price still current, or the cap means nothing.
+            if let provider = run.canary.cloudProvider,
+               let why = CloudModels.paidRefusal(provider: provider, id: run.canary.cloudModelId, now: now, table: prices) {
+                throw EvalError.usage(why)
+            }
             guard let provider = run.canary.cloudProvider, let rates = EvalCost.rates(provider: provider, model: run.canary.cloudModelId, table: prices) else {
                 throw EvalError.usage("no listed price for \(run.canary.name): --max-dollars can't be enforced without one, so the run is refused. "
                                       + "The price list (Sources/IrisKit/ModelPriceSnapshot.swift, a snapshot of LiteLLM's table) has no row for it. The file is generated, not edited: move the pin in scripts/gen-model-prices.py (--commit <sha> --as-of <date>) to a LiteLLM commit that has the model and rerun it.")

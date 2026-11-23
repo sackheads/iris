@@ -16,7 +16,9 @@ Rows: every entry whose `litellm_provider` is anthropic, deepseek, gemini or ope
 the provider's `family/` prefix), sorted. The four prices are USD per token as Python's `repr` writes
 them: input, output, cache read, cache creation; an absent one is an empty field.
 
-The pinned commit is the last one LiteLLM merged on 2026-10-19 (UTC), `b2f0f4d54c5d`. The rows of the
+The pinned commit is LiteLLM's `main` on 2026-11-23 (UTC), `846ffe0f3882` (#1346: it adds gemini-4-hydrogen,
+-carbon and -neon and claude-fable-5-2, and changes no existing row). Before that it was the last one LiteLLM
+merged on 2026-10-19 (UTC), `b2f0f4d54c5d`. The rows of the
 snapshot that was committed before this script existed are reproduced exactly by that commit and by the
 other commits of that day I tried (d07e3c5cd273, 748c973f421f, 0197b961716f) and by the first of the
 next (ece162740855): those days' price changes did not touch these rows, so the old snapshot does not
@@ -28,8 +30,8 @@ import pathlib
 import sys
 import urllib.request
 
-PINNED_COMMIT = "b2f0f4d54c5dace1c1f6ad7b3c2f3bc68cb5982b"
-AS_OF = "2026-10-19"
+PINNED_COMMIT = "846ffe0f3882d1aede5657a0f43d178dddc3aabb"
+AS_OF = "2026-11-23"
 
 FAMILIES = ("anthropic", "deepseek", "gemini", "openai")
 MODES = ("chat", "responses")

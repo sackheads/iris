@@ -19,9 +19,10 @@ struct BenchCloudTarget: Equatable, Sendable {
         case bypassed
     }
 
-    /// The only models this path will call, each with the provider that serves it. A new one is a code
-    /// change with a price row, not a flag typo.
-    static let allowed: [String: LLMProvider] = ["gemini-3.8-flash": .gemini, "claude-opus-5-5": .anthropic]
+    /// The only models this path will call, each with the provider that serves it: `CloudModels.rows` marked
+    /// `benchPrimary` (#1346). A new one is a row there with a price row, not a flag typo.
+    static let allowed: [String: LLMProvider] = Dictionary(
+        CloudModels.rows.filter(\.benchPrimary).map { ($0.id, $0.provider) }, uniquingKeysWith: { first, _ in first })
 
     /// The `--max-dollars` ceiling, so a typo (`500`) cannot become the cap.
     static let maxCapDollars = 50.0
@@ -103,7 +104,11 @@ struct BenchCloudTarget: Equatable, Sendable {
 
     /// The reserve-or-refuse decision of a run, pulled out of `run()` so it can be tested: reserve the run's bound in the
     /// ledger, or say why not. A reserve of zero would let every run through, so the amount is the bound or nothing.
-    static func reserveRun(_ target: BenchCloudTarget, in ledger: SpendLedger) throws -> ReserveOutcome {
+    static func reserveRun(_ target: BenchCloudTarget, in ledger: SpendLedger, now: Date = Date()) throws -> ReserveOutcome {
+        // #1346: a price past its date, or a stale snapshot, would reserve less than the run can really cost.
+        if let why = CloudModels.paidRefusal(provider: target.provider, id: target.model, now: now) {
+            return .refused("\(why) Not started")
+        }
         guard let bound = boundDollars(provider: target.provider, model: target.model) else {
             return .refused("no listed price for \(target.model); not started")
         }
@@ -237,6 +242,10 @@ struct BenchCloudTarget: Equatable, Sendable {
         case .gemini:
             if case .vertexADC = auth { config.geminiAuthMode = GeminiAuthMode.adc.rawValue } else { config.geminiAPIKey = key }
             config.geminiModelEasy = model; config.geminiModelMedium = model; config.geminiModelHard = model
+            // #1346: the row's level (Hydrogen's is medium), so a run is the configuration it was chosen at.
+            if let level = CloudModels.row(provider: .gemini, id: model)?.thinkingLevel {
+                config.geminiThinkingLevelEasy = level; config.geminiThinkingLevelMedium = level; config.geminiThinkingLevelHard = level
+            }
         case .openai:
             break   // not in `allowed`
         }
