@@ -5,16 +5,19 @@ import Foundation
 /// the evidence is every conversation bound to the same workspace (by real path), last `callWindow`
 /// calls, never a job run, a guest's, or one a guest, a peer or an unattended arrival reached (F1, F2);
 /// only the person's own approvals count, never YOLO, auto-approve, the allowlist or Vibecop's (F3);
-/// a shape ever left unapproved is never proposed, and nothing proposes an escalation (F4).
+/// a command ever left unapproved is never proposed, and nothing proposes an escalation (F4). Each line is
+/// one exact approved command, never a prefix (planner's ruling on dev-1's #1335 review).
 enum VibecopRefine {
     static let callWindow = 200
-    /// Approvals a shape needs before it is proposed: one click is not a habit.
-    static let minimumApprovals = 3
+    /// Approvals an exact command needs before it is proposed: one click is not a habit.
+    static let minimumApprovals = 2
+    /// A longer command is skipped rather than copied into the rules.
+    static let maxCommandLength = 200
 
     struct Proposal: Equatable {
-        let shape: String
+        let command: String
         let approvals: Int
-        var line: String { "- Routine here: `\(shape)` (approved \(approvals)×)" }
+        var line: String { "- Routine here, approved exactly as written: `\(command)` (approved \(approvals)×)" }
     }
 
     /// The conversations whose calls count for `workspace`: bound to it by real path, and none a job run,
@@ -45,38 +48,29 @@ enum VibecopRefine {
         return calls
     }
 
-    /// `program subcommand` for a simple command (`swift test`, `git status`), or the program alone;
-    /// nil for an assignment or an empty one.
-    static func shape(_ words: [String]) -> String? {
-        guard let program = words.first, !program.contains("=") else { return nil }
-        if words.count > 1, words[1].range(of: "^[a-z][a-z0-9_-]*$", options: .regularExpression) != nil {
-            return "\(program) \(words[1])"
-        }
-        return program
+    /// Planner's ruling on dev-1's review: the exact command the person approved, never a prefix or a
+    /// program, since no number of approvals of `rm -rf build` approves `rm`. And it is model-written text
+    /// going into a guard-rules file, so it is copied only when it can't be read as anything but a command:
+    /// one line, no backtick to close the code span early, no longer than `maxCommandLength`.
+    static func inert(_ command: String) -> String? {
+        let text = command.trimmingCharacters(in: .whitespaces)
+        guard !text.isEmpty, text.count <= maxCommandLength,
+              !text.contains(where: { $0.isNewline || $0 == "`" }) else { return nil }
+        return text
     }
 
-    /// The lines to propose: person-approved single-command shapes, at least `minimumApprovals` times,
-    /// never one any command left unapproved or a compound command touched, and none `existing` names.
+    /// The lines to propose: each exact command the person approved at least `minimumApprovals` times, never
+    /// one any call left unapproved, and none `existing` already names.
     static func proposals(_ calls: [(command: String, byPerson: Bool, approved: Bool)], existing: String) -> [Proposal] {
         var counts: [String: Int] = [:], excluded = Set<String>()
         for call in calls {
-            let segments = simpleCommands(call.command)
-            let shapes = segments.compactMap(shape)
-            // Anything left unapproved counts against every shape in it; a compound command never counts for one.
-            if !call.approved { excluded.formUnion(shapes); continue }
-            guard segments.count == 1, let one = shapes.first else { continue }
-            if call.byPerson { counts[one, default: 0] += 1 }
+            let text = call.command.trimmingCharacters(in: .whitespaces)
+            if !call.approved { excluded.insert(text); continue }
+            if call.byPerson, let command = inert(text) { counts[command, default: 0] += 1 }
         }
         return counts.filter { $0.value >= minimumApprovals && !excluded.contains($0.key) && !existing.contains("`\($0.key)`") }
-            .map { Proposal(shape: $0.key, approvals: $0.value) }
-            .sorted { $0.approvals != $1.approvals ? $0.approvals > $1.approvals : $0.shape < $1.shape }
-    }
-
-    /// The command's simple commands, split at `;`, `&`, `|`, parentheses, a backtick or a line break, quoted
-    /// or not. Over-splitting only fails safe here: a command then reads as compound (never counted), and a
-    /// denied one excludes more shapes.
-    static func simpleCommands(_ command: String) -> [[String]] {
-        command.components(separatedBy: CharacterSet(charactersIn: ";&|()`\n")).map(HostRunFiles.words).filter { !$0.isEmpty }
+            .map { Proposal(command: $0.key, approvals: $0.value) }
+            .sorted { $0.approvals != $1.approvals ? $0.approvals > $1.approvals : $0.command < $1.command }
     }
 
     /// `existing` with the lines appended, its own bytes untouched.
