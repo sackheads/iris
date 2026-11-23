@@ -51,11 +51,14 @@ enum VibecopRefine {
     /// Planner's ruling on dev-1's review: the exact command the person approved, never a prefix or a
     /// program, since no number of approvals of `rm -rf build` approves `rm`. And it is model-written text
     /// going into a guard-rules file, so it is copied only when it can't be read as anything but a command:
-    /// one line, no backtick to close the code span early, no longer than `maxCommandLength`.
+    /// one line, no backtick to close the code span early, no longer than `maxCommandLength`. Nor one that
+    /// looks like it holds a credential (dev-2's review): `.iris/vibecop.md` is often committed, so a token in
+    /// an approved `curl -H` would land in the repository. The same check Always Allow uses (#1140).
     static func inert(_ command: String) -> String? {
         let text = command.trimmingCharacters(in: .whitespaces)
         guard !text.isEmpty, text.count <= maxCommandLength,
-              !text.contains(where: { $0.isNewline || $0 == "`" }) else { return nil }
+              !text.contains(where: { $0.isNewline || $0 == "`" }),
+              !SecretLikeDetector.containsSecretLikeSubstring(text) else { return nil }
         return text
     }
 
