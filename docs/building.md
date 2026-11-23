@@ -182,6 +182,12 @@ swift run iris --guard-probe --fixtures … --model cloud:gemini/gemini-4-hydrog
 swift run iris --guard-probe --compare ~/bakeoff --baseline-arm g12-today   # the table, also table.md
 ```
 
+A row may carry a `contextTag`, the source label the guard judges it under. Without one it is
+`tool_output_run_command`, tool output. The tag picks the canary's prompt (#906), so a peer row
+needs `system_event_peer_session`, and its `text` should be the message as `framePeerMessage`
+frames it, the way production judges it (#1356). `Tests/irisTests/Fixtures/peer-ack-1356` has
+peer, topic (`peer_topic`, bare) and inbox (`inbox_emit`) rows built that way.
+
 Each run writes one row per judgement to `<out>/<arm>.jsonl`, with the model's digest, the machine
 and the dataset's sha256 in a header row. `--joins` adds each benign category joined to 8 and
 32 KB; `--latency` times a cold call, five warm and three rounds of three at once; `--baseline`
