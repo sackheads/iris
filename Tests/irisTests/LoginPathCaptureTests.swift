@@ -53,7 +53,15 @@ struct LoginPathCaptureTests {
     /// pipe and the read waited for it, at zero CPU, under the cache's lock.
     @Test("a process the login shell leaves running does not hold up the answer")
     func backgroundChildDoesNotBlock() async throws {
-        let shell = try script(#"sleep 300 & PATH=/a:/b; eval "$2""#)
+        let pidFile = FileManager.default.temporaryDirectory.appendingPathComponent("iris-1162-child-\(UUID().uuidString)").path
+        let shell = try script(#"sleep 300 & echo $! > '"# + pidFile + #"'; PATH=/a:/b; eval "$2""#)
+        // The child is this test's to end: it outlives the shell by design.
+        defer {
+            if let pid = (try? String(contentsOfFile: pidFile, encoding: .utf8)).flatMap({ Int32($0.trimmingCharacters(in: .whitespacesAndNewlines)) }) {
+                kill(pid, SIGKILL)
+            }
+            try? FileManager.default.removeItem(atPath: pidFile)
+        }
         let start = TestClock.now()
         let entries = try await value(of: Task.detached { BinaryResolver.captureLoginPath(shell: shell, timeout: 5) }, within: 15)
         #expect(entries == ["/a", "/b"])
