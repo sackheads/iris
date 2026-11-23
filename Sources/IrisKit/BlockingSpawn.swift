@@ -16,13 +16,20 @@ enum BlockingSpawn {
     ///
     /// With `timeoutSeconds`, a child still running at the deadline is SIGKILLed and reaped, so a
     /// helper that hangs (a `container` daemon that never answers) cannot hold the caller's thread
-    /// for good. With `newGroup`, the SIGKILL goes to the child's whole group.
+    /// for good. With `newGroup`, the SIGKILL goes to the child's whole group. A call killed at its
+    /// deadline returns 128 + SIGKILL whatever the reap says (#1359): the kill reaches a group one
+    /// member at a time, so a shell whose `wait` saw its child die first can exit 0 before its own
+    /// SIGKILL lands, and a caller would read that 0 as success. An exit reaped before the deadline
+    /// is the child's own and passes through.
+    ///
+    /// `signal` is `kill(2)`, a seam so a test can stage that race (#1359).
     ///
     /// With `newGroup`, the child leads a process group of its own, so a terminal's Ctrl-C (sent
     /// to the caller's foreground group) does not end the helper the caller is waiting on (#463).
     @discardableResult
     static func run(_ path: String, _ arguments: [String], timeoutSeconds: Double? = nil,
-                    newGroup: Bool = false, clock: UptimeClock = .live) -> Int32? {
+                    newGroup: Bool = false, clock: UptimeClock = .live,
+                    signal: (pid_t, Int32) -> Int32 = { Darwin.kill($0, $1) }) -> Int32? {
         var actions: posix_spawn_file_actions_t?
         posix_spawn_file_actions_init(&actions)
         defer { posix_spawn_file_actions_destroy(&actions) }
@@ -49,6 +56,7 @@ enum BlockingSpawn {
         guard posix_spawn(&pid, path, &actions, &attr, argv, environ) == 0 else { return nil }
 
         var raw: Int32 = 0
+        var killed = false
         if let timeoutSeconds {
             // Uptime, not `Date()` (#608): a Mac that slept mid-wait would otherwise kill the
             // helper on wake, its timeout spent while nothing ran.
@@ -62,12 +70,13 @@ enum BlockingSpawn {
             }
             // With `newGroup` the child leads its group, so the kill takes what it forked with it
             // (a pid-only kill left a stub's `ps` running). The pid kill is the fallback.
-            if !newGroup || (kill(-pid, SIGKILL) == -1 && errno == ESRCH) { kill(pid, SIGKILL) }
+            if !newGroup || (signal(-pid, SIGKILL) == -1 && errno == ESRCH) { _ = signal(pid, SIGKILL) }
+            killed = true
         }
         while waitpid(pid, &raw, 0) == -1 {
             if errno != EINTR { return nil }
         }
-        return status(raw)
+        return killed ? 128 + SIGKILL : status(raw)
     }
 
     /// `run` on a serial queue of its own, so the caller does not wait at all. Not
