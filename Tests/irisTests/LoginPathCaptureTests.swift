@@ -61,10 +61,16 @@ struct LoginPathCaptureTests {
     }
 
     @Test("what isn't one line of absolute paths gives no entries", arguments: [
-        "relative/bin:/usr/bin", "/usr/bin\n/opt/bin", "Welcome back! /usr/bin", "", "/usr/bin /opt/homebrew/bin",
+        "relative/bin:/usr/bin", "/usr/bin\n/opt/bin", "Welcome back! /usr/bin", "", "~/bin:/usr/bin",
     ])
     func malformedIsEmpty(_ value: String) {
+        // A space is legal inside a path (`/Applications/My App/bin`), so only these shapes are refused.
         #expect(BinaryResolver.pathEntries(value).isEmpty, "\(value)")
+    }
+
+    @Test("a path with a space in it is kept")
+    func spaceInPathKept() {
+        #expect(BinaryResolver.pathEntries("/Applications/My App/bin:/usr/bin") == ["/Applications/My App/bin", "/usr/bin"])
     }
 
     @Test("the shell's PATH file is written in a private folder that is gone afterwards")
