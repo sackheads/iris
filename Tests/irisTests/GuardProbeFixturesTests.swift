@@ -6,14 +6,23 @@ import Foundation
 /// that the cloud thinking level is the probe's alone.
 @Suite("guard-probe fixtures mode (#783)", .timeLimit(.minutes(1)))
 struct GuardProbeFixturesTests {
-    /// #1346: a paid arm needs a listed price, as `--eval` does; it used to be charged at the family's highest.
-    @Test("a paid arm for a model with no listed price is refused, an Ollama arm and a listed model are not")
-    func unpricedPaidArmIsRefused() {
-        let why = GuardProbeFixtures.unpricedRefusal(.gemini("gemini-made-up-9"))
-        #expect(why?.contains("no listed price for gemini/gemini-made-up-9") == true, "\(why ?? "nil")")
-        #expect(why?.contains("--max-dollars can't be enforced") == true)
-        #expect(GuardProbeFixtures.unpricedRefusal(.gemini("gemini-3.8-flash")) == nil, "a listed model runs")
-        #expect(GuardProbeFixtures.unpricedRefusal(.ollama("gemma4:12b")) == nil, "a local arm costs nothing")
+    /// #1346: a paid arm needs a `CloudModels` row and a current listed price, as `--eval` and `--bench` do. On a
+    /// table of its own, so the shipped one is never compared against a clock.
+    private static let catalog = CloudModels.Catalog(
+        rows: [CloudModels.Row(provider: .gemini, id: "gemini-3.8-flash", priceValidUntil: "2030-06-30")],
+        asOf: "2030-06-01", prices: .snapshot)
+    private static func day(_ s: String) -> Date { CloudModels.parse(s)!.addingTimeInterval(12 * 3600) }
+
+    @Test("a paid arm with no row, or past its price date, is refused; a current row and an Ollama arm are not")
+    func paidArmNeedsACurrentPrice() {
+        let now = Self.day("2030-06-02")
+        let noRow = GuardProbeFixtures.paidRefusal(.gemini("gemini-made-up-9"), now: now, catalog: Self.catalog)
+        #expect(noRow?.contains("not in CloudModels.rows") == true, "\(noRow ?? "nil")")
+        #expect(noRow?.contains("--max-dollars can't be enforced") == true)
+        let dated = GuardProbeFixtures.paidRefusal(.gemini("gemini-3.8-flash"), now: Self.day("2030-07-01"), catalog: Self.catalog)
+        #expect(dated?.contains("valid through 2030-06-30") == true, "\(dated ?? "nil")")
+        #expect(GuardProbeFixtures.paidRefusal(.gemini("gemini-3.8-flash"), now: now, catalog: Self.catalog) == nil, "a current row runs")
+        #expect(GuardProbeFixtures.paidRefusal(.ollama("gemma4:12b"), now: now, catalog: Self.catalog) == nil, "a local arm costs nothing")
     }
 
     @Test("the refusal comes before the ledger, the fixtures or any call")

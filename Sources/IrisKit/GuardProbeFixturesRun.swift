@@ -19,13 +19,11 @@ extension GuardProbeFixtures {
 
     static func say(_ text: String) { print("guard-probe: \(text)") }
 
-    /// #1346: a paid arm needs the model's listed price, as `--eval` does, or `--max-dollars` caps nothing real.
-    /// It used to fall back to the family's highest listed rate, so a model pricier than every listed one was
-    /// reserved and settled below its real price, and the real bill could pass the cap. Nil for an Ollama arm.
-    static func unpricedRefusal(_ runtime: Runtime) -> String? {
-        guard case .gemini(let id) = runtime, EvalCost.rates(provider: .gemini, model: id) == nil else { return nil }
-        return "no listed price for gemini/\(id): --max-dollars can't be enforced without one, so the run is refused. "
-            + "The price list (Sources/IrisKit/ModelPriceSnapshot.swift, a snapshot of LiteLLM's table) has no row for it. The file is generated, not edited: move the pin in scripts/gen-model-prices.py (--commit <sha> --as-of <date>) to a LiteLLM commit that has the model and rerun it."
+    /// #1346: a paid arm runs only on a `CloudModels` row with a current listed price, as `--eval` and `--bench` do,
+    /// or `--max-dollars` caps nothing real: a missing or stale price under-charges the ledger. Nil for an Ollama arm.
+    static func paidRefusal(_ runtime: Runtime, now: Date = Date(), catalog: CloudModels.Catalog = CloudModels.shipped) -> String? {
+        guard case .gemini(let id) = runtime else { return nil }
+        return CloudModels.paidRefusal(provider: .gemini, id: id, now: now, catalog: catalog)
     }
 
     static func run(_ o: Options) async -> Int32 {
@@ -37,7 +35,7 @@ extension GuardProbeFixtures {
             FileHandle.standardError.write(Data("iris --guard-probe: a cloud arm makes paid calls; pass --allow-paid (and --max-dollars)\n".utf8))
             return 64
         }
-        if let why = unpricedRefusal(runtime) {
+        if let why = paidRefusal(runtime) {
             FileHandle.standardError.write(Data("iris --guard-probe: \(why)\n".utf8))
             return 64
         }
@@ -110,7 +108,7 @@ extension GuardProbeFixtures {
                 return try JSONDecoder().decode(GeminiResponse.self, from: data)
             }
             engine = cloud
-            // The listed price, which `unpricedRefusal` made sure exists: the ledger reserves and settles at it.
+            // The listed price, which `paidRefusal` made sure exists: the ledger reserves and settles at it.
             rates = EvalCost.rates(provider: .gemini, model: id)
             header["runtime"] = "cloud:gemini"
             header["model_fingerprint"] = "\(id) \(ISO8601DateFormatter().string(from: Date()))"
