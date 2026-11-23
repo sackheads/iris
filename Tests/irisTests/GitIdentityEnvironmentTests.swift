@@ -500,7 +500,7 @@ struct RealGitIsolationScanTests {
     func credentialFillIsIsolated() throws {
         let tests = PerfPaths.repoRoot().appendingPathComponent("Tests/irisTests")
         let files = try #require(FileManager.default.enumerator(at: tests, includingPropertiesForKeys: nil))
-            .compactMap { $0 as? URL }.filter { $0.pathExtension == "swift" && $0.lastPathComponent != "GitIdentityEnvironmentTests.swift" || $0.lastPathComponent == "GitIdentityEnvironmentTests.swift" }
+            .compactMap { $0 as? URL }.filter { $0.pathExtension == "swift" }
         var checked = 0
         for file in files {
             let text = try String(contentsOf: file, encoding: .utf8)
