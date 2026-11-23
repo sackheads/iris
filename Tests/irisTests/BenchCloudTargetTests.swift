@@ -8,7 +8,7 @@ import Foundation
 @Suite("Bench cloud target (#854)")
 struct BenchCloudTargetTests {
     private static let models = URL(fileURLWithPath: "/tmp/iris-bench-models")
-    private static let flash = ["--cloud-primary", "gemini:gemini-3.8-flash", "--allow-paid", "--max-dollars", "3",
+    private static let flash = ["--cloud-primary", "gemini:gemini-4-hydrogen", "--allow-paid", "--max-dollars", "3",
                                 "--spend-ledger", "/tmp/ledger.jsonl", "--local-canary", "gemma4:12b"]
     private static let opus = ["--cloud-primary", "anthropic:claude-opus-5-5", "--allow-paid", "--max-dollars", "11",
                                "--spend-ledger", "/tmp/ledger.jsonl", "--bypass-guard"]
@@ -31,7 +31,7 @@ struct BenchCloudTargetTests {
         #expect(try Self.refusal(Self.flash) == nil)
         #expect(try Self.refusal(Self.opus) == nil)
         let t = try #require(BenchCloudTarget.target(try Self.opts(Self.flash)))
-        #expect(t.provider == .gemini && t.model == "gemini-3.8-flash" && t.canary == .ollama("gemma4:12b") && t.maxDollars == 3)
+        #expect(t.provider == .gemini && t.model == "gemini-4-hydrogen" && t.canary == .ollama("gemma4:12b") && t.maxDollars == 3)
         let o = try #require(BenchCloudTarget.target(try Self.opts(Self.opus)))
         #expect(o.provider == .anthropic && o.canary == .bypassed)
     }
@@ -44,8 +44,8 @@ struct BenchCloudTargetTests {
     }
 
     @Test("a model off the allow list, a wrong provider prefix or a lookalike is refused", arguments: [
-        "gemini:gemini-3.8-pro", "anthropic:claude-opus-5", "openai:gpt-5", "gemini:claude-opus-5-5", "anthropic:gemini-3.8-flash",
-        "gemini-3.8-flash", "Gemini:gemini-3.8-flash", "gemini:gemini-3.8-flash ", "gemini:gemini-3.8-flash:x", ":gemini-3.8-flash", "",
+        "gemini:gemini-3.8-pro", "gemini:gemini-3.8-flash", "anthropic:claude-opus-5", "openai:gpt-5", "gemini:claude-opus-5-5", "anthropic:gemini-4-hydrogen",
+        "gemini-4-hydrogen", "Gemini:gemini-4-hydrogen", "gemini:gemini-4-hydrogen ", "gemini:gemini-4-hydrogen:x", ":gemini-4-hydrogen", "",
     ])
     func modelRefused(spec: String) throws {
         let args = ["--cloud-primary", spec] + Array(Self.flash.dropFirst(2))
@@ -123,9 +123,9 @@ struct BenchCloudTargetTests {
 
     @Test("bound: the budget plus one round's input at the input rate; flash is cheaper than opus; an unlisted model has none")
     func bound() throws {
-        let flash = try #require(BenchCloudTarget.boundDollars(provider: .gemini, model: "gemini-3.8-flash"))
+        let flash = try #require(BenchCloudTarget.boundDollars(provider: .gemini, model: "gemini-4-hydrogen"))
         let opus = try #require(BenchCloudTarget.boundDollars(provider: .anthropic, model: "claude-opus-5-5"))
-        let rate = try #require(EvalCost.rates(provider: .gemini, model: "gemini-3.8-flash")).input
+        let rate = try #require(EvalCost.rates(provider: .gemini, model: "gemini-4-hydrogen")).input
         #expect(flash == Double(40_000 + 80_000) * rate, "the bound is the budget plus twice one round's input allowance")
         #expect(opus > flash)
         #expect(BenchCloudTarget.boundDollars(provider: .gemini, model: "no-such-model") == nil)
@@ -133,20 +133,20 @@ struct BenchCloudTargetTests {
 
     @Test("a run is booked at its reported weighted tokens, and at its bound when it reported nothing")
     func booking() throws {
-        let rate = try #require(EvalCost.rates(provider: .gemini, model: "gemini-3.8-flash")).input
-        #expect(BenchCloudTarget.bookedDollars(weightedTokens: 30_000, bound: 1, provider: .gemini, model: "gemini-3.8-flash") == 30_000 * rate)
-        #expect(BenchCloudTarget.bookedDollars(weightedTokens: nil, bound: 0.5, provider: .gemini, model: "gemini-3.8-flash") == 0.5)
+        let rate = try #require(EvalCost.rates(provider: .gemini, model: "gemini-4-hydrogen")).input
+        #expect(BenchCloudTarget.bookedDollars(weightedTokens: 30_000, bound: 1, provider: .gemini, model: "gemini-4-hydrogen") == 30_000 * rate)
+        #expect(BenchCloudTarget.bookedDollars(weightedTokens: nil, bound: 0.5, provider: .gemini, model: "gemini-4-hydrogen") == 0.5)
     }
 
     private func target(_ cap: Double) -> BenchCloudTarget {
-        BenchCloudTarget(provider: .gemini, model: "gemini-3.8-flash", canary: .bypassed, maxDollars: cap, ledgerPath: "l")
+        BenchCloudTarget(provider: .gemini, model: "gemini-4-hydrogen", canary: .bypassed, maxDollars: cap, ledgerPath: "l")
     }
 
     @Test("reserveRun reserves the run's bound in the ledger and refuses the run that would pass the cap, across runs that share the file")
     func reserveRunHoldsTheCap() throws {
         let path = NSTemporaryDirectory() + "iris-bench-ledger-\(UUID().uuidString).jsonl"
         defer { try? FileManager.default.removeItem(atPath: path) }
-        let bound = try #require(BenchCloudTarget.boundDollars(provider: .gemini, model: "gemini-3.8-flash"))
+        let bound = try #require(BenchCloudTarget.boundDollars(provider: .gemini, model: "gemini-4-hydrogen"))
         let cap = bound * 2.5
         var reserved = 0
         for n in 1...5 {
@@ -215,7 +215,7 @@ struct BenchCloudTargetTests {
     @Test("the budget a cloud run carries is the provider's and model's, so thinking and output weigh as they bill")
     func budgetShape() {
         let b = target(3).turnBudget()
-        #expect(b.maxTokens == BenchCloudTarget.budgetWeightedTokens && b.provider == "gemini" && b.model == "gemini-3.8-flash")
+        #expect(b.maxTokens == BenchCloudTarget.budgetWeightedTokens && b.provider == "gemini" && b.model == "gemini-4-hydrogen")
     }
 
     @Test("apply points the provider, every tier and the canary; the key stays in memory")
@@ -240,10 +240,12 @@ struct BenchCloudTargetTests {
         #expect(config.enableAdvancedPromptInjectionProtection)
         #expect(config.enableSandboxing)
 
-        BenchCloudTarget(provider: .gemini, model: "gemini-3.8-flash", canary: .bypassed, maxDollars: 3, ledgerPath: "l")
+        BenchCloudTarget(provider: .gemini, model: "gemini-4-hydrogen", canary: .bypassed, maxDollars: 3, ledgerPath: "l")
             .apply(to: config, key: "g-test")
         #expect(config.primaryProvider == LLMProvider.gemini.rawValue)
         #expect(config.geminiAPIKey == "g-test")
+        #expect([config.geminiThinkingLevelEasy, config.geminiThinkingLevelMedium, config.geminiThinkingLevelHard] == ["medium", "medium", "medium"],
+                "#1346: Hydrogen runs at its row's level, medium")
         #expect(!config.enableAdvancedPromptInjectionProtection, "--bypass-guard must switch the injection guard off")
     }
 
@@ -259,13 +261,13 @@ struct BenchCloudTargetTests {
         let config = ConfigManager(store: store, guardedSecrets: KeychainManager(serviceSuffix: ".benchcloudhdr", inMemory: true))
         config.promptGuardEngine = "cloud"
         config.promptGuardModel = "vertex-guard-model"
-        let bypassed = BenchCloudTarget(provider: .gemini, model: "gemini-3.8-flash", canary: .bypassed, maxDollars: 3, ledgerPath: "l")
+        let bypassed = BenchCloudTarget(provider: .gemini, model: "gemini-4-hydrogen", canary: .bypassed, maxDollars: 3, ledgerPath: "l")
         let text = BenchCloudTarget.header(for: bypassed, settings: config, tier2: .unprovisioned(modelName: "deberta.onnx"))
         #expect(text.contains("tier-3 engine cloud, model vertex-guard-model"), "the would-be guard must be recorded: \(text)")
         #expect(text.contains("NOT downloaded (deberta.onnx)"))
         #expect(text.contains("Bench guard: BYPASSED - replaying pre-passed rows"))
         #expect(text.contains("DRIVER compliance, not the guard"))
-        let pinned = BenchCloudTarget(provider: .gemini, model: "gemini-3.8-flash", canary: .ollama("gemma4:12b"), maxDollars: 3, ledgerPath: "l")
+        let pinned = BenchCloudTarget(provider: .gemini, model: "gemini-4-hydrogen", canary: .ollama("gemma4:12b"), maxDollars: 3, ledgerPath: "l")
         #expect(!BenchCloudTarget.header(for: pinned, settings: config, tier2: .notConfigured).contains("BYPASSED"))
     }
 
@@ -330,7 +332,7 @@ struct BenchCloudTargetTests {
         #expect(config.anthropicVertexProject == "gke-claude-dev")
         #expect(config.effectiveVertexLocation == "global")
         #expect(config.anthropicAPIKey.isEmpty)
-        BenchCloudTarget(provider: .gemini, model: "gemini-3.8-flash", canary: .bypassed, maxDollars: 3, ledgerPath: "l",
+        BenchCloudTarget(provider: .gemini, model: "gemini-4-hydrogen", canary: .bypassed, maxDollars: 3, ledgerPath: "l",
                          auth: .vertexADC(project: nil, location: "global")).apply(to: config, key: "")
         #expect(config.geminiAuthMode == GeminiAuthMode.adc.rawValue)
         #expect(config.geminiAPIKey.isEmpty)

@@ -73,7 +73,8 @@ extension GuardProbeFixtures {
             let config = ConfigManager.shared
             config.primaryProvider = LLMProvider.gemini.rawValue
             config.geminiAuthMode = o.geminiAuth == "key" ? GeminiAuthMode.apiKey.rawValue : GeminiAuthMode.adc.rawValue
-            let level = o.thinkingLevel
+            // #1346: a named level wins; else the row's (Hydrogen's is medium); else the provider's.
+            let level = o.thinkingLevel ?? CloudModels.row(provider: .gemini, id: id)?.thinkingLevel
             var cloud = CloudAuxiliaryEngine()
             cloud.role = "canary"
             cloud.model = { id }
