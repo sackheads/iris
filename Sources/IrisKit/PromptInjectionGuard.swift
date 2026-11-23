@@ -35,8 +35,16 @@ struct PromptInjectionGuard {
         pattern: #"^ {0,3}(?:\*{1,2}|_{1,2})?(?:system(?: prompt)?|assistant|user|model|human|ai|developer|tool|function):?(?:\*{1,2}|_{1,2})?:?[ \t]*$"#,
         options: [.caseInsensitive])
 
+    /// #1353, measured (the canary passed each 3/3 in #1338's split-05 frame; 0 benign eval rows): a role word in
+    /// a code span or with a trailing period, and a `#`/`##` heading of a turn word only. `## Tools` and `## Model`
+    /// are ordinary README headings, and `[user]` is a real INI section, so neither is here.
+    private static let bareRoleLineForms = try! NSRegularExpression(
+        pattern: #"^ {0,3}(?:#{1,2}[ \t]+(?:system|assistant|user|human|ai):?|`(?:system(?: prompt)?|assistant|user|model|human|ai|developer|tool|function)`:?|(?:\*{1,2}|_{1,2})?(?:system(?: prompt)?|assistant|user|model|human|ai|developer|tool|function)(?:\*{1,2}|_{1,2})?\.)[ \t]*$"#,
+        options: [.caseInsensitive])
+
     static func isBareRoleLine(_ line: String) -> Bool {
-        bareRoleLine.firstMatch(in: line, range: NSRange(line.startIndex..., in: line)) != nil
+        let whole = NSRange(line.startIndex..., in: line)
+        return bareRoleLine.firstMatch(in: line, range: whole) != nil || bareRoleLineForms.firstMatch(in: line, range: whole) != nil
     }
 
     /// Step 1 alone, for a caller that strips later through `InjectionGuard.sanitizeUntrusted`.
