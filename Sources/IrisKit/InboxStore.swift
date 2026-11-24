@@ -457,7 +457,7 @@ final class InboxStore: Sendable {
 
     /// The states Brian can archive (#920 slice 2): anything with no answer still owed or in flight. An open
     /// item is waiting on him, and an awaiting-delivery one is still being delivered.
-    static let archivableStates: [InboxItemState] = [.answered, .closed, .stale]
+    static let archivableStates: [InboxItemState] = [.answered, .closed, .resolved, .stale]
 
     /// Archives the item, or brings it back (`archived: false`). Refuses `.unknownItem` for no row and
     /// `.notArchivable` for an item still open or awaiting delivery. Touches nothing but `archivedAt`.
@@ -477,13 +477,14 @@ final class InboxStore: Sendable {
         }
     }
 
-    /// Answered and closed items Brian hasn't archived, most recently active first (#920 slice 2: an
-    /// answered item stays in the list until he puts it away).
+    /// Answered, closed and resolved items Brian hasn't archived, most recently active first (#920 slice 2:
+    /// an answered item stays in the list until he puts it away).
     func settledItems() throws -> [InboxItem] {
         try writer.read { db in
             try Row.fetchAll(db, sql: """
-                SELECT * FROM inbox_items WHERE state IN (?, ?) AND archivedAt IS NULL ORDER BY lastActivityAt DESC
-                """, arguments: [InboxItemState.answered.rawValue, InboxItemState.closed.rawValue]).compactMap(Self.decode)
+                SELECT * FROM inbox_items WHERE state IN (?, ?, ?) AND archivedAt IS NULL ORDER BY lastActivityAt DESC
+                """, arguments: [InboxItemState.answered.rawValue, InboxItemState.closed.rawValue,
+                                 InboxItemState.resolved.rawValue]).compactMap(Self.decode)
         }
     }
 
