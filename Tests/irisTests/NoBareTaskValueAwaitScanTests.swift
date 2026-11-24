@@ -46,7 +46,6 @@ struct NoBareTaskValueAwaitScanTests {
         #"LLMRetryTests.swift: #expect(await counter.value == 1)"#: (1, #"[not a task] actor Int property, not a Task"#),
         #"LedgerAttentionTests.swift: await withCheckedContinuation { held = $0; isRunning = true }"#: (1, #"[gate #1343] test-released gate, #1343: HeldCall.run parks until release() (test releases; defer Task release)"#),
         #"LedgerAttentionTests.swift: if reads == 1 { await withCheckedContinuation { held = $0; firstIsHeld = true } }"#: (1, #"[gate #1343] test-released gate, #1343: CountedRead first read parks until release() (defer Task release)"#),
-        #"MessageStreamerTests.swift: func wait() async { await withCheckedContinuation { waiters.append($0) } }"#: (1, #"[gate #1343] test-released gate, #1343: Gate.wait: resumed only by release()"#),
         #"NotificationInstallTests.swift: if holdRequest { await withCheckedContinuation { heldRequest = $0 } }"#: (1, #"[gate #1343] test-released gate, #1343: FakeCenter holdRequest: resumed only when test resumes heldRequest"#),
         #"NotificationInstallTests.swift: if holdAdd { await withCheckedContinuation { heldAdd = $0 } }"#: (1, #"[gate #1343] test-released gate, #1343: FakeCenter holdAdd: resumed only when test resumes heldAdd"#),
         #"NotificationInstallTests.swift: if calls.holdRequest { await withCheckedContinuation { calls.held = $0 } }"#: (1, #"[gate #1343] test-released gate, #1343: holdRequest: resumed only when test resumes calls.held"#),

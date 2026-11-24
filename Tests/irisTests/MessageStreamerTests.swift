@@ -2,14 +2,6 @@ import Testing
 import Foundation
 @testable import IrisKit
 
-/// Releases `sleep` callers on demand so a flush window is deterministic.
-private actor Gate {
-    private var waiters: [CheckedContinuation<Void, Never>] = []
-    func wait() async { await withCheckedContinuation { waiters.append($0) } }
-    func release() { let w = waiters; waiters = []; w.forEach { $0.resume() } }
-    var waiting: Int { waiters.count }
-}
-
 private actor Recorder {
     var opens: [(UUID, String)] = []
     var updates: [(UUID, String, Bool)] = []
@@ -27,7 +19,9 @@ private func eventually(_ timeoutMs: Int = 2000, _ condition: @Sendable () async
 
 @Suite("Message streamer", .timeLimit(.minutes(1)))
 struct MessageStreamerTests {
-    private func make(_ recorder: Recorder, gate: Gate) -> MessageStreamer {
+    /// The flush window's `sleep` parks on a `TestGate` (#1340): a release before the flush reaches it is banked
+    /// rather than lost, and a flush never released fails at the gate's deadline instead of parking for good.
+    private func make(_ recorder: Recorder, gate: TestGate) -> MessageStreamer {
         MessageStreamer(open: { await recorder.open($0, $1) },
                         update: { id, text, isFinal, _ in await recorder.update(id, text, isFinal) },
                         sleep: { _ in await gate.wait() })
@@ -35,15 +29,15 @@ struct MessageStreamerTests {
 
     @Test("the row opens with the first delta; later deltas coalesce into one update per window; finish writes once and persists")
     func coalescing() async {
-        let recorder = Recorder(), gate = Gate()
+        let recorder = Recorder(), gate = TestGate()
         let s = make(recorder, gate: gate)
         await s.append("Hel")
         #expect(await recorder.opens.map(\.1) == ["Hel"])
         await s.append("lo")
         await s.append(" wor")
-        #expect(await eventually { await gate.waiting == 1 })
+        #expect(await eventually { gate.waiting == 1 })
         #expect(await recorder.updates.isEmpty)
-        await gate.release()
+        gate.release()
         #expect(await eventually { await recorder.updates.count == 1 })
         #expect(await recorder.updates.first?.1 == "Hello wor")
         #expect(await recorder.updates.first?.2 == false)
@@ -57,7 +51,7 @@ struct MessageStreamerTests {
 
     @Test("a replayed call opens and finalizes in one go")
     func replayPath() async {
-        let recorder = Recorder(), gate = Gate()
+        let recorder = Recorder(), gate = TestGate()
         let s = make(recorder, gate: gate)
         await s.finish("whole reply")
         #expect(await recorder.opens.map(\.1) == ["whole reply"])
@@ -67,7 +61,7 @@ struct MessageStreamerTests {
 
     @Test("finishing with nothing to show opens no row")
     func emptyFinish() async {
-        let recorder = Recorder(), gate = Gate()
+        let recorder = Recorder(), gate = TestGate()
         let s = make(recorder, gate: gate)
         await s.finish("")
         let opens = await recorder.opens
@@ -77,7 +71,7 @@ struct MessageStreamerTests {
 
     @Test("settle returns what was shown and finalizes it; a pending flush no longer fires")
     func settle() async {
-        let recorder = Recorder(), gate = Gate()
+        let recorder = Recorder(), gate = TestGate()
         let s = make(recorder, gate: gate)
         await s.append("par")
         await s.append("tial")
@@ -86,19 +80,19 @@ struct MessageStreamerTests {
         let lastUpdate = await recorder.updates.last
         #expect(lastUpdate?.1 == "partial" && lastUpdate?.2 == true)
         let before = await recorder.updates.count
-        await gate.release()
+        gate.release()
         try? await Task.sleep(nanoseconds: 50_000_000)
         #expect(await recorder.updates.count == before)
     }
 
     @Test("no writes after finish or settle: a late delta is ignored, on-screen text stays put")
     func noWritesAfterFinish() async {
-        let recorder = Recorder(), gate = Gate()
+        let recorder = Recorder(), gate = TestGate()
         let s = make(recorder, gate: gate)
         await s.append("a")
         await s.finish("ab")
         await s.append("c")
-        await gate.release()
+        gate.release()
         try? await Task.sleep(nanoseconds: 50_000_000)
         #expect(await recorder.updates.count == 1)
         let lastUpdate = await recorder.updates.last
@@ -109,7 +103,7 @@ struct MessageStreamerTests {
         #expect(await s.settle() == "")
         #expect(await recorder.updates.count == 1)
 
-        let recorder2 = Recorder(), gate2 = Gate()
+        let recorder2 = Recorder(), gate2 = TestGate()
         let s2 = make(recorder2, gate: gate2)
         _ = await s2.settle()
         await s2.append("x")
