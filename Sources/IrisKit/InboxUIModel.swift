@@ -65,11 +65,17 @@ enum InboxUIModel {
 
     /// The mailbox list's contents: open items needing attention, then stale ones (their sender gone,
     /// left for Brian to answer or archive, #920 slice 3), then awaiting-delivery ones — answered, but
-    /// with no live recipient yet — so an answered item does not simply vanish once Brian has acted on
-    /// it (dev-3's #943 review finding 3). The states are mutually exclusive by construction
-    /// (`InboxStore`'s queries), so there is nothing to de-duplicate.
-    static func mailboxItems(open: [InboxItem], stale: [InboxItem] = [], awaitingDelivery: [InboxItem]) -> [InboxItem] {
-        open + stale + awaitingDelivery
+    /// with no live recipient yet — then answered and closed ones Brian hasn't archived, so an answered
+    /// item stays until he puts it away (dev-3's #943 review finding 3; #920 slice 2). The states are
+    /// mutually exclusive by construction (`InboxStore`'s queries), so there is nothing to de-duplicate.
+    static func mailboxItems(open: [InboxItem], stale: [InboxItem] = [], awaitingDelivery: [InboxItem],
+                             settled: [InboxItem] = []) -> [InboxItem] {
+        open + stale + awaitingDelivery + settled
+    }
+
+    /// Whether the detail pane offers Archive for `item` (#920 slice 2): not archived yet, and nothing owed.
+    static func canArchive(_ item: InboxItem) -> Bool {
+        item.archivedAt == nil && InboxStore.archivableStates.contains(item.state)
     }
 
     /// The thread entries shown under the current ask: everything except the last `"question"` or

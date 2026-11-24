@@ -896,6 +896,10 @@ final class ConversationStore: Sendable {
                 t.add(column: "hasPeerInput", .boolean)
             }
         }
+        // #920 slice 2: when Brian put an item away. A visibility flag beside `state`, never a state of its own.
+        m.registerMigration("v47_inbox_archived") { db in
+            try db.alter(table: "inbox_items") { t in t.add(column: "archivedAt", .datetime) }
+        }
         return m
     }
 

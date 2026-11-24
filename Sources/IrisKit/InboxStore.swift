@@ -109,6 +109,9 @@ struct InboxItem: Equatable, Sendable {
     var pendingTargets: [String] = []
     /// When Brian last opened the item (#1027); nil until he does. Unread is "changed since then".
     var viewedAt: Date?
+    /// When Brian archived it (#920 slice 2): out of the mailbox list, into the Archive view. Separate
+    /// from `state`, so an archived item keeps its answer and its lifecycle. A follow-up clears it.
+    var archivedAt: Date? = nil
 
     /// Not yet seen, or changed (a follow-up, an answer) since it was last seen. Separate from
     /// `state`: an answered item can be unread (an automatic answer) and an open one read.
@@ -160,6 +163,8 @@ enum InboxError: Error, Equatable {
     case itemClosed
     /// `submitAnswer` on an item that is not waiting for one (already answered, awaiting delivery or closed).
     case notAnswerable
+    /// `setArchived` on an item Brian still owes an answer, or whose answer is still being delivered (#920 slice 2).
+    case notArchivable
     /// `appendFollowup` on an item whose answer has not reached its route-back targets yet. A
     /// follow-up reopens the item and so takes it out of `redeliverAwaitingInbox`'s queue; the
     /// answer Brian gave would never arrive (dev-3's #1028 review).
@@ -241,7 +246,8 @@ final class InboxStore: Sendable {
             guard stateRaw != InboxItemState.awaitingDelivery.rawValue else { return .failure(.awaitingDelivery) }
 
             try Self.appendEntry(itemId: itemId, kind: "followup", author: author, body: body, at: at, db: db)
-            try db.execute(sql: "UPDATE inbox_items SET state = ?, lastActivityAt = ?, emitterTainted = ? WHERE id = ?",
+            // A follow-up reopens the thread, so it comes back out of the archive (#920 slice 2).
+            try db.execute(sql: "UPDATE inbox_items SET state = ?, lastActivityAt = ?, emitterTainted = ?, archivedAt = NULL WHERE id = ?",
                            arguments: [InboxItemState.open.rawValue, at, wasTainted || tainted, itemId])
             if let ask {
                 let optionsJSON = String(decoding: try JSONEncoder().encode(ask.options), as: UTF8.self)
@@ -426,7 +432,7 @@ final class InboxStore: Sendable {
     /// #920 slice 3: `.stale` items, newest activity first, so they stay in the list for Brian to archive.
     func staleItems() throws -> [InboxItem] {
         try writer.read { db in
-            try Row.fetchAll(db, sql: "SELECT * FROM inbox_items WHERE state = ? ORDER BY lastActivityAt DESC",
+            try Row.fetchAll(db, sql: "SELECT * FROM inbox_items WHERE state = ? AND archivedAt IS NULL ORDER BY lastActivityAt DESC",
                              arguments: [InboxItemState.stale.rawValue]).compactMap(Self.decode)
         }
     }
@@ -446,6 +452,46 @@ final class InboxStore: Sendable {
             try db.execute(sql: """
                 UPDATE inbox_items SET viewedAt = ? WHERE id = ? AND (viewedAt IS NULL OR viewedAt < lastActivityAt)
                 """, arguments: [at, itemId])
+        }
+    }
+
+    /// The states Brian can archive (#920 slice 2): anything with no answer still owed or in flight. An open
+    /// item is waiting on him, and an awaiting-delivery one is still being delivered.
+    static let archivableStates: [InboxItemState] = [.answered, .closed, .stale]
+
+    /// Archives the item, or brings it back (`archived: false`). Refuses `.unknownItem` for no row and
+    /// `.notArchivable` for an item still open or awaiting delivery. Touches nothing but `archivedAt`.
+    @discardableResult
+    func setArchived(itemId: String, _ archived: Bool, at: Date) throws -> Result<Void, InboxError> {
+        try writer.write { db in
+            guard let stateRaw = try String.fetchOne(db, sql: "SELECT state FROM inbox_items WHERE id = ?", arguments: [itemId]) else {
+                return .failure(.unknownItem)
+            }
+            if archived {
+                guard Self.archivableStates.map(\.rawValue).contains(stateRaw) else { return .failure(.notArchivable) }
+                try db.execute(sql: "UPDATE inbox_items SET archivedAt = ? WHERE id = ?", arguments: [at, itemId])
+            } else {
+                try db.execute(sql: "UPDATE inbox_items SET archivedAt = NULL WHERE id = ?", arguments: [itemId])
+            }
+            return .success(())
+        }
+    }
+
+    /// Answered and closed items Brian hasn't archived, most recently active first (#920 slice 2: an
+    /// answered item stays in the list until he puts it away).
+    func settledItems() throws -> [InboxItem] {
+        try writer.read { db in
+            try Row.fetchAll(db, sql: """
+                SELECT * FROM inbox_items WHERE state IN (?, ?) AND archivedAt IS NULL ORDER BY lastActivityAt DESC
+                """, arguments: [InboxItemState.answered.rawValue, InboxItemState.closed.rawValue]).compactMap(Self.decode)
+        }
+    }
+
+    /// The Archive view: every archived item, most recently archived first.
+    func archivedItems() throws -> [InboxItem] {
+        try writer.read { db in
+            try Row.fetchAll(db, sql: "SELECT * FROM inbox_items WHERE archivedAt IS NOT NULL ORDER BY archivedAt DESC")
+                .compactMap(Self.decode)
         }
     }
 
@@ -588,7 +634,7 @@ final class InboxStore: Sendable {
                          deadline: row["deadline"], vetoDefaultOptionId: row["vetoDefaultOptionId"],
                          emitterTainted: emitterTainted, state: state, createdAt: createdAt,
                          lastActivityAt: lastActivityAt, answer: answer, pendingTargets: pendingTargets,
-                         viewedAt: row["viewedAt"])
+                         viewedAt: row["viewedAt"], archivedAt: row["archivedAt"])
     }
 
     private static func decodeEntry(_ row: Row) -> InboxThreadEntry? {

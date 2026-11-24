@@ -10,6 +10,8 @@ struct InboxView: View {
     @State private var freeText: String = ""
     @State private var lastOutcome: String?
     @State private var submitting = false
+    /// The Archive view (#920 slice 2) in place of the mailbox list.
+    @State private var showingArchive = false
 
     /// Open items, needing attention, then awaiting-delivery ones (answered, but with no live
     /// recipient yet) so an answered item does not simply vanish once Brian has acted on it
@@ -17,9 +19,11 @@ struct InboxView: View {
     /// emit, a submit, a redeliver) invalidates this rather than leaving it stale (finding 2).
     private var items: [InboxItem] {
         _ = state.inboxRevision
+        if showingArchive { return (try? state.store.inbox.archivedItems()) ?? [] }
         return InboxUIModel.mailboxItems(open: (try? state.store.inbox.openItems()) ?? [],
                                          stale: (try? state.store.inbox.staleItems()) ?? [],
-                                         awaitingDelivery: (try? state.store.inbox.awaitingDeliveryItems()) ?? [])
+                                         awaitingDelivery: (try? state.store.inbox.awaitingDeliveryItems()) ?? [],
+                                         settled: (try? state.store.inbox.settledItems()) ?? [])
     }
 
     private var selected: InboxItem? {
@@ -33,21 +37,30 @@ struct InboxView: View {
         // it can't be dragged to nothing, and the old 360 maxWidth cap is dropped so the drag has
         // somewhere to go; the detail pane gets its own minWidth so a wide list can't crush it.
         HSplitView {
-            List(selection: Binding(
-                get: { state.selectedInboxItemId },
-                set: { newId in
-                    state.selectedInboxItemId = newId
-                    chosenOptionId = nil
-                    freeText = ""
-                    lastOutcome = nil
+            VStack(spacing: 0) {
+                Picker("", selection: Binding(get: { showingArchive }, set: { showingArchive = $0; state.selectedInboxItemId = nil })) {
+                    Text("Inbox").tag(false)
+                    Text("Archive").tag(true)
                 }
-            )) {
-                ForEach(items, id: \.id) { item in
-                    inboxRowSummary(item).tag(Optional(item.id))
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .padding(8)
+                List(selection: Binding(
+                    get: { state.selectedInboxItemId },
+                    set: { newId in
+                        state.selectedInboxItemId = newId
+                        chosenOptionId = nil
+                        freeText = ""
+                        lastOutcome = nil
+                    }
+                )) {
+                    ForEach(items, id: \.id) { item in
+                        inboxRowSummary(item).tag(Optional(item.id))
+                    }
                 }
+                .listStyle(.sidebar)
             }
             .frame(minWidth: 240, idealWidth: 280)
-            .listStyle(.sidebar)
             // The divider comes back where it was left (#1027).
             .background(SplitDividerPersistence(key: "inboxListWidth", minimum: 240, secondPaneMinimum: 320))
 
@@ -61,7 +74,7 @@ struct InboxView: View {
                 } else {
                     VStack {
                         Spacer()
-                        Text(items.isEmpty ? "No open items." : "Select an item.")
+                        Text(items.isEmpty ? (showingArchive ? "Nothing archived." : "No items.") : "Select an item.")
                             .foregroundColor(.secondary)
                         Spacer()
                     }
@@ -346,17 +359,43 @@ struct InboxView: View {
 
     private func footer(for item: InboxItem) -> some View {
         Group {
-            if item.responseMode == .notification {
+            if item.responseMode == .notification, item.state == .open {
                 VStack(alignment: .leading, spacing: 4) {
                     Divider()
                     Button("Dismiss") { dismiss(item) }
                         .disabled(submitting)
+                }
+            } else if item.archivedAt != nil {
+                VStack(alignment: .leading, spacing: 4) {
+                    Divider()
+                    Button("Unarchive") { setArchived(item, false) }
+                        .disabled(submitting)
+                        .help("Put it back in the inbox list")
+                }
+            } else if InboxUIModel.canArchive(item) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Divider()
+                    Button("Archive") { setArchived(item, true) }
+                        .disabled(submitting)
+                        .help("Move it out of the inbox list, into Archive")
                 }
             }
         }
     }
 
     // MARK: Actions
+
+    private func setArchived(_ item: InboxItem, _ archived: Bool) {
+        submitting = true
+        Task {
+            _ = try? state.store.inbox.setArchived(itemId: item.id, archived, at: Date())
+            await MainActor.run {
+                submitting = false
+                state.selectedInboxItemId = nil
+                state.bumpInboxRevision()
+            }
+        }
+    }
 
     private func submit(_ item: InboxItem) {
         submitting = true
@@ -373,11 +412,13 @@ struct InboxView: View {
     }
 
     /// Notification items take no answer (`submitInboxAnswer` refuses them, by design), so
-    /// dismissing one closes it directly rather than routing through the answer path.
+    /// dismissing one closes it directly rather than routing through the answer path, and puts it
+    /// in the Archive (#920 slice 2), since a dismissed notification has nothing left to show.
     private func dismiss(_ item: InboxItem) {
         submitting = true
         Task {
             _ = try? state.store.inbox.setState(itemId: item.id, .closed)
+            _ = try? state.store.inbox.setArchived(itemId: item.id, true, at: Date())
             await MainActor.run {
                 submitting = false
                 state.selectedInboxItemId = nil
