@@ -266,7 +266,7 @@ struct JobRunInboxTests {
         await e.redeliverAwaitingInbox(deliver: { [sink, tookDuringSweep] id, text, t in
             // While the sweep delivers the first item, the job's next run takes its answer.
             if id == other, tookDuringSweep.calls.isEmpty, let taken = await e.takeJobInboxAnswers(jobId: jobId, for: next) {
-                await tookDuringSweep.deliver(next, taken, false)
+                _ = await tookDuringSweep.deliver(next, taken, false)
             }
             return await sink.deliver(id, text, t)
         })
