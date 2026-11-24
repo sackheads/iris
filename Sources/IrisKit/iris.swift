@@ -2322,6 +2322,10 @@ actor IrisEngine {
         item.notify.filter { isAllowedInboxRoute($0, emitter: item.emitter) }
     }
 
+    /// #920 slice 4: how late past its deadline a veto may fire and still be on time. The watcher ticks every
+    /// 30 s, so anything later than two ticks was applied after Iris was not running or the Mac slept.
+    nonisolated static let inboxVetoAwayAfter: TimeInterval = 60
+
     /// Timed vetoes whose deadline has passed (#920 Task 4). The stored wall-clock `deadline`
     /// decides, so a veto that came due while the Mac slept or Iris was not running fires at the
     /// next evaluation (launch, a tick, a wake), once: `submitAnswer` refuses an item that is no
@@ -2330,9 +2334,6 @@ actor IrisEngine {
     /// An item whose emitter had read outside content (#813), or whose default names no option, is
     /// held: it stays open and shows as overdue; a tainted item with a valid default option records
     /// a `"held"` thread entry and notifies the emitter's own chain once (#1095).
-    /// #920 slice 4: how late past its deadline a veto may fire and still be on time. The watcher ticks every
-    /// 30 s, so anything later than two ticks was applied after Iris was not running or the Mac slept.
-    nonisolated static let inboxVetoAwayAfter: TimeInterval = 60
 
     @discardableResult
     func evaluateInboxVetoExpiries(now: Date = Date(), deliver: InboxDeliver? = nil) async -> (fired: Int, held: Int) {

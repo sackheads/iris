@@ -89,7 +89,6 @@ enum InboxUIModel {
         }
     }
 
-    /// The first eight characters of a session's id, for when nothing better names it.
     /// #920 slice 4: the read-only lines an answered item shows, for the detail pane (4b wires it in). Only an
     /// answer Brian gave says "You": an automatic one says nobody chose, and a veto says it was a veto.
     static func answerSummary(_ answer: InboxAnswer, item: InboxItem) -> [String] {
@@ -111,6 +110,7 @@ enum InboxUIModel {
         return lines
     }
 
+    /// The first eight characters of a session's id, for when nothing better names it.
     static func shortId(_ id: UUID) -> String { String(id.uuidString.lowercased().prefix(8)) }
 
     /// What the list and detail show as "from". Items raised before #1027 stored the full UUID when
