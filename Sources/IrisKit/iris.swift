@@ -2132,10 +2132,21 @@ actor IrisEngine {
 
     /// Tries every target of `item` once. Returns how many were reached and which are still pending.
     private func deliverInboxAnswer(item: InboxItem, answer: InboxAnswer, targets: [String],
-                                    deliver: InboxDeliver) async -> (delivered: Int, remaining: [String])? {
+                                    deliver: InboxDeliver, rereadPending: Bool = false) async -> (delivered: Int, remaining: [String])? {
         guard inboxDelivering.insert(item.id).inserted else { return nil }
         defer { inboxDelivering.remove(item.id) }
         let localState = state
+        var targets = targets
+        // A sweep's snapshot may predate another consumer's delivery (`takeJobInboxAnswers` since #920
+        // slice 1b, dev-2's #1377 review): under the claim, deliver only what is still pending, and
+        // record what is left before the claim is released.
+        var sweepStore: ConversationStore?
+        if rereadPending {
+            guard let store = await MainActor.run(body: { localState?.store }),
+                  let fresh = (try? store.inbox.item(id: item.id)) ?? nil, fresh.state == .awaitingDelivery else { return nil }
+            targets = targets.filter { t in fresh.pendingTargets.contains { $0.caseInsensitiveCompare(t) == .orderedSame } }
+            sweepStore = store
+        }
         let body = Self.inboxAnswerFrame(item: item, answer: answer, echoed: await echoedInboxText(Self.inboxOriginalItemText(item)))
         var delivered = 0
         var remaining: [String] = []
@@ -2174,6 +2185,7 @@ actor IrisEngine {
             case .refused: remaining.append(target)
             }
         }
+        if let sweepStore { _ = try? sweepStore.inbox.setPendingTargets(itemId: item.id, remaining) }
         return (delivered, remaining)
     }
 
@@ -2455,6 +2467,10 @@ actor IrisEngine {
                   item.pendingTargets.contains(where: { $0.caseInsensitiveCompare(target) == .orderedSame }) else { continue }
             guard inboxDelivering.insert(item.id).inserted else { continue }
             defer { inboxDelivering.remove(item.id) }
+            // Re-read under the per-item claim (dev-2's #1377 review): the snapshot above may predate a
+            // fallback or redelivery that already took this answer.
+            guard let item = (try? store.inbox.item(id: item.id)) ?? nil, item.state == .awaitingDelivery,
+                  item.pendingTargets.contains(where: { $0.caseInsensitiveCompare(target) == .orderedSame }) else { continue }
             frames.append(Self.inboxAnswerFrame(item: item, answer: answer,
                                                 echoed: await echoedInboxText(Self.inboxOriginalItemText(item))))
             if item.emitterTainted { await markReadUntrusted(runConversationId) }
@@ -2476,9 +2492,9 @@ actor IrisEngine {
               let items = try? store.inbox.awaitingDeliveryItems() else { return }
         for item in items where item.pendingTargets.contains(where: { Self.jobChainId($0) != nil }) {
             guard let answer = item.answer,
-                  let result = await deliverInboxAnswer(item: item, answer: answer, targets: item.pendingTargets, deliver: deliver),
-                  result.remaining != item.pendingTargets else { continue }
-            _ = try? store.inbox.setPendingTargets(itemId: item.id, result.remaining)
+                  let result = await deliverInboxAnswer(item: item, answer: answer, targets: item.pendingTargets, deliver: deliver,
+                                                        rereadPending: true),
+                  result.delivered > 0 else { continue }
             await MainActor.run { localState?.bumpInboxRevision() }
         }
     }
@@ -2591,10 +2607,11 @@ actor IrisEngine {
         guard let store = await MainActor.run(body: { localState0?.store }),
               let items = try? store.inbox.awaitingDeliveryItems() else { return }
         for item in items {
+            // The remaining targets are written inside the per-item claim (`rereadPending`).
             guard let answer = item.answer, !item.pendingTargets.isEmpty,
-                  let result = await deliverInboxAnswer(item: item, answer: answer, targets: item.pendingTargets, deliver: deliver)
+                  await deliverInboxAnswer(item: item, answer: answer, targets: item.pendingTargets, deliver: deliver,
+                                           rereadPending: true) != nil
             else { continue }
-            _ = try? store.inbox.setPendingTargets(itemId: item.id, result.remaining)
             await MainActor.run { localState0?.bumpInboxRevision() }
         }
     }
