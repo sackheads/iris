@@ -541,7 +541,11 @@ struct InboxAnswerNoForgeTests {
         // #920 Task 5: InboxView's Submit button is the one real UI-facing call site (the
         // definition in iris.swift is the other occurrence). A third occurrence is a new caller
         // and must be looked at, same as the count above.
-        #expect(try occurrences(of: "submitInboxAnswer(") == ["iris.swift": 1, "InboxView.swift": 1])
+        // #920 slice 4a: `approveInboxVetoNow` is the second iris.swift occurrence, Approve now's own path.
+        #expect(try occurrences(of: "submitInboxAnswer(") == ["iris.swift": 2, "InboxView.swift": 1])
+        // Veto and Approve now are Brian's buttons (4b wires them into InboxView): nothing else calls them.
+        #expect(try occurrences(of: "vetoInboxItem(") == ["iris.swift": 1])
+        #expect(try occurrences(of: "approveInboxVetoNow(") == ["iris.swift": 1])
         #expect(try occurrences(of: "redeliverAwaitingInbox(") == ["iris.swift": 1, "AppState.swift": 1])
     }
 

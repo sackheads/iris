@@ -51,12 +51,21 @@ struct InboxAnswer: Codable, Equatable, Sendable {
     /// True when nobody answered: a timed veto's deadline passed and the emitter's own default
     /// took effect (#920 Task 4). Not Brian's decision, and delivered as not his.
     var automatic: Bool = false
+    /// #920 slice 4 (Brian, F2): Brian vetoed a timed veto's default. No option is chosen; `freeText` may
+    /// say why. Delivered as his decision, explicitly a veto, never as silence.
+    var vetoed: Bool = false
+    /// #920 slice 4: an automatic answer applied well after its deadline, because Iris was not running
+    /// (or the Mac slept) when it passed. Shown to Brian so a default he never saw take effect is flagged.
+    var decidedWhileAway: Bool = false
 
-    init(chosenOptionId: String?, freeText: String?, at: Date, automatic: Bool = false) {
+    init(chosenOptionId: String?, freeText: String?, at: Date, automatic: Bool = false, vetoed: Bool = false,
+         decidedWhileAway: Bool = false) {
         self.chosenOptionId = chosenOptionId
         self.freeText = freeText
         self.at = at
         self.automatic = automatic
+        self.vetoed = vetoed
+        self.decidedWhileAway = decidedWhileAway
     }
 
     init(from decoder: Decoder) throws {
@@ -65,6 +74,8 @@ struct InboxAnswer: Codable, Equatable, Sendable {
         freeText = try c.decodeIfPresent(String.self, forKey: .freeText)
         at = try c.decodeIfPresent(Date.self, forKey: .at) ?? Date()
         automatic = try c.decodeIfPresent(Bool.self, forKey: .automatic) ?? false
+        vetoed = try c.decodeIfPresent(Bool.self, forKey: .vetoed) ?? false
+        decidedWhileAway = try c.decodeIfPresent(Bool.self, forKey: .decidedWhileAway) ?? false
     }
 }
 
