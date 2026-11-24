@@ -25,9 +25,12 @@ struct JobRunInboxTests {
         })
     }
 
-    private func state() throws -> (ConversationStore, AppState) {
+    private func state() async throws -> (ConversationStore, AppState) {
         let store = try ConversationStore.inMemory()
         let app = AppState(store: store, tier2Provisioning: .provisioned, tier3Provisioning: .provisioned)
+        // The launch sweep runs on the app's own engine; under a parallel run it can start late and deliver
+        // a test's waiting answer for real, so let it finish before any item exists.
+        if let sweep = app.launchInboxRedeliver { try await value(of: sweep) }
         app.conversations.removeAll()
         app.autoApproveTools = true
         return (store, app)
@@ -76,7 +79,7 @@ struct JobRunInboxTests {
 
     @Test("a scheduled or polled job's run is offered inbox_item; a watch's run and an unstamped background turn are not")
     func gateByTrigger() async throws {
-        let (store, app) = try state()
+        let (store, app) = try await state()
         var watch = job(.fsEvent(FSWatch(path: "/tmp/w"))); watch.name = "save-watch"
         let scheduled = job()
         try store.ledger.upsert(scheduled); try store.ledger.upsert(watch)
@@ -88,7 +91,7 @@ struct JobRunInboxTests {
 
     @Test("an item from a job run is owned by the job, and the job's next run may resolve it")
     func ownedByTheJob() async throws {
-        let (store, app) = try state()
+        let (store, app) = try await state()
         let j = job(); try store.ledger.upsert(j)
         let first = runConversation(app, for: j)
         let item = try raise(app, from: first, for: j)
@@ -101,8 +104,8 @@ struct JobRunInboxTests {
     }
 
     @Test("a job's runs share one emit budget, keyed by the job")
-    func rateLimitKeyedByJob() throws {
-        let (store, app) = try state()
+    func rateLimitKeyedByJob() async throws {
+        let (store, app) = try await state()
         let j = job(); try store.ledger.upsert(j)
         var allowed = 0
         for _ in 0..<(PeerRateLimiter.capacity + 5) {
@@ -130,7 +133,7 @@ struct JobRunInboxTests {
 
     @Test("an answer for a job due soon waits for its next run, which takes it once as Brian's decision")
     func answerWaitsForNextRun() async throws {
-        let (store, app) = try state()
+        let (store, app) = try await state()
         let j = job(); try store.ledger.upsert(j)
         let run = runConversation(app, for: j)
         let item = try raise(app, from: run, for: j)
@@ -150,7 +153,7 @@ struct JobRunInboxTests {
 
     @Test("an answer for a deleted, paused, or far-off job goes to the pinned Iris, with the job named", arguments: [0, 1, 2])
     func fallsBackToIris(_ which: Int) async throws {
-        let (store, app) = try state()
+        let (store, app) = try await state()
         let iris = app.createNewConversation(select: false)
         app.conversations[app.conversations.firstIndex { $0.id == iris }!].isPinned = true
         var j = job(); try store.ledger.upsert(j)
@@ -172,7 +175,7 @@ struct JobRunInboxTests {
 
     @Test("a job paused after the answer is re-checked on the watcher's tick and reaches the pinned Iris then")
     func tickFallback() async throws {
-        let (store, app) = try state()
+        let (store, app) = try await state()
         let iris = app.createNewConversation(select: false)
         app.conversations[app.conversations.firstIndex { $0.id == iris }!].isPinned = true
         var j = job(); try store.ledger.upsert(j)
@@ -188,7 +191,7 @@ struct JobRunInboxTests {
 
     @Test("the next real run gets the answer in its prompt, framed as Brian's decision, and is still read-only")
     func nextRunPromptAndSurface() async throws {
-        let (store, app) = try state()
+        let (store, app) = try await state()
         let j = job(); try store.ledger.upsert(j)
         let item = try raise(app, from: runConversation(app, for: j), for: j)
         let client = CapturingLLMClient(reply: "done")
@@ -215,7 +218,7 @@ struct JobRunInboxTests {
 
     @Test("a tainted item's answer taints the run it is handed to; a clean one does not (dev-2's #1377 review)")
     func answerTaintCarries() async throws {
-        let (store, app) = try state()
+        let (store, app) = try await state()
         let j = job(); try store.ledger.upsert(j)
         let e = engine(app)
         for tainted in [false, true] {
@@ -243,7 +246,7 @@ struct JobRunInboxTests {
 
     @Test("a sweep whose snapshot predates the next run's take does not deliver that answer again (dev-2's #1377 review)")
     func staleSnapshotDoesNotDoubleDeliver() async throws {
-        let (store, app) = try state()
+        let (store, app) = try await state()
         let iris = app.createNewConversation(select: false)
         app.conversations[app.conversations.firstIndex { $0.id == iris }!].isPinned = true
         var j = job(); try store.ledger.upsert(j)
@@ -251,7 +254,7 @@ struct JobRunInboxTests {
         // An earlier item whose target is refused, so it is still awaiting delivery, ahead of the job's.
         let other = app.createNewConversation(select: false)
         let first = try raise(app, from: other, for: j)   // owner chain is `other`'s own id: no stamp
-        _ = await e.submitInboxAnswer(itemId: first.id, choice: "a", freeText: nil, deliver: { _, _, _ in .refused })
+        _ = await e.submitInboxAnswer(itemId: first.id, choice: "a", freeText: nil, deliver: { _, _, _ in .refused("offline") })
         let jobItem = try raise(app, from: runConversation(app, for: j), for: j)
         _ = await e.submitInboxAnswer(itemId: jobItem.id, choice: "a", freeText: nil, deliver: Sink().deliver)
         // Now the job is paused, so a sweep that still thinks the answer is pending would send it to Iris.
