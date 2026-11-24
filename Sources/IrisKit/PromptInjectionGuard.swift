@@ -91,7 +91,8 @@ struct PromptInjectionGuard {
 
     /// Whether `text` has a letter either fold changes: the strip's fast path for a line that has none.
     static func hasRoleConfusable(_ text: String) -> Bool {
-        text.unicodeScalars.contains { roleFolds[1][$0] != nil }
+        // Every table letter is in U+0370...U+052F (the table's test pins it), so most scalars skip the lookup.
+        text.unicodeScalars.contains { (0x0370...0x052F).contains($0.value) && roleFolds[1][$0] != nil }
     }
 
     static func foldRoleConfusables(_ text: String, alternate: Bool = false) -> String {
@@ -226,17 +227,18 @@ struct PromptInjectionGuard {
     /// the model read. Anywhere in a line, not only at its start, so a mid-line `system:` is still
     /// stripped. The chat-template tokens and `---`/`###` stay plain substrings.
     /// A line's two folded spellings, built when first asked for and again only once the line has changed, so a
-    /// pass folds a line once rather than once per pattern (#1385). Equal content means equal folds, so a stale
-    /// check by value is exact; an unchanged line is the same storage, which `==` answers at once.
+    /// pass folds a line once rather than once per pattern (#1385). One is kept per line of the strip, which only
+    /// ever deletes from it, so a changed line is a shorter one: the UTF-8 count (O(1)) tells them apart exactly.
+    /// Not `==`, which is canonical equivalence: `ί` equals `ι` + U+0301, but only the second has a table letter.
     private struct LineFolds {
-        private var line: String?
+        private var length: Int?
         private var folds: [(text: String, differs: Bool, roleWord: Bool)] = []
 
         /// `line` folded, or nil when the fold changes nothing in it. `roleWord` is false when no word of
         /// `malRolePatterns` is anywhere in the fold, so none of their regexes can match it.
         mutating func folded(_ line: String, alternate: Bool) -> (text: String, roleWord: Bool)? {
-            if self.line != line {
-                self.line = line
+            if length != line.utf8.count {
+                length = line.utf8.count
                 folds = [false, true].map { alternate in
                     let text = PromptInjectionGuard.foldRoleConfusables(line, alternate: alternate)
                     let roleWord = PromptInjectionGuard.anyRoleWord.firstMatch(in: text, range: NSRange(text.startIndex..., in: text)) != nil
