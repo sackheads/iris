@@ -113,6 +113,16 @@ struct InboxUIModelTests {
         #expect(description == "the session that raised it (named \"dev-2\")")
     }
 
+    @Test("a job target is worded as the job's next run, by name, never its raw id (#920 slice 1b)")
+    func routeTargetDescriptionForJob() {
+        let target = "job:" + UUID().uuidString
+        let named = InboxUIModel.routeTargetDescription(target, emitterId: UUID(), emitterLabel: "run",
+                                                         roleHolderLabel: nil, jobName: "nightly-check")
+        #expect(named == "the next run of the job \"nightly-check\" (the pinned Iris instead if the job is deleted, paused or not due within 24 hours)")
+        let gone = InboxUIModel.routeTargetDescription(target, emitterId: UUID(), emitterLabel: "run", roleHolderLabel: nil)
+        #expect(gone.hasPrefix("the next run of the job that raised it (") && !gone.contains("job:"))
+    }
+
     @Test("a role target with a resolved holder names the role and, quoted, who currently holds it")
     func routeTargetDescriptionForRoleWithHolder() {
         let description = InboxUIModel.routeTargetDescription("role:planner", emitterId: UUID(),
