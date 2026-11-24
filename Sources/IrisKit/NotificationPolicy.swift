@@ -3,7 +3,7 @@ import Foundation
 /// A notification Iris has decided to post (D6 decision 6). Every string in it is built by
 /// `NotificationPolicy` from fixed words and harness-owned names.
 struct PlannedNotification: Equatable, Sendable {
-    enum Kind: String, Sendable { case jobNeedsYou, approvalWaiting }
+    enum Kind: String, Sendable { case jobNeedsYou, approvalWaiting, inboxItem }
 
     /// The run id for a card, the ask id for an ask, so a gone ask's banner can be withdrawn.
     let identifier: String
@@ -23,6 +23,10 @@ struct NotificationContext: Equatable, Sendable {
     /// Run Log being open does not count: neither shows a card or the approval overlay.
     var mainWindowVisible: Bool
     var selectedConversationId: UUID?
+    /// #920 slice 5: Settings' "Inbox notifications", on by default (Brian, F6).
+    var inboxEnabled = true
+    /// The mailbox is the selected pane (`AppState.inboxSelected`).
+    var inboxSelected = false
 
     static let off = NotificationContext(enabled: false, appActive: false, mainWindowVisible: false,
                                          selectedConversationId: nil)
@@ -34,6 +38,17 @@ enum NotificationEvent: Sendable {
     case card(EventCard, destination: UUID, jobPausedReason: String?)
     /// A live ask. `details` is passed so that the tests can show it is never used.
     case ask(id: UUID, toolName: String, details: String, root: UUID?)
+    /// #920 slice 5: inbox items raised or reopened within one coalescing window, oldest first.
+    case inbox([InboxNotice])
+}
+
+/// One inbox item to tell Brian about. `title` is the emitter's, so the policy shows it only quoted, and
+/// never for a tainted item; the situation is not here at all.
+struct InboxNotice: Equatable, Sendable {
+    let itemId: String
+    let title: String
+    let tainted: Bool
+    let reopened: Bool
 }
 
 /// Which events notify, when a banner would be pointless, and exactly what it says (D6
@@ -47,11 +62,15 @@ enum NotificationEvent: Sendable {
 enum NotificationPolicy {
     static let jobTitle = "Iris: a job needs you"
     static let approvalTitle = "Iris: approval waiting"
+    static let inboxTitle = "Iris: Inbox"
+    /// A tainted item's whole body (Brian, F6): its emitter had read outside content, so not even its title.
+    static let inboxGenericBody = "New Inbox item"
 
     enum Category {
         static let blockedCard = "iris.card.blocked"
         static let pausedCard = "iris.card.paused"
         static let ask = "iris.ask"
+        static let inbox = "iris.inbox"
     }
 
     enum Action {
@@ -65,6 +84,8 @@ enum NotificationPolicy {
         static let jobId = "jobId"
         static let askId = "askId"
         static let conversationId = "conversationId"
+        /// An inbox item's id, or empty for a burst: Open shows the mailbox list.
+        static let inboxItemId = "inboxItemId"
     }
 
     struct ActionSpec: Equatable, Sendable {
@@ -101,6 +122,8 @@ enum NotificationPolicy {
             openAction,
             ActionSpec(id: Action.deny, title: "Deny", destructive: true, foreground: false),
         ]),
+        // An answer needs the item open in front of Brian: Open only.
+        CategorySpec(id: Category.inbox, actions: [openAction]),
     ]
 
     static func decide(_ event: NotificationEvent, context: NotificationContext) -> PlannedNotification? {
@@ -143,8 +166,30 @@ enum NotificationPolicy {
                 identifier: id.uuidString, kind: .approvalWaiting, title: approvalTitle,
                 body: "Approval waiting for \(quoted(toolName)).",
                 categoryId: Category.ask, userInfo: info)
+
+        case .inbox(let notices):
+            guard context.inboxEnabled, !notices.isEmpty else { return nil }
+            // Already on screen: the mailbox is the pane in a visible, frontmost window.
+            if context.appActive, context.mainWindowVisible, context.inboxSelected { return nil }
+            guard notices.count == 1, let notice = notices.first else {
+                // A burst is one banner, the mailbox list behind it. Fixed words only.
+                return PlannedNotification(
+                    identifier: inboxBurstIdentifier, kind: .inboxItem, title: inboxTitle,
+                    body: "\(notices.count) Inbox items need your decision.",
+                    categoryId: Category.inbox, userInfo: [Key.inboxItemId: ""])
+            }
+            // The title only, quoted, never the situation; and for a tainted item not even that (F6).
+            let body = notice.tainted ? inboxGenericBody
+                : (notice.reopened ? "Reopened: \(quoted(notice.title))" : quoted(notice.title))
+            // Per item, so a second post for it replaces the first banner rather than stacking.
+            return PlannedNotification(
+                identifier: inboxIdentifierPrefix + notice.itemId, kind: .inboxItem, title: inboxTitle,
+                body: body, categoryId: Category.inbox, userInfo: [Key.inboxItemId: notice.itemId])
         }
     }
+
+    static let inboxIdentifierPrefix = "inbox-"
+    static let inboxBurstIdentifier = "inbox-burst"
 
     /// A name as a banner may show it, wrapped in `“…”`, or the fixed word `unnamed`.
     ///
