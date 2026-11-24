@@ -23,10 +23,10 @@ struct DelegatedSpendTests {
         private var queues: [String: [GeminiResponse]]
         private var calls: [String: Int] = [:]
         /// Parks a role's Nth call (1-based) until the test opens the gate.
-        private let gates: [String: (call: Int, gate: JobSchedulerTests.Gate)]
+        private let gates: [String: (call: Int, gate: TestGate)]
 
         init(_ queues: [String: [GeminiResponse]],
-             gates: [String: (call: Int, gate: JobSchedulerTests.Gate)] = [:]) {
+             gates: [String: (call: Int, gate: TestGate)] = [:]) {
             self.queues = queues
             self.gates = gates
         }
@@ -65,7 +65,7 @@ struct DelegatedSpendTests {
         func generateContent(request: GeminiRequest, tier: ModelTier) async throws -> GeminiResponse {
             let role = role(of: request)
             let (response, n) = next(for: role)
-            if let parked = gates[role], parked.call == n { await parked.gate.arriveAndWait() }
+            if let parked = gates[role], parked.call == n { await parked.gate.wait() }
             return response
         }
     }
@@ -357,7 +357,7 @@ struct DelegatedSpendTests {
 
     @Test("a delegated round writes the run's total to its row before the run's next round")
     func delegatedRoundsReachTheRow() async throws {
-        let gate = JobSchedulerTests.Gate()
+        let gate = TestGate()
         let client = RoutingClient([
             RoutingClient.parent: [calls([delegate("worker")], total: 10), text("all done", total: 5)],
             "WORKER": [calls([("noop_probe", [:])], total: 50), calls([finish("worked")], total: 1)],
@@ -370,14 +370,14 @@ struct DelegatedSpendTests {
 
         let jobRunner = runner(store, state, engine, config)
         let fire = Task { await jobRunner.fire(job: job, origin: .schedule) }
-        try await gate.waitForEntry()
+        try await gate.waitForArrivals(1)
 
         // Parked in the subagent's second call: the parent has made no round since delegating.
         let midRun = try #require(try store.ledger.runs(jobId: job.id, limit: 1).first)
         #expect(midRun.status == .running)
         #expect(midRun.totalTokens == 60, "the subagent's first round is on the row while it is still working")
 
-        await gate.open()
+        gate.open()
         _ = try await value(of: fire)
         let finished = try #require(try store.ledger.runs(jobId: job.id, limit: 1).first)
         #expect(finished.totalTokens == 66)

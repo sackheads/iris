@@ -15,41 +15,6 @@ struct JobSchedulerTests {
         var value: Int { lock.lock(); defer { lock.unlock() }; return n }
     }
 
-    /// A one-shot rendezvous: the handler signals it has started, then parks on a continuation
-    /// until the test opens the gate. Lets a test hold a fire open and drive an overlapping tick.
-    actor Gate {
-        private var entered = false
-        private var opened = false
-        private var entryWaiters: [CheckedContinuation<Void, Never>] = []
-        private var openWaiters: [CheckedContinuation<Void, Never>] = []
-
-        /// Called from inside the fire handler.
-        func arriveAndWait() async {
-            entered = true
-            for waiter in entryWaiters { waiter.resume() }
-            entryWaiters = []
-            if opened { return }
-            await withCheckedContinuation { openWaiters.append($0) }
-        }
-
-        /// Returns once the handler has reached `arriveAndWait`, or fails the test after
-        /// `seconds` rather than parking it for ever (#435).
-        func waitForEntry(within seconds: Double = 30, sourceLocation: SourceLocation = #_sourceLocation) async throws {
-            try await value(of: Task { await self.entry() }, within: seconds, sourceLocation: sourceLocation)
-        }
-
-        private func entry() async {
-            if entered { return }
-            await withCheckedContinuation { entryWaiters.append($0) }
-        }
-
-        func open() {
-            opened = true
-            for waiter in openWaiters { waiter.resume() }
-            openWaiters = []
-        }
-    }
-
     func scheduler(_ store: ConversationStore, now: Date, cap: Int = 3) -> (JobScheduler, Fired) {
         let fired = Fired()
         let s = JobScheduler(ledger: store.ledger, now: { now }, maxFiresPerTick: cap)
@@ -143,10 +108,10 @@ struct JobSchedulerTests {
         let store = try ConversationStore.inMemory()
         let now = Date(timeIntervalSince1970: 1_000_000)
         let (s, fired) = scheduler(store, now: now)
-        let gate = Gate()
+        let gate = TestGate()
         await s.setFireHandler { job, _ in
             fired.add(job.name)
-            await gate.arriveAndWait()
+            await gate.wait()
             return true
         }
         let job = Job(name: "slow", prompt: "p", trigger: .schedule(.interval(seconds: 300)),
@@ -154,9 +119,9 @@ struct JobSchedulerTests {
         try store.ledger.upsert(job)
 
         let first = Task { await s.tick() }
-        try await gate.waitForEntry()
+        try await gate.waitForArrivals(1)
         try store.ledger.setNextFire(jobId: job.id, at: now.addingTimeInterval(-1), lastRunAt: now)
-        await gate.open()
+        gate.open()
         #expect(await s.tick() == 1)
         #expect(fired.names == ["slow", "slow"])
         #expect(try await value(of: first) == 1)
@@ -173,11 +138,11 @@ struct JobSchedulerTests {
         let clock = MovableClock(start)
         let s = JobScheduler(ledger: store.ledger, now: { clock.now })
         let calls = Counter()
-        let gate = Gate()
+        let gate = TestGate()
         // Only the first handover parks: the whole question is how many more there are, and a
         // second one that parked too would hang the poll driving this test rather than fail it.
         await s.setFireHandler { _, _ in
-            if calls.next() == 1 { await gate.arriveAndWait() }
+            if calls.next() == 1 { await gate.wait() }
             return true
         }
         let job = Job(name: "slow", prompt: "p", trigger: .schedule(.interval(seconds: 60)),
@@ -185,14 +150,14 @@ struct JobSchedulerTests {
         try store.ledger.upsert(job)
 
         let firing = Task { await s.tick() }
-        try await gate.waitForEntry()
+        try await gate.waitForArrivals(1)
         // Three polls inside the same minute: only the first of them finds the job due.
         var handovers = 0
         for offset in [61.0, 71.0, 81.0] {
             clock.advance(by: offset - clock.now.timeIntervalSince(start))
             handovers += await s.tick()
         }
-        await gate.open()
+        gate.open()
         _ = try await value(of: firing)
 
         #expect(handovers == 1, "one occurrence, one trigger")

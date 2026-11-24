@@ -45,14 +45,14 @@ struct CatchUpTests {
         private var entries: [(name: String, note: String?)] = []
         private var inFlight = Set<String>()
         private var refuseFrom = Int.max
-        private var park: Gate?
+        private var park: TestGate?
         private(set) var overlapped = false
 
         /// The handler refuses every fire from the `n`th onwards (1-based), the way admission
         /// refuses a paused job, an open breaker or a gate that found nothing. `parkingFirstFireOn`
         /// holds the first fire open — a model turn outlasting the ten-second poll — so a test can
         /// drive a second tick while a burst is still running.
-        init(refusingFrom refuseFrom: Int = .max, parkingFirstFireOn park: Gate? = nil) {
+        init(refusingFrom refuseFrom: Int = .max, parkingFirstFireOn park: TestGate? = nil) {
             self.refuseFrom = refuseFrom
             self.park = park
         }
@@ -66,7 +66,7 @@ struct CatchUpTests {
                     return (entries.count < refuseFrom, entries.count == 1)
                 }
                 if first, let park {
-                    await park.arriveAndWait()
+                    await park.wait()
                 } else {
                     // A suspension point inside the fire, so two concurrent fires of one job would
                     // actually interleave rather than being serialised by luck.
@@ -80,40 +80,6 @@ struct CatchUpTests {
         var names: [String] { lock.withLock { entries.map(\.name) } }
         var notes: [String?] { lock.withLock { entries.map(\.note) } }
         var count: Int { lock.withLock { entries.count } }
-    }
-
-    /// A one-shot rendezvous: the handler signals it has started, then parks until the test opens
-    /// the gate. Lets a test hold a fire open and drive an overlapping tick, which is how the poll
-    /// loop and the wake observer both behave — each dispatches `tick()` detached.
-    actor Gate {
-        private var entered = false
-        private var opened = false
-        private var entryWaiters: [CheckedContinuation<Void, Never>] = []
-        private var openWaiters: [CheckedContinuation<Void, Never>] = []
-
-        func arriveAndWait() async {
-            entered = true
-            for waiter in entryWaiters { waiter.resume() }
-            entryWaiters = []
-            if opened { return }
-            await withCheckedContinuation { openWaiters.append($0) }
-        }
-
-        /// Fails the test after `seconds` rather than parking it for ever (#435).
-        func waitForEntry(within seconds: Double = 30, sourceLocation: SourceLocation = #_sourceLocation) async throws {
-            try await value(of: Task { await self.entry() }, within: seconds, sourceLocation: sourceLocation)
-        }
-
-        private func entry() async {
-            if entered { return }
-            await withCheckedContinuation { entryWaiters.append($0) }
-        }
-
-        func open() {
-            opened = true
-            for waiter in openWaiters { waiter.resume() }
-            openWaiters = []
-        }
     }
 
     // MARK: The three policies over one eight-hour sleep
@@ -191,7 +157,7 @@ struct CatchUpTests {
     }
 
     // The failure this exists to catch fails fast, and a future change that handed this job no
-    // fires at all fails `waitForEntry()` at its bound (#435); `.timeLimit` is the backstop.
+    // fires at all fails `waitForArrivals(1)` at its bound (#435); `.timeLimit` is the backstop.
     @Test("a burst still running is not planned a second time by an overlapping tick",
           .timeLimit(.minutes(1)))
     func aTruncatedBurstIsNotPlannedTwice() async throws {
@@ -202,18 +168,18 @@ struct CatchUpTests {
         // burst is still running and must not start a second one on top of it.
         let store = try ConversationStore.inMemory()
         let scheduler = JobScheduler(ledger: store.ledger, now: { Self.now }, maxFiresPerTick: 3)
-        let gate = Gate()
+        let gate = TestGate()
         let fires = Handovers(parkingFirstFireOn: gate)
         await scheduler.setFireHandler(fires.handler())
         try store.ledger.upsert(Self.job(.replay(cap: 5)))
 
         let firstTick = Task { await scheduler.tick() }
-        try await gate.waitForEntry()
+        try await gate.waitForArrivals(1)
         #expect(try store.ledger.job(named: "behind")?.nextFireAt == Self.at(8, 30),
                 "the row is due again on purpose: three of the five slots have been handed over")
 
         let overlapping = await scheduler.tick()
-        await gate.open()
+        gate.open()
         let started = try await value(of: firstTick)
 
         #expect(overlapping == 0, "the burst in flight owns the job until it ends")

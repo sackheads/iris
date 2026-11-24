@@ -12,16 +12,16 @@ import Foundation
     /// each request with the tier it asked for. The summary request is recognised by its prompt,
     /// not by call order, so a turn that sneaks in between cannot shift the script.
     final class RotationClient: LLMClientProtocol, @unchecked Sendable {
-        enum Summary { case reply(String), fail, gated(JobSchedulerTests.Gate, String) }
+        enum Summary { case reply(String), fail, gated(TestGate, String) }
 
         private let lock = NSLock()
         private var recorded: [(request: GeminiRequest, tier: ModelTier)] = []
         private let summary: Summary
         /// When set, the reflection request parks here until the test opens it or the turn is
         /// cancelled.
-        private let reflectionGate: JobSchedulerTests.Gate?
+        private let reflectionGate: TestGate?
 
-        init(summary: Summary, reflectionGate: JobSchedulerTests.Gate? = nil) {
+        init(summary: Summary, reflectionGate: TestGate? = nil) {
             self.summary = summary
             self.reflectionGate = reflectionGate
         }
@@ -51,11 +51,8 @@ import Foundation
                 if let reflectionGate, Self.texts(request).contains(where: { $0.contains("[Reflection Trigger]") }) {
                     // Honours cancellation, as URLSession does: a reflection is an ordinary turn
                     // and stops at the engine's cancellation like any other.
-                    await withTaskCancellationHandler {
-                        await reflectionGate.arriveAndWait()
-                    } onCancel: {
-                        Task { await reflectionGate.open() }
-                    }
+                    // A stopped reflection opens the gate, so the test's next rotation passes it.
+                    do { try await reflectionGate.waitOrThrow() } catch { reflectionGate.open(); throw error }
                     try Task.checkCancellation()
                 }
                 return text("No memory consolidation needed at this time.")
@@ -64,7 +61,7 @@ import Foundation
             case .reply(let s): return text(s)
             case .fail: throw APIError(message: "summary call failed")
             case .gated(let gate, let s):
-                await gate.arriveAndWait()
+                await gate.waitIgnoringCancellation()
                 return text(s)
             }
         }
@@ -85,7 +82,7 @@ import Foundation
     }()
 
     private func harness(_ summary: RotationClient.Summary,
-                         reflectionGate: JobSchedulerTests.Gate? = nil,
+                         reflectionGate: TestGate? = nil,
                          protection: Bool = false) throws -> Harness {
         let store = try ConversationStore.inMemory()
         let state = AppState(store: store, tier2Provisioning: .provisioned, tier3Provisioning: .provisioned)
@@ -149,13 +146,13 @@ import Foundation
         try await bounded("rotation to finish") { await task.value }
     }
 
-    private func waitForEntry(_ gate: JobSchedulerTests.Gate) async throws {
-        try await gate.waitForEntry(within: 10)
+    private func waitForEntry(_ gate: TestGate) async throws {
+        try await gate.waitForArrivals(1, within: 10)
     }
 
     /// Opens `gate` when the test leaves, on every path, so nothing parked on it outlives the test.
-    private func release(_ gate: JobSchedulerTests.Gate) {
-        Task { await gate.open() }
+    private func release(_ gate: TestGate) {
+        gate.open()
     }
 
     // MARK: -
@@ -225,7 +222,7 @@ import Foundation
     /// turn; see `cardDuringReflectionReachesTheSummary`), so a card delivered while it
     /// runs lands in the new Iris, never in the one about to be archived.
     @Test func cardMidRotationLandsInNewIris() async throws {
-        let gate = JobSchedulerTests.Gate()
+        let gate = TestGate()
         defer { release(gate) }
         let h = try harness(.gated(gate, "summary"))
         let task = try #require(startRotation(h.state))
@@ -238,7 +235,7 @@ import Foundation
         // On disk before the summary arrives, so the summary's insert at 0 has to rewrite rows
         // already written rather than ride along in the card's own pending append.
         h.state.flushSave()
-        await gate.open()
+        gate.open()
         try await finish(task)
 
         let newId = try pinnedId(h.state)
@@ -270,7 +267,7 @@ import Foundation
     /// The reflection is a full turn that runs BEFORE the pin moves, so a card delivered during
     /// it lands in the old Iris. The summary's input carries event cards, so the new Iris hears.
     @Test func cardDuringReflectionReachesTheSummary() async throws {
-        let gate = JobSchedulerTests.Gate()
+        let gate = TestGate()
         defer { release(gate) }
         let h = try harness(.reply("summary"), reflectionGate: gate)
         let task = try #require(startRotation(h.state))
@@ -279,7 +276,7 @@ import Foundation
         let card = EventCard(runId: UUID(), jobId: UUID(), jobName: "duringreflection", status: .completed,
                              outcome: "tock", startedAt: Date(), finishedAt: Date())
         await h.state.deliverEvent(card, to: h.state.activityConversationId())
-        await gate.open()
+        gate.open()
         try await finish(task)
 
         #expect(h.state.conversations.first { $0.id == h.oldId }?.messages.contains { $0.role == .event } == true,
@@ -293,7 +290,7 @@ import Foundation
 
     /// The new Iris is selected only if the owner was still looking at the old one.
     @Test func selectionChangedDuringReflectionIsKept() async throws {
-        let gate = JobSchedulerTests.Gate()
+        let gate = TestGate()
         defer { release(gate) }
         let h = try harness(.reply("summary"), reflectionGate: gate)
         let task = try #require(startRotation(h.state))
@@ -302,7 +299,7 @@ import Foundation
         h.state.createNewConversation(id: elsewhere)   // selects itself, as the owner switching would
         #expect(h.state.selectedConversationId == elsewhere)
 
-        await gate.open()
+        gate.open()
         try await finish(task)
 
         #expect(h.state.selectedConversationId == elsewhere)
@@ -362,7 +359,7 @@ import Foundation
     /// Once the pin has moved, the new Iris has no turn in flight, so a second `/new` would pass
     /// `archiveRefusal` and start a second rotation over the first one's half-built conversation.
     @Test func secondNewDuringRotationIsRefused() async throws {
-        let gate = JobSchedulerTests.Gate()
+        let gate = TestGate()
         defer { release(gate) }
         let h = try harness(.gated(gate, "summary"))
         let task = try #require(startRotation(h.state))
@@ -375,21 +372,21 @@ import Foundation
         #expect(h.state.rotationTask == task)
         #expect(h.state.conversations.count == count)
         #expect(try pinnedId(h.state) == midId)
-        await gate.open()
+        gate.open()
         try await finish(task)
         #expect(try pinnedId(h.state) == midId)
         try expectPinValid(h.state, "second /new")
     }
 
     @Test func peerTurnDuringRotationSkipsArchive() async throws {
-        let gate = JobSchedulerTests.Gate()
+        let gate = TestGate()
         defer { release(gate) }
         let h = try harness(.gated(gate, "summary"))
         let task = try #require(startRotation(h.state))
         try await waitForEntry(gate)
 
         h.state.beginEngineTurn(for: h.oldId)   // a peer's turn arrives in the old conversation
-        await gate.open()
+        gate.open()
         try await finish(task)
 
         let newId = try pinnedId(h.state)
@@ -412,14 +409,14 @@ import Foundation
             try expectPinValid(h.state, "\(summary)")
             #expect(try pinnedId(h.state) != h.oldId)
         }
-        let gate = JobSchedulerTests.Gate()
+        let gate = TestGate()
         defer { release(gate) }
         let h = try harness(.gated(gate, "s"))
         let task = try #require(startRotation(h.state))
         try await waitForEntry(gate)
         try expectPinValid(h.state, "peer, mid")
         h.state.beginEngineTurn(for: h.oldId)
-        await gate.open()
+        gate.open()
         try await finish(task)
         try expectPinValid(h.state, "peer, after")
         h.state.endEngineTurn(for: h.oldId)
@@ -472,7 +469,7 @@ import Foundation
     }
 
     @Test func stopDuringReflectionChangesNothing() async throws {
-        let gate = JobSchedulerTests.Gate()
+        let gate = TestGate()
         defer { release(gate) }
         let h = try harness(.reply("summary"), reflectionGate: gate)
         let count = h.state.conversations.count
@@ -499,7 +496,7 @@ import Foundation
 
     /// The summary call ignores cancellation, as a wedged provider would; Stop must not wait for it.
     @Test func stopDuringSummaryFinishesWithoutIt() async throws {
-        let gate = JobSchedulerTests.Gate()
+        let gate = TestGate()
         defer { release(gate) }
         let h = try harness(.gated(gate, "never shown"))
         let task = try #require(startRotation(h.state))
@@ -520,7 +517,7 @@ import Foundation
         #expect(h.state.rotationTask == nil)
         try expectPinValid(h.state, "stopped in summary")
 
-        await gate.open()
+        gate.open()
         try await finish(try #require(startRotation(h.state)))
         #expect(try pinnedId(h.state) != newId)
         try expectPinValid(h.state, "after a stopped rotation")
@@ -529,7 +526,7 @@ import Foundation
     /// If the owner already started a turn in the new Iris, the engine owns its history until the
     /// turn ends; the opening is queued and flushed then, not written underneath it.
     @Test func openingQueuesBehindATurnInTheNewIris() async throws {
-        let gate = JobSchedulerTests.Gate()
+        let gate = TestGate()
         defer { release(gate) }
         let h = try harness(.gated(gate, "summary"))
         let task = try #require(startRotation(h.state))
@@ -537,7 +534,7 @@ import Foundation
         let newId = try pinnedId(h.state)
 
         h.state.beginEngineTurn(for: newId)
-        await gate.open()
+        gate.open()
         try await finish(task)
 
         func summaryInHistory() -> Bool {

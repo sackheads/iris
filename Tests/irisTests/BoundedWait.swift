@@ -200,6 +200,12 @@ final class TestGate: @unchecked Sendable {
         }
     }
 
+    /// `wait()` deaf to its task's cancellation, for a stub that stands in for something that ignores it (a wedged
+    /// provider): only a release or the deadline ends it, so it still cannot outlive its test.
+    func waitIgnoringCancellation(sourceLocation: SourceLocation = #_sourceLocation) async {
+        if await park(honouringCancel: false) == .deadline { onTimeout(TestGateDeadline(seconds: deadline).description, sourceLocation) }
+    }
+
     /// Latches: every parked and later wait passes.
     func open() {
         let all = lock.withLock { () -> [CheckedContinuation<Outcome, Never>] in
@@ -264,8 +270,8 @@ final class TestGate: @unchecked Sendable {
     }
 
     /// One wait, resumed exactly once by whichever claimant takes it out of `parked` first: a release, the
-    /// cancel handler or the deadline. A cancel that lands before the park is seen by `Task.isCancelled`.
-    private func park() async -> Outcome {
+    /// cancel handler (unless `honouringCancel` is off) or the deadline. A cancel that lands before the park is seen by `Task.isCancelled`.
+    private func park(honouringCancel: Bool = true) async -> Outcome {
         let id = lock.withLock { nextID += 1; return nextID }
         return await withTaskCancellationHandler {
             await withCheckedContinuation { (c: CheckedContinuation<Outcome, Never>) in
@@ -276,7 +282,7 @@ final class TestGate: @unchecked Sendable {
                     let waiters = reached.values.map(\.continuation)
                     if opened { return (.released, waiters) }
                     if banked > 0 { banked -= 1; return (.released, waiters) }
-                    if Task.isCancelled { return (.cancelled, waiters) }
+                    if honouringCancel && Task.isCancelled { return (.cancelled, waiters) }
                     parked.append((id, c))
                     return (nil, waiters)
                 }
@@ -288,7 +294,7 @@ final class TestGate: @unchecked Sendable {
                 }
             }
         } onCancel: {
-            take(id)?.resume(returning: .cancelled)
+            if honouringCancel { take(id)?.resume(returning: .cancelled) }
         }
     }
 

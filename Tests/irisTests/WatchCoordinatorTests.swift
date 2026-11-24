@@ -65,37 +65,6 @@ struct WatchCoordinatorTests {
         }
     }
 
-    /// A one-shot rendezvous, so a test can hold one subscriber's handler open while the loop
-    /// keeps serving the others.
-    actor Gate {
-        private var entered = false
-        private var opened = false
-        private var openWaiters: [CheckedContinuation<Void, Never>] = []
-
-        func arriveAndWait() async {
-            entered = true
-            if opened { return }
-            await withCheckedContinuation { openWaiters.append($0) }
-        }
-
-        /// Bounded, for `waitFor`'s reason: a regression that stops the fire being dispatched
-        /// should fail the test that waited, naming what it waited for, rather than park it
-        /// forever and turn `swift test` into a CI timeout with no test named.
-        func waitForEntry(sourceLocation: SourceLocation = #_sourceLocation) async {
-            for _ in 0..<500 {
-                if entered { return }
-                try? await Task.sleep(for: .milliseconds(10))
-            }
-            Issue.record("waited 5s for a handler to enter the gate", sourceLocation: sourceLocation)
-        }
-
-        func open() {
-            opened = true
-            for waiter in openWaiters { waiter.resume() }
-            openWaiters = []
-        }
-    }
-
     static func handler(_ recorder: Recorder) -> WatchFireHandler {
         { job, fire in await recorder.record(job, fire) }
     }
@@ -456,7 +425,7 @@ struct WatchCoordinatorTests {
         let store = try ConversationStore.inMemory()
         let clock = Clock(Self.t0)
         let recorder = Recorder()
-        let gate = Gate()
+        let gate = TestGate()
         let parked = Self.job("parked", root: "/a")
         let other = Self.job("other", root: "/b")
         try store.ledger.upsert(parked)
@@ -465,7 +434,7 @@ struct WatchCoordinatorTests {
             ledger: store.ledger, now: { clock.now }, recentWrites: RecentWrites(now: { clock.now }),
             fire: { job, fire in
                 let admission = await recorder.record(job, fire)
-                if job.id == parked.id { await gate.arriveAndWait() }
+                if job.id == parked.id { await gate.wait() }
                 return admission
             }, rootExists: { _ in true })
         await coordinator.sync(with: [parked, other])
@@ -473,7 +442,7 @@ struct WatchCoordinatorTests {
         await coordinator.deliver(root: "/a", paths: ["/a/one.txt"])
         clock.set(Self.at(3))
         await coordinator.tick(now: Self.at(3))
-        await gate.waitForEntry()
+        try await gate.waitForArrivals(1)
 
         // The first handler is still inside its run. The loop is not.
         clock.set(Self.at(4))
@@ -484,7 +453,7 @@ struct WatchCoordinatorTests {
         #expect(await recorder.fires.last?.job.id == other.id)
         #expect(await coordinator.snapshot(parked.id)?.fireOutstanding == true)
 
-        await gate.open()
+        gate.open()
         await Self.eventually("the parked fire to finish") {
             await coordinator.snapshot(parked.id)?.fireOutstanding == false
         }
@@ -503,14 +472,14 @@ struct WatchCoordinatorTests {
         // Fire #1 answers `.run` (late, from inside the gate); fire #2 answers `.queued`, so it is
         // still outstanding and still holding its paths when the stale answer arrives.
         let recorder = Recorder([.run, .queued])
-        let gate = Gate()
+        let gate = TestGate()
         var job = Self.job("moving", root: "/old")
         try store.ledger.upsert(job)
         let coordinator = WatchCoordinator(
             ledger: store.ledger, now: { clock.now }, recentWrites: RecentWrites(now: { clock.now }),
             fire: { j, f in
                 let admission = await recorder.record(j, f)
-                if f.paths.first?.hasPrefix("/old") == true { await gate.arriveAndWait() }
+                if f.paths.first?.hasPrefix("/old") == true { await gate.wait() }
                 return admission
             }, rootExists: { _ in true })
         await coordinator.sync(with: [job])
@@ -518,7 +487,7 @@ struct WatchCoordinatorTests {
         await coordinator.deliver(root: "/old", paths: ["/old/a.txt"])
         clock.set(Self.at(3))
         await coordinator.tick(now: Self.at(3))
-        await gate.waitForEntry()
+        try await gate.waitForArrivals(1)
 
         // Re-registered onto another root while handler #1 is still inside its run.
         clock.set(Self.at(4))
@@ -536,7 +505,7 @@ struct WatchCoordinatorTests {
         #expect(await recorder.paths.last == ["/new/b.txt", "/new/c.txt"])
 
         // Now handler #1 answers `.run` for a fire that no longer exists.
-        await gate.open()
+        gate.open()
         // It arrives on a task of its own; give it every chance to land on the wrong subscriber.
         try await Task.sleep(for: .milliseconds(100))
 
@@ -569,14 +538,14 @@ struct WatchCoordinatorTests {
         // Fire #1 answers `.run` from inside the gate; fire #2 answers `.queued`, so it is still
         // outstanding and still holding its paths when the stale answer arrives.
         let recorder = Recorder([.run, .queued])
-        let gate = Gate()
+        let gate = TestGate()
         var job = Self.job("paused-mid-run", root: "/r")
         try store.ledger.upsert(job)
         let coordinator = WatchCoordinator(
             ledger: store.ledger, now: { clock.now }, recentWrites: RecentWrites(now: { clock.now }),
             fire: { j, f in
                 let admission = await recorder.record(j, f)
-                if f.paths == ["/r/a.txt"] { await gate.arriveAndWait() }
+                if f.paths == ["/r/a.txt"] { await gate.wait() }
                 return admission
             }, rootExists: { _ in true })
         await coordinator.sync(with: [job])
@@ -585,7 +554,7 @@ struct WatchCoordinatorTests {
         await coordinator.deliver(root: "/r", paths: ["/r/a.txt"])
         clock.set(Self.at(3))
         await coordinator.tick(now: Self.at(3))
-        await gate.waitForEntry()
+        try await gate.waitForArrivals(1)
 
         // Paused while the run is going: `sync` takes the subscriber away entirely.
         clock.set(Self.at(4))
@@ -607,7 +576,7 @@ struct WatchCoordinatorTests {
         #expect(await recorder.paths.last == ["/r/b.txt", "/r/c.txt"])
 
         // Handler #1 finally answers, for a fire two subscribers ago.
-        await gate.open()
+        gate.open()
         try await Task.sleep(for: .milliseconds(100))
 
         let snapshot = try #require(await coordinator.snapshot(jobId))
@@ -630,14 +599,14 @@ struct WatchCoordinatorTests {
         let store = try ConversationStore.inMemory()
         let clock = Clock(Self.t0)
         let recorder = Recorder([.run])
-        let gate = Gate()
+        let gate = TestGate()
         let job = Self.job("run", root: "/r")
         try store.ledger.upsert(job)
         let coordinator = WatchCoordinator(
             ledger: store.ledger, now: { clock.now }, recentWrites: RecentWrites(now: { clock.now }),
             fire: { j, f in
                 let admission = await recorder.record(j, f)
-                await gate.arriveAndWait()
+                await gate.wait()
                 return admission
             }, rootExists: { _ in true })
         await coordinator.sync(with: [job])
@@ -645,7 +614,7 @@ struct WatchCoordinatorTests {
         await coordinator.deliver(root: "/r", paths: ["/r/a.txt"])
         clock.set(Self.at(3))
         await coordinator.tick(now: Self.at(3))
-        await gate.waitForEntry()
+        try await gate.waitForArrivals(1)
         #expect(await recorder.fires.first?.fire.paths == ["/r/a.txt"])
 
         // `b` arrives while the run is going: it is held, never handed to this fire.
@@ -656,7 +625,7 @@ struct WatchCoordinatorTests {
         #expect(during.held == 1, "and b is the hold's")
 
         clock.set(Self.at(9))
-        await gate.open()
+        gate.open()
         await Self.eventually("the run to be applied") {
             await coordinator.snapshot(job.id)?.fireOutstanding == false
         }
@@ -678,14 +647,14 @@ struct WatchCoordinatorTests {
         let store = try ConversationStore.inMemory()
         let clock = Clock(Self.t0)
         let recorder = Recorder()
-        let gate = Gate()
+        let gate = TestGate()
         let job = Self.job("leaky", root: "/r")
         try store.ledger.upsert(job)
         let coordinator = WatchCoordinator(
             ledger: store.ledger, now: { clock.now }, recentWrites: RecentWrites(now: { clock.now }),
             fire: { j, f in
                 let admission = await recorder.record(j, f)
-                if f.paths == ["/r/a.txt"] { await gate.arriveAndWait() }
+                if f.paths == ["/r/a.txt"] { await gate.wait() }
                 return admission
             }, rootExists: { _ in true })
         await coordinator.sync(with: [job])
@@ -693,14 +662,14 @@ struct WatchCoordinatorTests {
         await coordinator.deliver(root: "/r", paths: ["/r/a.txt"])
         clock.set(Self.at(3))
         await coordinator.tick(now: Self.at(3))
-        await gate.waitForEntry()
+        try await gate.waitForArrivals(1)
 
         // During the run: nothing but noise. It is counted in the burst (the fire is out) and
         // nothing of it survives into a new burst, because there is no arrival to begin one.
         clock.set(Self.at(4))
         await coordinator.deliver(root: "/r", paths: ["/r/.DS_Store", "/r/x.tmp"])
         clock.set(Self.at(5))
-        await gate.open()
+        gate.open()
         await Self.eventually("the run to be applied") {
             await coordinator.snapshot(job.id)?.fireOutstanding == false
         }
@@ -732,7 +701,7 @@ struct WatchCoordinatorTests {
         let store = try ConversationStore.inMemory()
         let clock = Clock(Self.t0)
         let recorder = Recorder()
-        let gate = Gate()
+        let gate = TestGate()
         let job = Self.job("resave", root: "/r")
         try store.ledger.upsert(job)
         let coordinator = WatchCoordinator(
@@ -740,7 +709,7 @@ struct WatchCoordinatorTests {
             fire: { j, f in
                 let admission = await recorder.record(j, f)
                 // Only the first fire parks: the second carries the same path.
-                if await recorder.count == 1 { await gate.arriveAndWait() }
+                if await recorder.count == 1 { await gate.wait() }
                 return admission
             }, rootExists: { _ in true })
         await coordinator.sync(with: [job])
@@ -748,7 +717,7 @@ struct WatchCoordinatorTests {
         await coordinator.deliver(root: "/r", paths: ["/r/a.txt"])
         clock.set(Self.at(3))
         await coordinator.tick(now: Self.at(3))
-        await gate.waitForEntry()
+        try await gate.waitForArrivals(1)
         #expect(await recorder.paths == [["/r/a.txt"]])
 
         // The same file, saved again while the run is going.
@@ -759,7 +728,7 @@ struct WatchCoordinatorTests {
         #expect(during.held == 1, "and the re-saved `a` is a new arrival in the hold")
 
         clock.set(Self.at(43))
-        await gate.open()
+        gate.open()
         await Self.eventually("the run to be applied") {
             await coordinator.snapshot(job.id)?.fireOutstanding == false
         }
@@ -1352,14 +1321,14 @@ struct WatchCoordinatorTests {
         let store = try ConversationStore.inMemory()
         let clock = Clock(Self.t0)
         let recorder = Recorder()
-        let gate = Gate()
+        let gate = TestGate()
         let job = Self.job("notes", root: "/r")
         try store.ledger.upsert(job)
         let coordinator = WatchCoordinator(ledger: store.ledger, now: { clock.now },
                                            recentWrites: RecentWrites(now: { clock.now }),
                                            fire: { job, fire in
             // The first fire is the run; it stays open until the test lets it return.
-            if await recorder.count == 0 { await gate.arriveAndWait() }
+            if await recorder.count == 0 { await gate.wait() }
             return await recorder.record(job, fire)
         }, rootExists: { _ in true })
         await coordinator.sync(with: [job])
@@ -1369,7 +1338,7 @@ struct WatchCoordinatorTests {
         await Self.eventually("the loop to park on its idle wait") { await sleeps.parkedOnTheIdleWait }
 
         await coordinator.deliver(root: "/r", paths: ["/r/a.txt"])
-        await gate.waitForEntry()
+        try await gate.waitForArrivals(1)
         // Saved again mid-run: held, and the loop is back on its idle wait.
         await coordinator.deliver(root: "/r", paths: ["/r/a.txt"])
         await Self.eventually("the loop to park again behind the outstanding fire") {
@@ -1378,7 +1347,7 @@ struct WatchCoordinatorTests {
             await sleeps.requested.filter { $0 >= 30 }.count >= 3
         }
 
-        await gate.open()
+        gate.open()
 
         await recorder.waitFor(2)
         #expect(await recorder.paths == [["/r/a.txt"], ["/r/a.txt"]])

@@ -66,7 +66,7 @@ struct SubagentGoalLoopTests {
     /// which a 0.01 s delay would hide. Only the turn-2 test pays it.
     static let delayPastTheGrace: TimeInterval = 0.6
 
-    typealias Gate = JobSchedulerTests.Gate
+    typealias Gate = TestGate
 
     /// Answers each call with text, the first one only once the gate opens, whether or not the
     /// call was cancelled meanwhile.
@@ -77,7 +77,7 @@ struct SubagentGoalLoopTests {
         var calls: Int { lock.withLock { count } }
         func generateContent(request: GeminiRequest, tier: ModelTier) async throws -> GeminiResponse {
             let n = lock.withLock { count += 1; return count }
-            if n == 1 { await gate.arriveAndWait() }
+            if n == 1 { await gate.wait() }
             return SubagentGoalLoopTests.text("still working")
         }
     }
@@ -358,7 +358,7 @@ struct SubagentGoalLoopTests {
         // Halted while the turn is in its model call, with the goal still set: only the halt can
         // keep the turn's tail from scheduling the next one.
         engine.haltGoalLoop(for: id, cancelling: false)
-        await client.gate.open()
+        client.gate.open()
         try await value(of: turn)
 
         try? await Task.sleep(nanoseconds: 300_000_000)
