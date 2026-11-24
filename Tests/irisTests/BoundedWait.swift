@@ -181,7 +181,9 @@ final class TestGate: @unchecked Sendable {
     }
 
     /// Parks until a release, this task's cancellation or the deadline. Never throws, so a `.block`
-    /// step or a non-throwing stub keeps its signature; a deadline hit is reported all the same.
+    /// step or a non-throwing stub keeps its signature; a deadline hit is reported all the same. It returns
+    /// normally on a cancel too, so a stub that does more after its wait does it on a cancelled task: one whose
+    /// later work must not run then uses `waitOrThrow()`.
     func wait(sourceLocation: SourceLocation = #_sourceLocation) async {
         if await park() == .deadline { onTimeout(TestGateDeadline(seconds: deadline).description, sourceLocation) }
     }
