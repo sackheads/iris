@@ -77,7 +77,8 @@ struct JobRunInboxTests {
     @Test("a scheduled or polled job's run is offered inbox_item; a watch's run and an unstamped background turn are not")
     func gateByTrigger() async throws {
         let (store, app) = try state()
-        let scheduled = job(), watch = job(.fsEvent(FSWatch(path: "/tmp/w")))
+        var watch = job(.fsEvent(FSWatch(path: "/tmp/w"))); watch.name = "save-watch"
+        let scheduled = job()
         try store.ledger.upsert(scheduled); try store.ledger.upsert(watch)
         #expect(await offered(app, runConversation(app, for: scheduled)).contains("inbox_item"))
         #expect(!(await offered(app, runConversation(app, for: watch))).contains("inbox_item"))
