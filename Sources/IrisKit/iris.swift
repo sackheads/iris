@@ -8538,7 +8538,9 @@ actor IrisEngine {
             let localState = state
             await MainActor.run { localState?.recordSubagentWrite(conversationId: cid, path: resolved) }
             // #1295 (b'): the bytes asked for, not a read-back, so a shell that swaps the file in between
-            // vouches for nothing. Only an owner's conversation that has read nothing from outside.
+            // vouches for nothing. Only an owner's conversation that has read nothing from outside. A non-owner
+            // can't reach here today (a confined policy's write under ~/.iris is refused in `ToolExecutor`); the
+            // owner check holds if a grant ever lets one write there.
             if GuardTrustStore.covers(resolved), let content = execArgs["content"]?.stringValue,
                await callIsOwner(cid),
                let localState, await MainActor.run(body: { !localState.readUntrustedThroughDelegation(cid) }) {
