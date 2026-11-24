@@ -90,6 +90,13 @@ struct InboxView: View {
             freeText = ""
             lastOutcome = nil
         }
+        // An item opened from outside the list (a notification's Open, #920 slice 5) shows in the mailbox,
+        // so a selection the Archive view doesn't hold switches back to it rather than showing nothing.
+        .onChange(of: state.selectedInboxItemId) {
+            if showingArchive, let id = state.selectedInboxItemId, !items.contains(where: { $0.id == id }) {
+                showingArchive = false
+            }
+        }
         .navigationTitle("Inbox")
     }
 
