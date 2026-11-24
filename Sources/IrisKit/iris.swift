@@ -4257,7 +4257,9 @@ actor IrisEngine {
         // (Google, jobs, sessions, workspace, MCP and plugin tools): none has an approval step.
         let guestSensitiveOffered = toolsList.contains { ToolClassTable.isOwnerOnly($0.name) }
         let guestOrigin = guestSensitiveOffered ? await isGuestOriginConversation(conversationId) : false
-        let nonOwnerTurn = guestSensitiveOffered && principal == .main ? !(await callIsOwner(conversationId)) : false
+        // A subagent or evaluator carries its parent turn's binding (#1306); a guest and a broker have their own floors.
+        let bindingGated = principal == .main || principal == .subagent || principal == .evaluator
+        let nonOwnerTurn = guestSensitiveOffered && bindingGated ? !(await callIsOwner(conversationId)) : false
         toolsList = Self.hardStrip(toolsList, isUnattended: isUnattended, principal: principal, guestOrigin: guestOrigin,
                                    nonOwner: nonOwnerTurn)
         if stickyApplies {
@@ -6039,13 +6041,19 @@ actor IrisEngine {
     /// binding is read only for a tool the table refuses to non-owners.
     func toolClassGate(tool: String, conversationId: UUID) async -> String? {
         // The shared `.main` engine serves the owner, role sessions, guest-steered turns and job runs, and its
-        // binding varies per turn. Every other principal has its own gate: a guest's floor, a subagent's
-        // `mainOnlyDeclared`, the evaluator's allowlist.
-        guard principal == .main, ToolClassTable.isOwnerOnly(tool) else { return nil }
+        // binding varies per turn. A subagent or evaluator carries its parent turn's binding, capped (#1306): a
+        // profile-bound session's subagent is non-owner too. A guest and a broker have their own floors.
+        guard principal == .main || principal == .subagent || principal == .evaluator,
+              ToolClassTable.isOwnerOnly(tool) else { return nil }
         let binding = await bindingForCall(conversationId: conversationId)
         guard !binding.isOwner else { return nil }
         let localState = state
-        let profileId = await MainActor.run { localState?.persistedAccessProfileId(for: conversationId) }
+        // A subagent's own conversation carries no profile; the session it was delegated from does (#1306).
+        let named = principal == .main ? conversationId : nil
+        let profileId = await MainActor.run { () -> String? in
+            guard let localState else { return nil }
+            return localState.persistedAccessProfileId(for: named ?? localState.delegationRoot(of: conversationId))
+        }
         // What the refusal says is `ToolClassTable.refusal`: the tool and its class first, then whose turn it is.
         // `hardStrip` only stops a well-behaved model, so this is the half that holds against a forged call or a
         // stale declaration, and it comes before anything that could read or write.
@@ -6478,7 +6486,7 @@ actor IrisEngine {
                                                     guestOrigin: githubGuestOrigin) {
             return refusal
         }
-        if let refusal = await toolClassGate(tool: functionCall.name, conversationId: conversationId) {
+        if principal == .main, let refusal = await toolClassGate(tool: functionCall.name, conversationId: conversationId) {
             return refusal
         }
         if Self.jobCreationTools.contains(functionCall.name), isUnattended {
@@ -6489,6 +6497,13 @@ actor IrisEngine {
         // above.
         if Self.jobCreationTools.contains(functionCall.name), principal != .main {
             return Self.subagentJobCreationRefusal
+        }
+        // #1306: a subagent or evaluator of a turn that is not the owner's meets the class gate too, after its own
+        // job refusal above. A `mainOnlyDeclared` tool is left to #811's not-offered refusal below, which is what a
+        // subagent has always been told for those.
+        if principal == .subagent || principal == .evaluator, !Self.mainOnlyDeclared.contains(functionCall.name),
+           let refusal = await toolClassGate(tool: functionCall.name, conversationId: conversationId) {
+            return refusal
         }
         // #811: the job tools act (hooks, an approval prompt) before the general check below, so a
         // call to one this round did not offer stops here.
