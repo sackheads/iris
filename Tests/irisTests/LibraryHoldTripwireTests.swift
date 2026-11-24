@@ -76,11 +76,13 @@ struct LibraryHoldTripwireTurnTests {
 /// The structural half: a reader of the two folders anywhere in the product. The live half only
 /// sees the turns it drives; a new route (a job, a goal kickoff, a profile prompt) reading the
 /// library would get past it. The only code that may name the folders today creates them
-/// (`IrisPaths.ensureDirectories`), seeds shipped files into them (`ShippedSkills`), or migrates
-/// an old layout (`IrisMigrator`).
+/// (`IrisPaths.ensureDirectories`), seeds shipped files into them (`ShippedSkills`), migrates
+/// an old layout (`IrisMigrator`), or vouches for what Iris wrote there (`GuardTrustStore`, #1295 b').
 @Suite("no product code reads library/artifacts while unheld (#1295)")
 struct LibraryHoldTripwireSourceScanTests {
-    static let allowedFiles: Set<String> = ["IrisPaths.swift", "ShippedSkills.swift", "IrisMigrator.swift"]
+    /// `GuardTrustStore` (#1295 b') names them to decide which reads the guard may skip: it reads hashes of
+    /// what Iris wrote there, never the text into a prompt.
+    static let allowedFiles: Set<String> = ["IrisPaths.swift", "ShippedSkills.swift", "IrisMigrator.swift", "GuardTrustStore.swift"]
 
     @Test("libraryDir and artifactsDir appear only where the folders are made, seeded or migrated")
     func onlyAllowedFilesNameTheFolders() throws {

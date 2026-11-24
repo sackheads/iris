@@ -26,7 +26,7 @@ enum ShippedSkills {
 
     /// Production entry point: reads the bundled assets and seeds each into the install if absent.
     static func seedIfNeeded(_ paths: IrisPaths) {
-        let replaced = seed([
+        let items = [
             SeedItem(asset: "library-SKILL", content: bundledText("library-SKILL"),
                      target: paths.skillsDir.appendingPathComponent("library/SKILL.md")),
             SeedItem(asset: "library-README", content: bundledText("library-README"),
@@ -41,8 +41,17 @@ enum ShippedSkills {
                      target: paths.skillsDir.appendingPathComponent("google-workspace/SKILL.md")),
             SeedItem(asset: "librarian-SKILL", content: bundledText("librarian-SKILL"),
                      target: paths.skillsDir.appendingPathComponent("librarian/SKILL.md")),
-        ], ensuring: paths)
+        ]
+        let replaced = seed(items, ensuring: paths)
         if replaced > 0 { print("[ShippedSkills] updated \(replaced) unmodified shipped file(s) to the current text") }
+        // #1295 (b'): the two shipped library files are Iris's own text, so a read of them, while they are
+        // still exactly what shipped, is first-party like the skills beside them. Only for this build's home,
+        // whose store `GuardTrustStore.shared` is.
+        guard IrisPaths.samePath(paths.root.path, IrisPaths.default.root.path) else { return }
+        for item in items where GuardTrustStore.covers(item.target.path, paths: paths)
+            && (try? Data(contentsOf: item.target)) == Data(item.content.utf8) {
+            GuardTrustStore.shared.recordCleanWrite(path: item.target.path, content: item.content)
+        }
     }
 
     struct SeedItem { let asset: String; let content: String; let target: URL }
