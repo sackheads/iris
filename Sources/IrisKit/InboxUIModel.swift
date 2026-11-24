@@ -73,6 +73,10 @@ enum InboxUIModel {
         open + stale + awaitingDelivery + settled
     }
 
+    /// What Archive says for an item that still owes something (#920 slice 2, `InboxError.notArchivable`):
+    /// an open one is answered or closed first, and one awaiting delivery is left to finish.
+    static let notArchivableMessage = "Not archived: this item is still waiting on you. Answer it, or close it without answering, and then archive it. One whose answer is still being delivered can be archived once it arrives."
+
     /// Whether the detail pane offers Archive for `item` (#920 slice 2): not archived yet, and nothing owed.
     static func canArchive(_ item: InboxItem) -> Bool {
         item.archivedAt == nil && InboxStore.archivableStates.contains(item.state)

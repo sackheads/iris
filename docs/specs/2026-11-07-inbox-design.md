@@ -83,8 +83,10 @@ An item is a **thread**, keyed by a stable item id. States: `open` (needs attent
 answer still shown as context. When the decision is consumed (acted on, PR merged), the originating
 chain marks the thread **resolved** with `resolve_inbox_item`: a status of its own, final, and
 nothing Brian did; only the owner chain may resolve it, and not while an answer is still awaiting
-delivery to it. Archiving is a different thing: Brian's visibility flag on an item in any status, not
-a status (planner ruling F3, 2026-11-23). Referencing-by-id is also the dedup mechanism: a re-ask
+delivery to it. Archiving is a different thing: Brian's visibility flag on an item with nothing owed
+(answered, closed, resolved or stale), not a status (planner ruling F3, 2026-11-23; narrowed for
+slice 2, 2026-11-24, so a decision Brian still owes is never hidden). An open item he won't answer
+is closed without an answer first, and then archived. A follow-up clears the flag with the reopening. Referencing-by-id is also the dedup mechanism: a re-ask
 threads instead of spawning a twin.
 
 ### Emit is open; curation is a team convention

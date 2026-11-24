@@ -365,6 +365,15 @@ struct InboxView: View {
                     Button("Dismiss") { dismiss(item) }
                         .disabled(submitting)
                 }
+            } else if item.state == .open || item.state == .stale {
+                // A decision Brian won't answer is closed, not archived: archiving is only for what owes
+                // nothing (#920 slice 2). Closed, it stays in the list until he archives it.
+                VStack(alignment: .leading, spacing: 4) {
+                    Divider()
+                    Button("Close without answering") { close(item) }
+                        .disabled(submitting)
+                        .help("Close it, with no answer sent; then you can archive it")
+                }
             } else if item.archivedAt != nil {
                 VStack(alignment: .leading, spacing: 4) {
                     Divider()
@@ -388,10 +397,28 @@ struct InboxView: View {
     private func setArchived(_ item: InboxItem, _ archived: Bool) {
         submitting = true
         Task {
-            _ = try? state.store.inbox.setArchived(itemId: item.id, archived, at: Date())
+            let result = try? state.store.inbox.setArchived(itemId: item.id, archived, at: Date())
             await MainActor.run {
                 submitting = false
-                state.selectedInboxItemId = nil
+                if case .failure(.notArchivable) = result {
+                    lastOutcome = InboxUIModel.notArchivableMessage
+                } else {
+                    state.selectedInboxItemId = nil
+                }
+                state.bumpInboxRevision()
+            }
+        }
+    }
+
+    /// Closes an open item Brian won't answer: final, with no answer delivered. It stays listed, now
+    /// archivable, so putting it away is a second, deliberate step.
+    private func close(_ item: InboxItem) {
+        submitting = true
+        Task {
+            _ = try? state.store.inbox.setState(itemId: item.id, .closed)
+            await MainActor.run {
+                submitting = false
+                lastOutcome = "Closed without an answer. Archive it to put it away."
                 state.bumpInboxRevision()
             }
         }
