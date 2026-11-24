@@ -8,7 +8,8 @@ import Foundation
 /// Trust is per content, not per path: the list is `sha256(content)`s. It lives in `config/`, a protected
 /// directory (Brian, #1369: "no HMAC, protected file"): `write_file` there is a protected write and a host
 /// command naming it is a person's call, even under YOLO (#1315, #1326). Best effort for a command that builds
-/// the path at run time, like every command-text check. A missing or unreadable list trusts nothing, so the
+/// the path at run time, like every command-text check: a variable-built path, a glob, a decoded path or a link
+/// made earlier runs unasked under YOLO, a residual Brian accepted (#1373, with the HMAC option). A missing or unreadable list trusts nothing, so the
 /// reads it covered are judged: it fails closed.
 final class GuardTrustStore: @unchecked Sendable {
     static let shared = GuardTrustStore(file: IrisPaths.default.configDir.appendingPathComponent("guard-trust.json"))
