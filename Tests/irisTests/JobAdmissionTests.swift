@@ -54,12 +54,12 @@ struct JobAdmissionTests {
     /// open at a known point instead of by sleeping next to a slow fake. Every later call returns
     /// at once: what is being tested is what a second fire does while the first run is in flight.
     final class GatedClient: LLMClientProtocol, @unchecked Sendable {
-        private let gate: JobSchedulerTests.Gate
+        private let gate: TestGate
         private let response: GeminiResponse
         private let lock = NSLock()
         private var calls = 0
 
-        init(gate: JobSchedulerTests.Gate, response: GeminiResponse) {
+        init(gate: TestGate, response: GeminiResponse) {
             self.gate = gate
             self.response = response
         }
@@ -80,7 +80,7 @@ struct JobAdmissionTests {
         }
 
         func generateContent(request: GeminiRequest, tier: ModelTier) async throws -> GeminiResponse {
-            if bump() == 1 { await gate.arriveAndWait() }
+            if bump() == 1 { await gate.wait() }
             return response
         }
     }
@@ -375,7 +375,7 @@ struct JobAdmissionTests {
 
     @Test("a scheduled fire that overlaps a run writes one interrupted row and starts nothing")
     func scheduledOverlapWritesOneSkipRow() async throws {
-        let gate = JobSchedulerTests.Gate()
+        let gate = TestGate()
         let client = GatedClient(gate: gate, response: textResponse("tick"))
         let (store, state, engine) = try harness(client: client)
         let (config, teardown) = isolatedConfig()
@@ -386,9 +386,9 @@ struct JobAdmissionTests {
                                config: config, protectionEnabled: false)
 
         let first = Task { await runner.fire(job: job, origin: .schedule) }
-        try await gate.waitForEntry()
+        try await gate.waitForArrivals(1)
         await runner.fire(job: job, origin: .schedule)
-        await gate.open()
+        gate.open()
         _ = try await value(of: first)
 
         #expect(client.callCount == 1, "one run, not two")
@@ -409,7 +409,7 @@ struct JobAdmissionTests {
         // `overlap` is pinned rather than left to the default: deliverable 4 creates watches with
         // `.queue` (§3), and a queueing job takes the other branch of admission entirely — it
         // holds the fire instead of dropping it. This test is about the jobs that chose `skip`.
-        let gate = JobSchedulerTests.Gate()
+        let gate = TestGate()
         let client = GatedClient(gate: gate, response: textResponse("tick"))
         let (store, state, engine) = try harness(client: client)
         let (config, teardown) = isolatedConfig()
@@ -422,10 +422,10 @@ struct JobAdmissionTests {
                                config: config, protectionEnabled: false)
 
         let first = Task { await runner.fire(job: job, origin: .watcher(paths: ["/tmp/a"])) }
-        try await gate.waitForEntry()
+        try await gate.waitForArrivals(1)
         await runner.fire(job: job, origin: .watcher(paths: ["/tmp/b"]))
         await runner.fire(job: job, origin: .watcher(paths: ["/tmp/c"]))
-        await gate.open()
+        gate.open()
         _ = try await value(of: first)
 
         #expect(client.callCount == 1)
@@ -476,7 +476,7 @@ struct JobAdmissionTests {
 
     @Test("the queue policy holds one fire and takes it with every path that woke it, coordinator's included")
     func queuedFireRunsOnceAfterTheRun() async throws {
-        let gate = JobSchedulerTests.Gate()
+        let gate = TestGate()
         let client = GatedClient(gate: gate, response: textResponse("tick"))
         let (store, state, engine) = try harness(client: client)
         let (config, teardown) = isolatedConfig()
@@ -495,13 +495,13 @@ struct JobAdmissionTests {
         await runner.setHeldPathsSource { _ in (["/tmp/fromCoordinator"], heldSummary) }
 
         let first = Task { await runner.fire(job: job, origin: .watcher(paths: ["/tmp/first"])) }
-        try await gate.waitForEntry()
+        try await gate.waitForArrivals(1)
         // Two triggers while it runs: the policy keeps one, never two.
         await runner.fire(job: job, origin: .watcher(paths: ["/tmp/second"]))
         await runner.fire(job: job, origin: .watcher(paths: ["/tmp/third"]))
         #expect(try store.ledger.job(id: job.id)?.queuedFire != nil, "the pending trigger is durable")
         #expect(try store.ledger.runs(jobId: job.id, limit: 10).count == 1, "and it writes no row")
-        await gate.open()
+        gate.open()
         _ = try await value(of: first)
 
         let runs = try store.ledger.runs(jobId: job.id, limit: 10)
@@ -534,7 +534,7 @@ struct JobAdmissionTests {
         // The `--run-job` process has no coordinator, and neither has any test that is not about
         // watches: the paths the runner held are still carried, and the column stays null rather
         // than inventing arithmetic nobody counted.
-        let gate = JobSchedulerTests.Gate()
+        let gate = TestGate()
         let client = GatedClient(gate: gate, response: textResponse("tick"))
         let (store, state, engine) = try harness(client: client)
         let (config, teardown) = isolatedConfig()
@@ -546,9 +546,9 @@ struct JobAdmissionTests {
                                config: config, protectionEnabled: false)
 
         let first = Task { await runner.fire(job: job, origin: .watcher(paths: ["/tmp/lonely/a"])) }
-        try await gate.waitForEntry()
+        try await gate.waitForArrivals(1)
         await runner.fire(job: job, origin: .watcher(paths: ["/tmp/lonely/b"]))
-        await gate.open()
+        gate.open()
         _ = try await value(of: first)
 
         let queued = try #require(try store.ledger.runs(jobId: job.id, limit: 10)
@@ -570,7 +570,7 @@ struct JobAdmissionTests {
     /// branch decides on the origin.
     @Test("a fire held while a gate was being evaluated takes the coordinator's paths too")
     func aFireHeldAcrossAGateTakesTheHeldPaths() async throws {
-        let gate = JobSchedulerTests.Gate()
+        let gate = TestGate()
         let (store, state, engine, client) = try harness([textResponse("tick")])
         let (config, teardown) = isolatedConfig()
         defer { teardown() }
@@ -587,16 +587,16 @@ struct JobAdmissionTests {
             state: state, engine: engine, ledger: store.ledger, endSandboxSession: { _ in }, config: config,
             protectionEnabled: false,
             gateEvaluator: { _, _ in
-                if await evaluated.bump() == 1 { await gate.arriveAndWait() }
+                if await evaluated.bump() == 1 { await gate.wait() }
                 return .unchanged(signal: "same")
             })
         let heldSummary = WatchSummary(changed: 5, coalesced: 6, noise: 1)
         await runner.setHeldPathsSource { _ in (["/tmp/gated/fromCoordinator"], heldSummary) }
 
         let first = Task { await runner.fire(job: job, origin: .schedule) }
-        try await gate.waitForEntry()
+        try await gate.waitForArrivals(1)
         #expect(await runner.fire(job: job, origin: .watcher(paths: ["/tmp/gated/b"])) == .queued)
-        await gate.open()
+        gate.open()
         #expect(try await value(of: first) == .gateUnchanged)
 
         let queued = try #require(try store.ledger.runs(jobId: job.id, limit: 10)
@@ -616,7 +616,7 @@ struct JobAdmissionTests {
         // A hand-started fire held behind a run has no burst behind it, so there is nothing for a
         // coordinator to hand over — and asking would take a watch's paths and staple them to a
         // fire the user started, on a job that may not even be watched.
-        let gate = JobSchedulerTests.Gate()
+        let gate = TestGate()
         let client = GatedClient(gate: gate, response: textResponse("tick"))
         let (store, state, engine) = try harness(client: client)
         let (config, teardown) = isolatedConfig()
@@ -632,9 +632,9 @@ struct JobAdmissionTests {
         }
 
         let first = Task { await runner.fire(job: job, origin: .schedule) }
-        try await gate.waitForEntry()
+        try await gate.waitForArrivals(1)
         await runner.fire(job: job, origin: .manual)
-        await gate.open()
+        gate.open()
         _ = try await value(of: first)
 
         #expect(await asked.count == 0, "a `.manual` hold never asks the coordinator")
@@ -710,7 +710,7 @@ struct JobAdmissionTests {
 
     @Test("a job switched off the queue policy mid-run drops the fire it was holding, column and all")
     func switchingAwayFromQueueClearsTheHeldFire() async throws {
-        let gate = JobSchedulerTests.Gate()
+        let gate = TestGate()
         let client = GatedClient(gate: gate, response: textResponse("tick"))
         let (store, state, engine) = try harness(client: client)
         let (config, teardown) = isolatedConfig()
@@ -722,14 +722,14 @@ struct JobAdmissionTests {
                                config: config, protectionEnabled: false)
 
         let first = Task { await runner.fire(job: job, origin: .watcher(paths: ["/tmp/flip/a"])) }
-        try await gate.waitForEntry()
+        try await gate.waitForArrivals(1)
         await runner.fire(job: job, origin: .watcher(paths: ["/tmp/flip/b"]))
         #expect(try store.ledger.job(id: job.id)?.queuedFire != nil)
         // The user (or a tool) switches the policy while the run is still going.
         var flipped = try #require(try store.ledger.job(id: job.id))
         flipped.policy.overlap = .skip
         try store.ledger.upsert(flipped)
-        await gate.open()
+        gate.open()
         _ = try await value(of: first)
 
         #expect(client.callCount == 1, "the held fire is abandoned, not deferred")
@@ -1034,7 +1034,7 @@ struct JobAdmissionTests {
 
     @Test("a fire that overlaps a run records the catch-up count on the skip row")
     func anOverlapSkipCarriesTheCatchUpCount() async throws {
-        let gate = JobSchedulerTests.Gate()
+        let gate = TestGate()
         let client = GatedClient(gate: gate, response: textResponse("tick"))
         let (store, state, engine) = try harness(client: client)
         let (config, teardown) = isolatedConfig()
@@ -1046,9 +1046,9 @@ struct JobAdmissionTests {
 
         // The job woke still running the turn it started before the Mac slept.
         let first = Task { await runner.fire(job: job, origin: .schedule) }
-        try await gate.waitForEntry()
+        try await gate.waitForArrivals(1)
         let overlapped = await runner.fire(job: job, origin: .schedule, note: Self.dropped)
-        await gate.open()
+        gate.open()
         _ = try await value(of: first)
 
         #expect(overlapped == .skipInFlight)
@@ -1060,7 +1060,7 @@ struct JobAdmissionTests {
 
     @Test("a fire the queue policy holds keeps the catch-up count and spends it on the run it becomes")
     func aHeldFireCarriesTheCatchUpCount() async throws {
-        let gate = JobSchedulerTests.Gate()
+        let gate = TestGate()
         let client = GatedClient(gate: gate, response: textResponse("tick"))
         let (store, state, engine) = try harness(client: client)
         let (config, teardown) = isolatedConfig()
@@ -1071,11 +1071,11 @@ struct JobAdmissionTests {
                                config: config, protectionEnabled: false)
 
         let first = Task { await runner.fire(job: job, origin: .schedule) }
-        try await gate.waitForEntry()
+        try await gate.waitForArrivals(1)
         // Held, not dropped: nothing is written now, so the count has to wait with the fire.
         let held = await runner.fire(job: job, origin: .schedule, note: Self.dropped)
         #expect(held == .queued)
-        await gate.open()
+        gate.open()
         _ = try await value(of: first)
 
         let runs = try store.ledger.runs(jobId: job.id, limit: 10)

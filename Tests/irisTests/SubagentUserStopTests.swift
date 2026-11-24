@@ -301,7 +301,7 @@ struct SubagentUserStopTests {
 
     @Test("a parent Stop accepted just after goal_complete still does not wake the parent")
     func stopRacingCompletionDoesNotWakeParent() async throws {
-        let gate = JobSchedulerTests.Gate()
+        let gate = TestGate()
         let client = RoutingClient([
             RoutingClient.parent: [
                 calls([("invoke_subagent", ["role": .string("worker"), "task": .string("Research."),
@@ -318,7 +318,7 @@ struct SubagentUserStopTests {
         await engine.processInput("Start a background worker.", source: "User", conversationId: main)
         // Held before its goal_complete, so the Stop can be placed in the window on an event, not
         // found by polling: a poll that lands after the settle under load is refused (#454).
-        try await gate.waitForEntry()
+        try await gate.waitForArrivals(1)
         let worker = try #require(subagentId("worker", in: state))
         let record = try #require(state.onSubagentComplete[worker])
         let stoppedCount = Box<Int?>(nil)
@@ -328,7 +328,7 @@ struct SubagentUserStopTests {
             record(termination)
             MainActor.assumeIsolated { stoppedCount.set(state.stopBackgroundSubagents(under: main)) }
         }
-        await gate.open()
+        gate.open()
 
         let postBacks: @MainActor () -> [ChatMessage] = {
             state.conversations.first { $0.id == main }?.messages

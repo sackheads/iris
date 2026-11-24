@@ -7,40 +7,29 @@ import Foundation
 struct SyncCoalescerTests {
 
     /// Stands in for the jobs table and the sync that reads it: `write` is a ledger write, and
-    /// each run records the version it read. Runs park while `hold` is set, so a test can keep one
-    /// in progress while it makes requests behind it.
+    /// each run records the version it read. Runs park on `gate` until the test releases them, so a
+    /// test can keep one in progress while it makes requests behind it.
     actor Probe {
         private(set) var version = 0
         private(set) var seen: [Int] = []
-        private var hold = true
-        private var parked: [CheckedContinuation<Void, Never>] = []
+        nonisolated let gate = TestGate()
 
         func write() { version += 1 }
 
         func run() async {
             seen.append(version)
-            if hold { await withCheckedContinuation { parked.append($0) } }
+            await gate.wait()
         }
 
-        func releaseOne() {
-            guard !parked.isEmpty else { return }
-            parked.removeFirst().resume()
-        }
+        nonisolated func releaseOne() { gate.release() }
 
-        func releaseAll() {
-            hold = false
-            for waiter in parked { waiter.resume() }
-            parked = []
-        }
+        nonisolated func releaseAll() { gate.open() }
 
-        /// Bounded, so a regression fails naming what it waited for instead of hanging the run.
-        func waitForRuns(_ n: Int, sourceLocation: SourceLocation = #_sourceLocation) async {
-            for _ in 0..<500 {
-                if seen.count >= n && parked.count >= 1 { return }
-                try? await Task.sleep(for: .milliseconds(10))
-            }
-            Issue.record("waited 5s for run \(n) to start; saw \(seen.count)",
-                         sourceLocation: sourceLocation)
+        /// Returns once run `n` has started and parked on the gate, or fails the test at the bound. Parked, not
+        /// only started: a run already past the gate is no longer "in progress" for the request behind it.
+        nonisolated func waitForRuns(_ n: Int, sourceLocation: SourceLocation = #_sourceLocation) async throws {
+            try await gate.waitForArrivals(n, sourceLocation: sourceLocation)
+            if gate.waiting == 0 { Issue.record("run \(n) started but is not held at the gate", sourceLocation: sourceLocation) }
         }
     }
 
@@ -50,14 +39,14 @@ struct SyncCoalescerTests {
         let probe = Probe()
         let queue = SyncCoalescer { await probe.run() }
         var tasks = [await queue.request()]
-        await probe.waitForRuns(1)
+        try await probe.waitForRuns(1)
 
         let burst = 25
         for _ in 0..<burst {
             await probe.write()
             tasks.append(await queue.request())
         }
-        await probe.releaseAll()
+        probe.releaseAll()
         for task in tasks { try await value(of: task) }
 
         #expect(await probe.seen.count == 2, "one in progress, one behind it — not \(burst + 1)")
@@ -72,16 +61,16 @@ struct SyncCoalescerTests {
         let probe = Probe()
         let queue = SyncCoalescer { await probe.run() }
         let first = await queue.request()
-        await probe.waitForRuns(1)
+        try await probe.waitForRuns(1)
         let second = await queue.request()
-        await probe.releaseOne()
+        probe.releaseOne()
         try await value(of: first)
-        await probe.waitForRuns(2)
+        try await probe.waitForRuns(2)
 
         await probe.write()
         let third = await queue.request()
         #expect(third != second, "the started sync read before this write")
-        await probe.releaseAll()
+        probe.releaseAll()
         try await value(of: third)
 
         #expect(await probe.seen == [0, 0, 1])

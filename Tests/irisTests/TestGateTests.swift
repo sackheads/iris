@@ -89,6 +89,33 @@ struct TestGateTests {
         #expect(reports.list.isEmpty, "a cancelled wait is not a missed deadline")
     }
 
+    @Test("waitIgnoringCancellation stays parked through a cancel; a release or the deadline still ends it")
+    func waitIgnoringCancellationIsDeafButBounded() async throws {
+        let reports = Reports(), gate = Self.gate(reports)
+        let parked = Task { await gate.waitIgnoringCancellation() }
+        try await gate.waitForArrivals(1, within: 10)
+        parked.cancel()
+        try await Task.sleep(nanoseconds: 50_000_000)
+        #expect(gate.waiting == 1, "the cancel did not end it")
+        let early = Task {
+            withUnsafeCurrentTask { $0?.cancel() }
+            await gate.waitIgnoringCancellation()
+        }
+        try await gate.waitForArrivals(2, within: 10)
+        #expect(gate.waiting == 2, "nor a cancel that came before the wait parked")
+        gate.release(2)
+        try await value(of: parked, within: 10)
+        try await value(of: early, within: 10)
+        #expect(reports.list.isEmpty)
+
+        let short = Self.gate(deadline: 0.2, reports)
+        let wedged = Task { await short.waitIgnoringCancellation() }
+        try await short.waitForArrivals(1, within: 10)
+        wedged.cancel()
+        try await value(of: wedged, within: 10)
+        #expect(reports.list.map(\.message) == ["the gate was not released within 0.2s"], "the deadline ends it, and it is a failure")
+    }
+
     @Test("a deadline ends the wait, reported in the waiter's own task at the wait's call site")
     func deadlineReportsInTheWaitersTask() async throws {
         let reports = Reports(), gate = Self.gate(deadline: 0.2, reports)

@@ -237,7 +237,7 @@ struct TurnBudgetTests {
     /// Answers the first round with a tool call — so the turn goes round again — and parks in the
     /// second, so the run's row can be read while the run is still in flight.
     private final class ParkingClient: LLMClientProtocol, @unchecked Sendable {
-        let gate = JobSchedulerTests.Gate()
+        let gate = TestGate()
         private let lock = NSLock()
         private var calls = 0
         private let first: GeminiResponse
@@ -257,7 +257,7 @@ struct TurnBudgetTests {
 
         func generateContent(request: GeminiRequest, tier: ModelTier) async throws -> GeminiResponse {
             if bump() == 1 { return first }
-            await gate.arriveAndWait()
+            await gate.wait()
             return last
         }
     }
@@ -281,7 +281,7 @@ struct TurnBudgetTests {
                                sandboxAvailable: { true })
 
         let fire = Task { await runner.fire(job: job, origin: .schedule) }
-        try await client.gate.waitForEntry()
+        try await client.gate.waitForArrivals(1)
 
         let midRun = try #require(try store.ledger.runs(jobId: job.id, limit: 1).first)
         #expect(midRun.status == .running, "still in flight")
@@ -292,7 +292,7 @@ struct TurnBudgetTests {
         #expect(try store.ledger.weightedTokensToday(jobId: job.id, calendar: utc, now: Date()) == 39 + 5,
                 "and the day's budget can see it")
 
-        await client.gate.open()
+        client.gate.open()
         _ = try await value(of: fire)
         let finished = try #require(try store.ledger.runs(jobId: job.id, limit: 1).first)
         #expect(finished.status == .completed)

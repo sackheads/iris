@@ -386,45 +386,17 @@ struct RunJobURLTests {
     /// Every model call parks until the test lets one through, so a run can be held in flight
     /// for as many cycles as a test needs.
     final class TurnstileClient: LLMClientProtocol, @unchecked Sendable {
-        actor Turnstile {
-            private var arrived = 0
-            private var released = 0
-            private var parked: [Int: CheckedContinuation<Void, Never>] = [:]
-            private var arrivalWaiters: [(Int, CheckedContinuation<Void, Never>)] = []
-
-            func arrive() async {
-                arrived += 1
-                let n = arrived
-                for (i, (want, waiter)) in arrivalWaiters.enumerated().reversed() where arrived >= want {
-                    waiter.resume()
-                    arrivalWaiters.remove(at: i)
-                }
-                if n <= released { return }
-                await withCheckedContinuation { parked[n] = $0 }
-            }
-
-            func release() {
-                released += 1
-                parked.removeValue(forKey: released)?.resume()
-            }
-
-            func arrivals(_ n: Int) async {
-                if arrived >= n { return }
-                await withCheckedContinuation { arrivalWaiters.append((n, $0)) }
-            }
-        }
-
-        let turnstile = Turnstile()
+        /// `release()` frees the oldest parked call, or banks a pass for the next one.
+        let turnstile = TestGate()
         func generateContent(request: GeminiRequest, tier: ModelTier) async throws -> GeminiResponse {
-            await turnstile.arrive()
+            try await turnstile.waitOrThrow()
             return GeminiResponse(candidates: [Candidate(content: Content(role: "model", parts: [Part(text: "tick")]))],
                                   usageMetadata: nil)
         }
 
         /// Returns once `n` calls have arrived, or fails the test (#435).
-        func waitForArrivals(_ n: Int) async throws {
-            let t = turnstile
-            _ = try await value(of: Task { await t.arrivals(n) })
+        func waitForArrivals(_ n: Int, sourceLocation: SourceLocation = #_sourceLocation) async throws {
+            try await turnstile.waitForArrivals(n, sourceLocation: sourceLocation)
         }
     }
 
@@ -454,9 +426,9 @@ struct RunJobURLTests {
         #expect(open(app, minted, into: &tasks) == .fired(job.id))
         #expect(open(app, minted, into: &tasks) == .fired(job.id))
         #expect(open(app, minted, into: &tasks) == .refused)
-        await client.turnstile.release()
+        client.turnstile.release()
         try await client.waitForArrivals(2)           // the held fire's run
-        await client.turnstile.release()
+        client.turnstile.release()
         let admissions = try await settle(tasks)
         #expect(admissions == [.run, .queued, .queued])
         let runs = try store.ledger.runs(jobId: job.id, limit: 10)
@@ -468,7 +440,7 @@ struct RunJobURLTests {
         #expect(open(app, minted, into: &tasks) == .fired(job.id))
         try await client.waitForArrivals(3)
         #expect(open(app, minted, into: &tasks) == .refused)
-        await client.turnstile.release()
+        client.turnstile.release()
         _ = try await settle(tasks)
         #expect(open(app, minted, into: &tasks) == .refused)
 
@@ -492,9 +464,9 @@ struct RunJobURLTests {
         #expect(open(app, minted, into: &tasks) == .refused)
         #expect(try store.ledger.runs(jobId: job.id, limit: 10).isEmpty == false)
 
-        await client.turnstile.release()
+        client.turnstile.release()
         try await client.waitForArrivals(2)
-        await client.turnstile.release()
+        client.turnstile.release()
         _ = try await value(of: owner)
         _ = try await settle(tasks)
 
@@ -504,12 +476,12 @@ struct RunJobURLTests {
         tasks = []
         #expect(open(app, minted, into: &tasks) == .fired(job.id))
         try await client.waitForArrivals(3)
-        await client.turnstile.release()
+        client.turnstile.release()
         _ = try await settle(tasks)
         tasks = []
         #expect(open(app, minted, into: &tasks) == .fired(job.id))
         try await client.waitForArrivals(4)
-        await client.turnstile.release()
+        client.turnstile.release()
         _ = try await settle(tasks)
         #expect(open(app, minted, into: &tasks) == .refused)
         #expect(try urlRunsLastHour(job, store) == 3)
@@ -526,7 +498,7 @@ struct RunJobURLTests {
         var tasks: [Task<JobRunner.Admission?, Never>] = []
         #expect(open(app, minted, into: &tasks) == .fired(job.id))
         #expect(try await settle(tasks) == [.queued])
-        await client.turnstile.release()
+        client.turnstile.release()
         try await client.waitForArrivals(2)           // H's re-fire is running, as url
         // And a non-URL fire is held during that run: the job is never without one.
         #expect(await runner.fire(job: job, origin: .manual) == .queued)
@@ -537,9 +509,9 @@ struct RunJobURLTests {
         for _ in 0..<3 { #expect(open(app, minted, into: &tasks) == .fired(job.id)) }
         #expect(open(app, minted, into: &tasks) == .refused)
 
-        await client.turnstile.release()
+        client.turnstile.release()
         try await client.waitForArrivals(3)           // the held fire: the manual one and the three links
-        await client.turnstile.release()
+        client.turnstile.release()
         _ = try await value(of: owner)
         _ = try await settle(tasks)
     }
@@ -557,7 +529,7 @@ struct RunJobURLTests {
         // Every run, a manual fire is held, so the loop keeps going.
         var others: [JobRunner.Admission?] = []
         others.append(await runner.fire(job: job, origin: .manual))
-        await client.turnstile.release()
+        client.turnstile.release()
         try await client.waitForArrivals(2)
         others.append(await runner.fire(job: job, origin: .manual))
         #expect(others == [.queued, .queued])
@@ -568,9 +540,9 @@ struct RunJobURLTests {
         for _ in 0..<3 { #expect(open(app, minted, into: &tasks) == .fired(job.id)) }
         #expect(open(app, minted, into: &tasks) == .refused)
 
-        await client.turnstile.release()
+        client.turnstile.release()
         try await client.waitForArrivals(3)
-        await client.turnstile.release()
+        client.turnstile.release()
         _ = try await settle(tasks)
         _ = try store.ledger.runs(jobId: job.id, limit: 10)
     }
@@ -587,10 +559,10 @@ struct RunJobURLTests {
         try await client.waitForArrivals(1)
         #expect(app.runningJobs[job.id]?.activities == 1)
         #expect(await runner.fire(job: job, origin: .manual) == .queued)
-        await client.turnstile.release()
+        client.turnstile.release()
         try await client.waitForArrivals(2)          // the held run, inside L1's loop
         #expect(app.runningJobs[job.id]?.activities == 1)
-        await client.turnstile.release()
+        client.turnstile.release()
         _ = try await settle(tasks)
 
         #expect(app.runningJobs[job.id] == nil)
@@ -608,8 +580,8 @@ struct RunJobURLTests {
         let minted = try optIn(job, store)
         let runner = try #require(await app.engine.jobRunner())
         // Parks the held pass between being taken and being admitted, so another fire can start.
-        let gate = JobSchedulerTests.Gate()
-        await runner.setHeldPathsSource { _ in await gate.arriveAndWait(); return ([], nil) }
+        let gate = TestGate()
+        await runner.setHeldPathsSource { _ in await gate.wait(); return ([], nil) }
 
         let owner = Task { await runner.fire(job: job, origin: .watcher(paths: ["/tmp/rehold/a"])) }
         try await client.waitForArrivals(1)
@@ -619,18 +591,18 @@ struct RunJobURLTests {
         #expect(try await settle(tasks) == [.queued])
         #expect(app.urlFireBatches[job.id]?.held.map(\.generation) == [0])
 
-        await client.turnstile.release()           // the owner's run ends; hold 0 is taken
-        try await gate.waitForEntry()
+        client.turnstile.release()           // the owner's run ends; hold 0 is taken
+        try await gate.waitForArrivals(1)
         let intruder = Task { await runner.fire(job: job, origin: .manual) }
         try await client.waitForArrivals(2)         // it runs, so the held pass will be held again
-        await gate.open()
+        gate.open()
         _ = try await value(of: owner)              // the held pass was answered `.queued`
         #expect(app.urlFireBatches[job.id]?.held.map(\.generation) == [0],
                 "the link waits in hold 1 now: its run has not begun")
 
-        await client.turnstile.release()
+        client.turnstile.release()
         try await client.waitForArrivals(3)         // hold 1: the watch and the link, as url
-        await client.turnstile.release()
+        client.turnstile.release()
         _ = try await value(of: intruder)
         #expect(app.urlFireBatches[job.id] == nil)
         #expect(try store.ledger.runs(jobId: job.id, limit: 10).contains { $0.triggerKind == "url" })
@@ -662,9 +634,9 @@ struct RunJobURLTests {
                 #expect(await runner.fire(job: job, origin: .watcher(paths: ["/tmp/w/a"])) == .queued)
                 #expect(await runner.fire(job: job, origin: .url) == .queued)
             }
-            await client.turnstile.release()
+            client.turnstile.release()
             try await client.waitForArrivals(2)
-            await client.turnstile.release()
+            client.turnstile.release()
             _ = try await value(of: first)
 
             let runs = try store.ledger.runs(jobId: job.id, limit: 10)

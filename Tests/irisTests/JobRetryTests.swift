@@ -1159,7 +1159,7 @@ struct JobRetryTests {
 
     @Test("a held re-fire of a watch fire does not retry either: it is still that watch fire")
     func queuedReFireOfAWatchFireDoesNotRetry() async throws {
-        let gate = JobSchedulerTests.Gate()
+        let gate = TestGate()
         let client = JobAdmissionTests.GatedClient(gate: gate, response: textResponse(""))
         let (store, state, engine) = try harness([], client: client)
         var j = Job(name: "inbox", prompt: "Sort it.", trigger: .fsEvent(FSWatch(path: "/tmp/in")))
@@ -1173,11 +1173,11 @@ struct JobRetryTests {
         let first = Task { await runner.fire(job: j, origin: .watcher(paths: ["/tmp/in/a.txt"])) }
         // Bounded, like the deadline tests: a queue-path regression otherwise stalls the run until
         // the 600 s default deadline. Opened on the way out so a failed test still unwinds.
-        defer { Task { await gate.open() } }
-        try await gate.waitForEntry()  // the first fire reached the model
+        defer { gate.open() }
+        try await gate.waitForArrivals(1)  // the first fire reached the model
         let held = Task { await runner.fire(job: j, origin: .watcher(paths: ["/tmp/in/b.txt"])) }
         try #require(await finished(held) != nil, "the second fire was held, not run alongside the first")
-        await gate.open()
+        gate.open()
         try #require(await finished(first) != nil, "the first run and its held re-fire finished")
 
         let runs = try store.ledger.runs(jobId: j.id, limit: 10)
