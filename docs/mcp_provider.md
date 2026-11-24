@@ -93,7 +93,7 @@ it: a guest never gets an address a role session could message first.
   (it re-points which `AGENTS.md` reaches the prompt) and any tool the table has no row for, which is an MCP
   server's or a plugin's. None of them has an approval step, and a job it made would have run as the owner. The
   same rule applies to any turn whose binding is not the owner's, so a session bound to a role profile loses
-  them too. A new built-in tool fails `ToolClassTableTests` until it has a class. The memory tools (`search_memory`, `search_conversations`, `read_conversation` and the writers
+  them too, and so do the subagents and graders it delegates to, which carry its binding (#1306). A new built-in tool fails `ToolClassTableTests` until it has a class. The memory tools (`search_memory`, `search_conversations`, `read_conversation` and the writers
   `save_fact`, `manage_fact`, `update_memory`, `update_user_profile`, `update_soul`, `create_skill`,
   `update_skill`, `delete_skill`) are offered but refused by the turn's own access binding (a guest's memory
   tier is below what they need, #1224); the memory writers are also held for the person's approval (#813).
