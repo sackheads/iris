@@ -493,45 +493,25 @@ struct SandboxTimeoutTests {
 
     /// A runtime whose first create parks until the test releases it, and which says when it has
     /// parked, so the interleaving the mount agreement exists for happens on purpose rather than
-    /// when the scheduler obliges. A continuation rather than a polled flag: `waitUntilParked`
+    /// when the scheduler obliges. A gate rather than a polled flag: `waitUntilParked`
     /// then means "the barrier is occupied", which is the precondition every test below needs and
     /// a sleep can only hope for.
     private final class HeldCreateRuntime: ContainerRuntime, @unchecked Sendable {
         private let lock = NSLock()
         private var held = false
-        private var released = false
-        private var parked = false
-        private var gate: CheckedContinuation<Void, Never>?
-        private var arrival: CheckedContinuation<Void, Never>?
+        /// The first create parks here (#1343): it ends on `release()`, a cancel, or the gate's deadline.
+        private let gate = TestGate()
         private(set) var created: [[String]] = []
         private(set) var removed: [String] = []
 
         /// Lets the parked create finish. Safe before anything has parked: the next create through
         /// simply does not stop.
-        func release() {
-            let waiting: CheckedContinuation<Void, Never>? = lock.withLock {
-                released = true
-                defer { gate = nil }
-                return gate
-            }
-            waiting?.resume()
-        }
+        func release() { gate.open() }
 
         /// Suspends until the first create is inside the barrier, or fails the test at 20 s: a create that never
         /// arrives would otherwise park the test where `.timeLimit` cannot end it (#1340, #428).
-        func waitUntilParked() async {
-            _ = try? await value(of: Task { await self.untilParked() }, within: 20)
-        }
-
-        private func untilParked() async {
-            await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
-                let already = lock.withLock { () -> Bool in
-                    if parked { return true }
-                    arrival = cont
-                    return false
-                }
-                if already { cont.resume() }
-            }
+        func waitUntilParked(sourceLocation: SourceLocation = #_sourceLocation) async {
+            try? await gate.waitForArrivals(1, within: 20, sourceLocation: sourceLocation)
         }
 
         func createDetached(name: String, image: String, mounts: [String], workdir: String, network: NetworkMode) async throws {
@@ -540,20 +520,7 @@ struct SandboxTimeoutTests {
                 held = true
                 return true
             }
-            if first {
-                await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
-                    var goOn = false
-                    var arrived: CheckedContinuation<Void, Never>?
-                    lock.withLock {
-                        parked = true
-                        arrived = arrival
-                        arrival = nil
-                        if released { goOn = true } else { gate = cont }
-                    }
-                    arrived?.resume()
-                    if goOn { cont.resume() }
-                }
-            }
+            if first { await gate.wait() }
             lock.withLock { created.append(mounts) }
         }
         func ensureIsolatedNetwork(named name: String) async throws {}

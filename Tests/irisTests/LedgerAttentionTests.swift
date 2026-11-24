@@ -148,17 +148,17 @@ struct LedgerAttentionTests {
         #expect(app.ledgerAttention.attentionPaused.isEmpty)
     }
 
-    /// Holds the approved call open until released, and says when it has started.
-    private actor HeldCall {
-        private var held: CheckedContinuation<Void, Never>?
-        private(set) var isRunning = false
+    /// Holds the approved call open on a `TestGate` until released (#1343), and says when it has started.
+    private final class HeldCall: Sendable {
+        let gate = TestGate()
 
         func run() async -> String {
-            await withCheckedContinuation { held = $0; isRunning = true }
+            await gate.wait()
             return "wrote 4 bytes"
         }
 
-        func release() { held?.resume(); held = nil }
+        var isRunning: Bool { gate.waiting == 1 }
+        func release() { gate.open() }
     }
 
     @Test("Approve and run clears the blocked run from the snapshot when it claims it, not when the call ends")
@@ -180,7 +180,7 @@ struct LedgerAttentionTests {
             IrisDefaults.removeSuiteFile(named: suite, in: IrisDefaults.preferencesDirectory)
         }
         let call = HeldCall()
-        defer { Task { await call.release() } }
+        defer { call.release() }
         let runner = JobRunner(state: app, engine: engine, ledger: store.ledger,
                                endSandboxSession: { _ in }, config: ConfigManager(store: defaults),
                                sandboxAvailable: { true },
@@ -191,14 +191,13 @@ struct LedgerAttentionTests {
         let sink = NotificationWiringTests.FakeSink()
         app.notificationSink = sink
         let approval = Task { await runner.runApproved(runId: blocked.id) }
-        var spins = 0
-        while !(await call.isRunning), spins < 10_000 { await Task.yield(); spins += 1 }
-        try #require(await call.isRunning, "the approved call never started")
+        try await call.gate.waitForArrivals(1)
+        try #require(call.isRunning, "the approved call never started")
         try await landed(app)
         #expect(app.ledgerAttention.blocked.isEmpty, "the claim acknowledged the run before the call began")
         #expect(sink.withdrawn == [blocked.id.uuidString], "and its banner came down with the claim")
 
-        await call.release()
+        call.release()
         guard case .dispatched = try await value(of: approval) else {
             Issue.record("the approval was refused")
             return
@@ -209,8 +208,7 @@ struct LedgerAttentionTests {
     /// `current` value as it stood when that read began, as a real read of the table would.
     private actor CountedRead {
         private(set) var reads = 0
-        private var held: CheckedContinuation<Void, Never>?
-        private(set) var firstIsHeld = false
+        nonisolated let gate = TestGate()
         private var current = 0
 
         func set(_ value: Int) { current = value }
@@ -218,11 +216,12 @@ struct LedgerAttentionTests {
         func read() async -> LedgerAttention {
             reads += 1
             let seen = current
-            if reads == 1 { await withCheckedContinuation { held = $0; firstIsHeld = true } }
+            if reads == 1 { await gate.wait() }
             return LedgerAttention(failedCount: seen)
         }
 
-        func release() { held?.resume(); held = nil }
+        nonisolated var firstIsHeld: Bool { gate.waiting == 1 }
+        nonisolated func release() { gate.open() }
     }
 
     @Test("a burst of refreshes during a read costs one more read, and the newest state lands")
@@ -232,12 +231,11 @@ struct LedgerAttentionTests {
         app.ledgerAttentionReader = { _ in await gate.read() }
         // Released on every way out, so a failed expectation ends the test instead of leaving the
         // first read parked until the time limit.
-        defer { Task { await gate.release() } }
+        defer { gate.release() }
 
         let first = app.refreshLedgerAttention()
-        var spins = 0
-        while !(await gate.firstIsHeld), spins < 10_000 { await Task.yield(); spins += 1 }
-        try #require(await gate.firstIsHeld, "the first read must be parked before the burst")
+        try await gate.gate.waitForArrivals(1)
+        try #require(gate.firstIsHeld, "the first read must be parked before the burst")
 
         // The writes the burst is about land after the parked read began.
         await gate.set(5)
@@ -245,7 +243,7 @@ struct LedgerAttentionTests {
         // Room for the burst's read to start if anything let it overlap the parked one.
         for _ in 0..<200 { await Task.yield() }
         #expect(await gate.reads == 1, "no read starts while one is in flight")
-        await gate.release()
+        gate.release()
         try await value(of: first)
         for task in burst { try await value(of: task) }
 

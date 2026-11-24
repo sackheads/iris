@@ -14,7 +14,8 @@ struct NotificationInstallTests {
         var requests = 0
         var grant = true
         var delivered: [String] = []
-        var held: CheckedContinuation<Void, Never>?
+        /// The held request parks here (#1343).
+        let held = TestGate()
         var holdRequest = false
         /// The prompt was closed unanswered: the request returns false and nothing is decided.
         var dismissPrompt = false
@@ -28,22 +29,22 @@ struct NotificationInstallTests {
         var added: [String] = []
         var removed: [String] = []
         var holdAdd = false
-        var heldAdd: CheckedContinuation<Void, Never>?
+        let heldAdd = TestGate()
         var onResponse: (@MainActor (NotificationResponse) -> Void)?
 
         var grant = true
         var holdRequest = false
-        var heldRequest: CheckedContinuation<Void, Never>?
+        let heldRequest = TestGate()
 
         func authorizationStatus() async -> NotificationPermission.Status { status }
         func requestAuthorization() async -> Bool {
-            if holdRequest { await withCheckedContinuation { heldRequest = $0 } }
+            if holdRequest { await heldRequest.wait() }
             status = grant ? .authorized : .denied
             return grant
         }
         func register(categories: [NotificationPolicy.CategorySpec]) { registered = categories }
         func add(_ notification: PlannedNotification) async throws {
-            if holdAdd { await withCheckedContinuation { heldAdd = $0 } }
+            if holdAdd { await heldAdd.wait() }
             added.append(notification.identifier)
         }
         func remove(identifiers: [String]) { removed += identifiers }
@@ -61,7 +62,7 @@ struct NotificationInstallTests {
             current: { calls.status },
             request: {
                 calls.requests += 1
-                if calls.holdRequest { await withCheckedContinuation { calls.held = $0 } }
+                if calls.holdRequest { await calls.held.wait() }
                 calls.status = calls.grant ? .authorized : (calls.dismissPrompt ? .notDetermined : .denied)
                 return calls.grant
             },
@@ -120,12 +121,11 @@ struct NotificationInstallTests {
         let calls = Calls(), permission = gate(calls)
         calls.holdRequest = true
         let first = Task { @MainActor in await permission.submit(note("a")) }
-        var spins = 0
-        while calls.held == nil, spins < 10_000 { await Task.yield(); spins += 1 }
+        try await calls.held.waitForArrivals(1)
         await permission.submit(note("b"))
         await permission.submit(note("c"))
         permission.withdraw(identifiers: ["c"])
-        calls.held?.resume()
+        calls.held.releaseWaiting()
         try await value(of: first)
         #expect(calls.requests == 1)
         #expect(calls.delivered == ["a", "b"])
@@ -136,9 +136,8 @@ struct NotificationInstallTests {
         let calls = Calls(), permission = gate(calls)
         calls.holdRequest = true
         let first = Task { @MainActor in await permission.submit(note("a")) }
-        var spins = 0
-        while calls.held == nil, spins < 10_000 { await Task.yield(); spins += 1 }
-        try #require(calls.held != nil)
+        try await calls.held.waitForArrivals(1)
+        try #require(calls.held.waiting == 1)
         await permission.submit(note("b"))
         #expect(calls.delivered.isEmpty, "still undecided: held")
 
@@ -148,7 +147,7 @@ struct NotificationInstallTests {
 
         // The prompt's late return finds nothing left to deliver, and asks nothing again.
         calls.grant = allowed
-        calls.held?.resume()
+        calls.held.releaseWaiting()
         try await value(of: first)
         await permission.submit(note("d"))
         #expect(calls.delivered == (allowed ? ["a", "b", "c", "d"] : []))
@@ -163,9 +162,8 @@ struct NotificationInstallTests {
         center.holdRequest = true
         let sink = UserNotificationSink(state: app, center: center)
         let first = sink.submit(note("a"))
-        var spins = 0
-        while center.heldRequest == nil, spins < 10_000 { await Task.yield(); spins += 1 }
-        try #require(center.heldRequest != nil)
+        try await center.heldRequest.waitForArrivals(1)
+        try #require(center.heldRequest.waiting == 1)
         try await value(of: sink.submit(note("run-1")))
         sink.withdraw(identifiers: ["run-1"])   // what acknowledging the run does
 
@@ -174,7 +172,7 @@ struct NotificationInstallTests {
         #expect(center.added == ["a", "b"])
         #expect(sink.unsettledCountForTesting == 0)
 
-        center.heldRequest?.resume()
+        center.heldRequest.releaseWaiting()
         try await value(of: first)
         #expect(center.added == ["a", "b"], "the late return adds nothing twice")
     }
@@ -303,12 +301,11 @@ struct NotificationInstallTests {
         center.holdAdd = true
         let sink = UserNotificationSink(state: app, center: center)
         let posting = sink.submit(note("a"))
-        var spins = 0
-        while center.heldAdd == nil, spins < 10_000 { await Task.yield(); spins += 1 }
-        try #require(center.heldAdd != nil, "add must be in flight before the withdraw")
+        try await center.heldAdd.waitForArrivals(1)
+        try #require(center.heldAdd.waiting == 1, "add must be in flight before the withdraw")
         sink.withdraw(identifiers: ["a"])
         #expect(center.removed == ["a"])
-        center.heldAdd?.resume()
+        center.heldAdd.releaseWaiting()
         try await value(of: posting)
         #expect(center.added == ["a"])
         #expect(center.removed == ["a", "a"], "removed again after the add, or the banner would stay up")
@@ -338,11 +335,10 @@ struct NotificationInstallTests {
         center.holdRequest = true
         let sink = UserNotificationSink(state: app, center: center)
         let first = sink.submit(note("a"))
-        var spins = 0
-        while center.heldRequest == nil, spins < 10_000 { await Task.yield(); spins += 1 }
-        try #require(center.heldRequest != nil, "the prompt must be up before the second post")
+        try await center.heldRequest.waitForArrivals(1)
+        try #require(center.heldRequest.waiting == 1, "the prompt must be up before the second post")
         try await value(of: sink.submit(note("b")))
-        center.heldRequest?.resume()
+        center.heldRequest.releaseWaiting()
         try await value(of: first)
         #expect(center.added == ["a", "b"])
         #expect(sink.unsettledCountForTesting == 0)
