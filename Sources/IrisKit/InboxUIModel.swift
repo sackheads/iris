@@ -92,6 +92,27 @@ enum InboxUIModel {
     }
 
     /// The first eight characters of a session's id, for when nothing better names it.
+    /// #920 slice 4: the read-only lines an answered item shows, for the detail pane (4b wires it in). Only an
+    /// answer Brian gave says "You": an automatic one says nobody chose, and a veto says it was a veto.
+    static func answerSummary(_ answer: InboxAnswer, item: InboxItem) -> [String] {
+        let chosen = answer.chosenOptionId.flatMap { id in item.options.first(where: { $0.id == id })?.label }
+        var lines: [String] = []
+        if answer.automatic {
+            lines.append("No answer by the deadline: " + (chosen.map { "the default, \($0), took effect automatically." }
+                                                                ?? "the default took effect automatically.") + " Nobody chose it.")
+            if answer.decidedWhileAway { lines.append("Decided while you were away: Iris applied it when it next ran.") }
+            return lines
+        }
+        if answer.vetoed {
+            let refused = item.vetoDefaultOptionId.flatMap { id in item.options.first(where: { $0.id == id })?.label }
+            lines.append(refused.map { "You vetoed the default, \($0)." } ?? "You vetoed the default.")
+        } else if let chosen {
+            lines.append("You chose: \(chosen)")
+        }
+        if let text = answer.freeText { lines.append("You wrote: \(text)") }
+        return lines
+    }
+
     static func shortId(_ id: UUID) -> String { String(id.uuidString.lowercased().prefix(8)) }
 
     /// What the list and detail show as "from". Items raised before #1027 stored the full UUID when
