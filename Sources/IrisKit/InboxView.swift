@@ -18,6 +18,7 @@ struct InboxView: View {
     private var items: [InboxItem] {
         _ = state.inboxRevision
         return InboxUIModel.mailboxItems(open: (try? state.store.inbox.openItems()) ?? [],
+                                         stale: (try? state.store.inbox.staleItems()) ?? [],
                                          awaitingDelivery: (try? state.store.inbox.awaitingDeliveryItems()) ?? [])
     }
 

@@ -188,7 +188,12 @@ given the async premise and the trust model; I've settled those as planner calls
 - **Item lifecycle and the list.** `answered` items **stay visible** in the list (mail style) until
   Brian archives them; archived items move to an Archive view; nothing is silently deleted. An
   **open** item whose emitter is gone with no activity for N days is marked **stale** and Brian can
-  archive it — that is the GC story for zombie decisions (reviewer gap 5).
+  archive it — that is the GC story for zombie decisions (reviewer gap 5). N is 7, a constant
+  (`IrisEngine.inboxStaleAfter`, planner ruling F5, 2026-11-23); both conditions must hold, so a live
+  emitter's unanswered item is pending, not stale. "Gone" is the raising chain's: a session that is
+  deleted or archived, or a role nobody holds (the 7 days let a role regain one); a job's chain is gone
+  only when the job is. The sweep runs on the veto watcher's tick (#920 slice 3). A stale item stays in
+  the list, not the open-items badge, is still answerable, and its owner's follow-up reopens it.
 - **The firehose, precisely.** The inbox-side defenses (per-emitter rate limit, dedup-by-thread,
   source label) stop **one** agent flooding — not three independent agents raising overlapping
   items. For the **team**, that collision is handled where it already is: the curation chain merges
