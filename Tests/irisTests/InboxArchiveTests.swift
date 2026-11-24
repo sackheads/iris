@@ -60,6 +60,20 @@ struct InboxArchiveTests {
         #expect(failure(try s.inbox.setArchived(itemId: "nope", true, at: Date())) == .unknownItem)
     }
 
+    @Test("an open item Brian won't answer is closed first, and then archivable; the refusal says how")
+    func closeThenArchive() throws {
+        let s = try ConversationStore.inMemory()
+        let it = item("t-skip")
+        try s.inbox.createItem(it, question: "Context.")
+        #expect(failure(try s.inbox.setArchived(itemId: it.id, true, at: Date())) == .notArchivable)
+        #expect(InboxUIModel.notArchivableMessage.contains("close it without answering"))
+        try s.inbox.setState(itemId: it.id, .closed)
+        #expect(try s.inbox.settledItems().map(\.id) == [it.id], "closed, it stays listed")
+        #expect(ok(try s.inbox.setArchived(itemId: it.id, true, at: Date())))
+        #expect(try s.inbox.openItems().isEmpty)
+        #expect(try s.inbox.archivedItems().map(\.id) == [it.id])
+    }
+
     @Test("an answer arriving on an archived item leaves it archived")
     func answerKeepsItArchived() throws {
         let s = try ConversationStore.inMemory()
