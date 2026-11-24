@@ -56,8 +56,9 @@ design for an empty app).
 An item has a single anatomy regardless of what kind of answer it wants:
 
 - **Title** — one line.
-- **Source** — who raised it and the chain it came through (e.g. `dev-2 → planner → overseer`, or a
-  standalone agent's name).
+- **Source** — the session that raised it: its card name, role or title (`AppState.inboxEmitterLabel`).
+  Not the relay chain it came through (`dev-2 → planner → overseer`): Iris sees only the emitting
+  session, and the chain path was dropped (planner ruling F7, 2026-11-23).
 - **Situation** — the full context, written once, completely.
 - **The decision** — zero or more **options**, each with its own pros and cons.
 - **Response area** — the only thing that varies:
@@ -77,17 +78,26 @@ There are no separate item *types*; the response area is a property of the item.
 An item is a **thread**, keyed by a stable item id. States: `open` (needs attention) → `answered`
 → may reopen. A follow-up from an agent references the item id (email's `In-Reply-To`); the inbox
 **appends** it under the thread and flips the item back to `open`, surfacing it with the prior
-answer still shown as context. A thread **closes** when the originating agent marks it resolved
-(decision consumed, PR merged) or Brian archives it. Referencing-by-id is also the dedup mechanism:
-a re-ask threads instead of spawning a twin.
+answer still shown as context. When the decision is consumed (acted on, PR merged), the originating
+chain marks the thread **resolved** with `resolve_inbox_item`: a status of its own, final, and
+nothing Brian did; only the owner chain may resolve it, and not while an answer is still awaiting
+delivery to it. Archiving is a different thing: Brian's visibility flag on an item in any status, not
+a status (planner ruling F3, 2026-11-23). Referencing-by-id is also the dedup mechanism: a re-ask
+threads instead of spawning a twin.
 
 ### Emit is open; curation is a team convention
 
-Any agent/session may emit an item (parity with pub/sub's open publish). Curation is **not** enforced
-at the inbox — it is a convention of the team's roles: devs feed the chain, the Overseer/planner emit
-the curated item. A standalone agent (a research session, a one-off profile, Iris herself) emits
-directly, with route-back set to itself. This keeps the chain's value for the squad while letting
-non-team agents reach Brian.
+A session that may emit is a role-bound one, the pinned Iris, one working a `/goal`, or one with an
+item of its own still open (to follow it up or resolve it): `inbox_item` is declared only there, sticky once declared, and
+the dispatcher refuses it elsewhere (Invariant 6; planner ruling F4, 2026-11-23). A plain session's
+plain turn is not offered it, so a one-off agent that needs Brian asks the user, or Iris raises the
+item (Brian, 2026-11-23: "accept", since forwarding to Iris is like the Overseer's). A conversation
+working a `/goal` is offered it too. A job run is offered it by #920 slice 1b: a scheduled or polled
+job, not a filesystem watch, with its owner chain `job:<jobId>`, its answer handed to the job's next
+run (or to the pinned Iris when the job is deleted, paused or not due within 24 h), and its emit
+limit keyed by the job, not the run. Within those sessions, curation is **not** enforced at the inbox — it is a convention of the
+team's roles: devs feed the chain, the Overseer/planner emit the curated item, Iris raises her own
+with route-back set to herself.
 
 Because un-curated emitters have no chain to filter them, the inbox carries its own light
 protections:
@@ -140,15 +150,15 @@ going back out to the agents.
 
 A way for an agent to create or append-to an item. Fields: `title`, `situation`, `options`
 (each `{label, pros, cons}`), `response_mode`, `route_back` (`role:<name>` entries, or omitted for the emitter itself), `notify` (`role:<name>` entries), `thread_id`
-(omitted = new thread; present = append), and for a veto `deadline` + `default`. A matching way to
-mark a thread resolved. The emit tool's declaration must be **gated** per Invariant 6 (not broadcast
-on every plain turn) and its description swept per Invariant 9; the exact gate is a builder call
-(see below).
+(omitted = new thread; present = append), and for a veto `deadline` + `default`. Closing is
+`resolve_inbox_item(thread_id, note)`, declared while the session owns an unfinished item. The
+emit tool is declared to a role-bound session, the pinned Iris, or one with an item of its own still
+open (`IrisEngine.inboxItemDeclared`; see "Emit is open" above), never on every plain turn.
 
 ## What's left to the builder
 
-- Whether emit is a new tool or an extension of `send_to_session`'s address space (a `to: "inbox"`
-  form), and exactly when its declaration is gated on (Invariant 6).
+- Whether emit is a new tool or an extension of `send_to_session`'s address space: a new tool,
+  `inbox_item`, gated as above (#920 slice 1).
 - The per-emitter rate-limit numbers, and whether the inbox badge/notification is on by default.
 - The SQLite schema specifics and migration id.
 - Whether the "notify set" reuses pub/sub or is a direct lighter send.

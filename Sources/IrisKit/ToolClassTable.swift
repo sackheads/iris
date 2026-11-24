@@ -31,7 +31,7 @@ enum ToolClassTable {
         put(["search_conversations", "read_conversation", IrisEngine.profileMemoryTool], .tierGated)
         put(["search_web", "rename_conversation", "reflect", "goal_complete", "propose_goal_contract",
              "amend_goal_contract", "reach_checkpoint", "waive_criterion", "invoke_subagent", "delegate_milestone",
-             "inbox_item", "submit_evaluation", "set_session_card", "close_request", "send_to_session",
+             "inbox_item", IrisEngine.resolveInboxItemTool, "submit_evaluation", "set_session_card", "close_request", "send_to_session",
              IrisEngine.scheduleNextTickTool, IrisEngine.currentTimeTool], .noCred)
         return table
     }()

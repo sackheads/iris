@@ -1635,6 +1635,64 @@ actor IrisEngine {
     /// closed and refund on block → store via Task 1's `InboxStore` (append if `thread_id` names
     /// an existing thread, else create a new one). The item is never delivered anywhere else; it
     /// waits for Brian.
+    /// #920 slice 1 (Invariant 6): where `inbox_item` is declared. A role-bound session (a curator of the
+    /// team's chain), the pinned Iris, a conversation working a `/goal` (Brian, 2026-11-23: the work
+    /// nobody is watching turn by turn), or a session with an item of its own still open; sticky once
+    /// declared. Never a subagent, evaluator or background run.
+    nonisolated static func inboxItemDeclared(principal: Principal, isUnattended: Bool, role: String?, isPinned: Bool,
+                                              hasActiveGoal: Bool, ownsUnfinishedItem: Bool, sticky: Set<String>) -> Bool {
+        guard principal == .main, !isUnattended else { return false }
+        return inboxItemStateOn(role: role, isPinned: isPinned, hasActiveGoal: hasActiveGoal, ownsUnfinishedItem: ownsUnfinishedItem)
+            || sticky.contains("inbox_item")
+    }
+
+    /// Whether the state behind `inbox_item`'s gate holds now; stickiness aside, which is the
+    /// dispatcher's off-state test (5c: a sticky declaration's call is refused when its state is off).
+    nonisolated static func inboxItemStateOn(role: String?, isPinned: Bool, hasActiveGoal: Bool, ownsUnfinishedItem: Bool) -> Bool {
+        role != nil || isPinned || hasActiveGoal || ownsUnfinishedItem
+    }
+
+    nonisolated static let inboxItemOffStateRefusal = "Not raised: this session raises inbox items only when it holds a role, is the pinned Iris, is working a goal, or has an item of its own still open. Tell the user what you would ask; they can ask Iris to raise it."
+
+    nonisolated static let resolveInboxItemTool = "resolve_inbox_item"
+
+    nonisolated static let resolveInboxItemDeclaration = FunctionDeclaration(
+        name: resolveInboxItemTool,
+        description: "Close an inbox item you raised once its decision is consumed (you acted on Brian's answer, the PR merged, the question went away). It leaves Brian's open items. Only the chain that raised it can close it; an item whose answer is still being delivered to you cannot be closed until it arrives.",
+        parameters: Schema(type: "OBJECT", properties: [
+            "thread_id": Schema(type: "STRING", description: "The thread_id inbox_item returned when you raised it."),
+            "note": Schema(type: "STRING", description: "A few words on why it is done, e.g. \"merged in #1360\". Shown on the item."),
+        ], required: ["thread_id"])
+    )
+
+    /// #920 slice 1: the owner chain closes its own thread.
+    private func resolveInboxItem(args: [String: JSONValue], from conversationId: UUID, store: ConversationStore) async -> String {
+        guard let threadId = args["thread_id"]?.stringValue.trimmingCharacters(in: .whitespaces), !threadId.isEmpty else {
+            return "A thread_id is required."
+        }
+        let localState = state
+        guard let ownerChain = await MainActor.run(body: { () -> String? in
+            guard let c = localState?.conversations.first(where: { $0.id == conversationId }) else { return nil }
+            return c.role ?? conversationId.uuidString
+        }) else { return "That conversation no longer exists." }
+        let note = Self.flattenCardField(args["note"]?.stringValue ?? "", cap: 200)
+        let outcome: Result<String, InboxError>
+        do {
+            outcome = try store.inbox.resolve(threadId: threadId, fromChain: ownerChain, note: note, at: Date())
+        } catch {
+            return "Not closed: the inbox could not be written."
+        }
+        switch outcome {
+        case .success:
+            await MainActor.run { localState?.bumpInboxRevision() }
+            return "Closed inbox item \(threadId)."
+        case .failure(.notOwner): return "Not closed: that item belongs to a different chain."
+        case .failure(.itemClosed): return "That item is already closed."
+        case .failure(.awaitingDelivery): return "Not closed: Brian's answer to it is still being delivered. Close it once you have it."
+        case .failure: return "Not closed: no inbox item has that thread_id."
+        }
+    }
+
     private func emitToInbox(args: [String: JSONValue], from conversationId: UUID, store: ConversationStore) async -> String {
         guard let title = args["title"]?.stringValue.trimmingCharacters(in: .whitespaces), !title.isEmpty else {
             return "A title is required."
@@ -4136,16 +4194,21 @@ actor IrisEngine {
             ))
         }
 
-        // #920 Task 2: a decision raised into Brian's inbox — an open emit (any attended main
-        // session may raise one; the inbox's own rate limit, dedup-by-thread and shown source are
-        // the whole defense, not a curation gate in code — design spec "the firehose, precisely").
-        // Declared unconditionally for an attended `.main` turn, same shape as `schedule_job`
-        // above: it needs no peer and no prior state, so there is nothing to gate it on but
-        // attendance itself.
-        if !isUnattended && principal == .main {
+        // #920 Task 2: a decision raised into Brian's inbox. The inbox's own rate limit, dedup-by-thread
+        // and shown source are its defense, not a curation gate in code (design spec "the firehose,
+        // precisely"). #920 slice 1 (Invariant 6): declared only where a decision for Brian is part of
+        // the work, not on every plain turn: a role-bound session (the team's curators), the pinned
+        // Iris, and a session with an item of its own still open, which may follow it up or resolve
+        // it. Sticky once declared (5c §0.1). The dispatcher refuses it where it would not be declared.
+        let inboxChain = ownRole ?? conversationId.uuidString
+        let ownsUnfinishedInboxItem = (principal == .main && !isUnattended)
+            ? ((try? await MainActor.run(body: { localState?.store.inbox })?.hasUnfinishedItems(ownerChain: inboxChain)) ?? false)
+            : false
+        if Self.inboxItemDeclared(principal: principal, isUnattended: isUnattended, role: ownRole, isPinned: isPinned,
+                                  hasActiveGoal: hasActiveGoal, ownsUnfinishedItem: ownsUnfinishedInboxItem, sticky: sticky) {
             toolsList.append(FunctionDeclaration(
                 name: "inbox_item",
-                description: "Record a decision for Brian to answer: a durable, human-facing question that outlives this conversation. Omit thread_id for a new item; give the thread_id of an item you raised before to append a followup: it reopens the item with your new title, situation and options in place of the ones he answered (only the chain that raised it may do this — a foreign followup is refused; route_back and notify stay as first raised). It appears in Brian's inbox (sidebar row, open-items count) — you may tell him you raised it.",
+                description: "Record a decision for Brian to answer: a durable, human-facing question that outlives this conversation. Omit thread_id for a new item; give the thread_id of an item you raised before to append a followup: it reopens the item with your new title, situation and options in place of the ones he answered (only the chain that raised it may do this — a foreign followup is refused; route_back and notify stay as first raised). It appears in Brian's inbox (sidebar row, open-items count) — you may tell him you raised it. Close it with resolve_inbox_item once the decision is consumed.",
                 parameters: Schema(type: "OBJECT", properties: [
                     "title": Schema(type: "STRING", description: "A short label for the item."),
                     "situation": Schema(type: "STRING", description: "The full context: what's going on and why this needs a decision."),
@@ -4163,6 +4226,11 @@ actor IrisEngine {
                     "veto_default": Schema(type: "STRING", description: "For response_mode timedVeto: the id of the option that takes effect at the deadline if Brian has not answered. It must match an option's id. The default is not guaranteed to apply: an item may be held open for Brian to decide instead (for example after you read outside content), and you are told once when that happens."),
                 ], required: ["title", "situation", "response_mode"])
             ))
+        }
+        // #920 slice 1: closing a thread is the raising chain's, once the decision is consumed. Declared
+        // while that chain has an item to close, sticky once declared; the dispatcher refuses it otherwise.
+        if principal == .main, !isUnattended, ownsUnfinishedInboxItem || sticky.contains(Self.resolveInboxItemTool) {
+            toolsList.append(Self.resolveInboxItemDeclaration)
         }
 
         // #187 §9, invariant 6: the job tools, search_conversations and read_conversation are
@@ -5471,7 +5539,7 @@ actor IrisEngine {
         "write_file", "create_skill", "update_skill", "delete_skill",
         "set_workspace", "register_directory_watcher",
         "update_user_profile", "update_soul", "update_memory", "update_profile_memory", "save_fact", "reflect",
-        "rename_conversation", "inbox_item", scheduleNextTickTool, setAlarmTool, currentTimeTool,
+        "rename_conversation", "inbox_item", resolveInboxItemTool, scheduleNextTickTool, setAlarmTool, currentTimeTool,
     ]
 
     /// #813: a read under ~/.iris that is Iris's own standing context: SOUL, USER, memory.md,
@@ -5706,7 +5774,7 @@ actor IrisEngine {
     /// 5c §1: never declared to an unattended turn, whatever a sticky set says.
     nonisolated static let unattendedNeverDeclared: Set<String> =
         jobCreationTools.union(["set_workspace", "list_sessions", "describe_session", "send_to_session",
-                                "set_session_card", "close_request", "inbox_item", setAlarmTool])
+                                "set_session_card", "close_request", "inbox_item", resolveInboxItemTool, setAlarmTool])
             .union(ToolExecutor.githubProxyTools)
     /// OpenAI's `prompt_cache_key` (5c §0.9). It is a routing hint, so it names the prefix a
     /// request shares with others, not the conversation. An attended chat (Iris included) keeps
@@ -5751,7 +5819,7 @@ actor IrisEngine {
         jobCreationTools.union([scheduleNextTickTool, setAlarmTool, "rename_conversation", "propose_goal_contract",
                                 "amend_goal_contract", "reach_checkpoint", "delegate_milestone",
                                 "waive_criterion", "list_sessions", "describe_session", "send_to_session",
-                                "set_session_card", "close_request", "inbox_item"])
+                                "set_session_card", "close_request", "inbox_item", resolveInboxItemTool])
             .union(ToolExecutor.githubProxyTools)
 
     nonisolated static let listSessionsDeclaration = FunctionDeclaration(
@@ -7049,11 +7117,37 @@ actor IrisEngine {
                 result = Self.unattendedSessionMessageRefusal
                 return result
             }
+            guard let (store, role, isPinned, hasGoal) = await MainActor.run(body: { () -> (ConversationStore, String?, Bool, Bool)? in
+                guard let s = localState else { return nil }
+                let c = s.conversations.first(where: { $0.id == conversationId })
+                return (s.store, c?.role, c?.isPinned == true, c?.activeGoal != nil)
+            }) else {
+                result = "The inbox is unavailable."
+                return result
+            }
+            // #920 slice 1: the declaration's gate, again where the call acts (a sticky declaration
+            // outlives its state, and a model can name a tool it saw elsewhere).
+            let owns = (try? store.inbox.hasUnfinishedItems(ownerChain: role ?? conversationId.uuidString)) ?? false
+            guard Self.inboxItemStateOn(role: role, isPinned: isPinned, hasActiveGoal: hasGoal, ownsUnfinishedItem: owns) else {
+                result = Self.inboxItemOffStateRefusal
+                return result
+            }
+            result = await emitToInbox(args: functionCall.args, from: conversationId, store: store)
+        } else if functionCall.name == Self.resolveInboxItemTool {
+            guard principal == .main else {
+                result = "Refused — a subagent is not a session."
+                return result
+            }
+            guard !isUnattended else {
+                result = Self.unattendedSessionMessageRefusal
+                return result
+            }
             guard let store = await MainActor.run(body: { localState?.store }) else {
                 result = "The inbox is unavailable."
                 return result
             }
-            result = await emitToInbox(args: functionCall.args, from: conversationId, store: store)
+            // No off-state branch of its own: `resolve` refuses a thread that is not this chain's or is already closed.
+            result = await resolveInboxItem(args: functionCall.args, from: conversationId, store: store)
         } else if functionCall.name == "list_jobs" || functionCall.name == "get_job_run" {
             // Declaration gating stops a well-behaved model from being offered these; dispatch
             // reads the function name alone, so the invariant ("in no other conversation") is
@@ -8122,7 +8216,7 @@ actor IrisEngine {
         "reflect", "goal_complete", "search_memory", "update_user_profile", "update_soul",
         "update_memory", "propose_goal_contract", "list_sessions", "describe_session", "send_to_session",
         "set_session_card", "close_request", "amend_goal_contract", "reach_checkpoint", "waive_criterion",
-        "invoke_subagent", "delegate_milestone", "inbox_item", scheduleNextTickTool, setAlarmTool, currentTimeTool,
+        "invoke_subagent", "delegate_milestone", "inbox_item", resolveInboxItemTool, scheduleNextTickTool, setAlarmTool, currentTimeTool,
     ]
 
     /// Every tool name the app can ever declare to any conversation (main agent, subagent or
