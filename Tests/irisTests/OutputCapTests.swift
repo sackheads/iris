@@ -173,8 +173,9 @@ struct OutputCapTests {
         let state = AppState(store: try ConversationStore.inMemory(), tier2Provisioning: .provisioned,
                              tier3Provisioning: .provisioned, createIfEmpty: false, emitLaunchNotices: false)
         let id = state.createNewConversation(isBackground: false, select: true)
-        // Under the test's own Iris home: read without asking, and exempt from the guard.
-        let file = IrisPaths.default.root.appendingPathComponent("cap-\(UUID().uuidString).txt")
+        // A first-party file under the test's own Iris home: read without asking, and exempt from the guard (#1295: skills/, not the home's root).
+        try FileManager.default.createDirectory(at: IrisPaths.default.skillsDir, withIntermediateDirectories: true)
+        let file = IrisPaths.default.skillsDir.appendingPathComponent("cap-\(UUID().uuidString).txt")
         try numbered(5000).write(to: file, atomically: true, encoding: .utf8)
         defer { try? FileManager.default.removeItem(at: file) }
         func reply(_ part: Part) -> GeminiResponse {

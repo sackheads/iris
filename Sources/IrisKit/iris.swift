@@ -8452,15 +8452,16 @@ actor IrisEngine {
             result = OutputCap.cap(result, advice: Self.outputCapAdvice(name: name, args: execArgs))
         }
 
-        // First-party trust: reading a file under ~/.iris/ returns Iris's OWN content
-        // (SOUL, USER, memory.md, skills, artifacts, library, rules, configs) — not untrusted external data.
-        // Return it raw, bypassing the guard, so the same `---`-stripping / <untrusted_context>
-        // wrapping that mangles first-party content on read-back does not apply. Everything else
-        // (other paths, other tools, web results) stays guarded below.
+        // First-party trust: SOUL, USER, memory.md, skills, rules and config are Iris's OWN content,
+        // and a tainted conversation's write to any of them is held (`ContextHolds.heldWritePath`).
+        // Returned raw, bypassing the guard, so the `---`-stripping and <untrusted_context> wrapping
+        // that would mangle them on read-back do not apply. The rest of ~/.iris (library/, artifacts/)
+        // is written unheld (#814), so a tainted turn's text can sit there: it is guarded below like
+        // any file, or a later clean read would put it in front of the model unjudged (#1295).
         if name == "read_file",
            let path = execArgs["path"]?.stringValue,
-           IrisPaths.default.isUnderIrisDir(path) {
-            if !Self.isFirstPartyRead(ToolExecutor.resolvePath(path, cwd: cwd)) { await markReadUntrusted(conversationId) }
+           IrisPaths.default.isUnderIrisDir(path),
+           Self.isFirstPartyRead(ToolExecutor.resolvePath(path, cwd: cwd)) {
             return result
         }
         // #813: any other read is someone else's text. Decided here, after the hooks, on the path
@@ -8533,8 +8534,8 @@ actor IrisEngine {
         } else {
             // Structural isolation, then tiers 2 and 3 (skipped for trusted tools), with the lines a
             // role delimiter was stripped from scored alone (#727).
-            // #952: the real, first-party `read_file` tool, reached here only for a path
-            // outside ~/.iris (the Iris-dir branch above already returned). This is a typed
+            // #952: the real, first-party `read_file` tool, reached here for any path but Iris's
+            // own first-party files (the branch above returned those; #1295). This is a typed
             // parameter from this exact call site, not a `contextTag`/name string match applied
             // downstream — an MCP server's own `read_file` tool is dispatched and recorded as
             // `"<server>___read_file"` (`JobProfile.mcpNameSeparator`), never bare `"read_file"`,
