@@ -4,8 +4,9 @@ struct PromptInjectionGuard {
     
     /// Tier 1: Text normalization only.
     ///
-    /// Normalizes homoglyphs/encodings and strips LLM role delimiters, and returns the
-    /// cleaned text **unwrapped**. Wrapping the content in `<untrusted_context>` (and
+    /// Normalizes compatibility forms (NFKC) and invisible characters, strips LLM role delimiters,
+    /// and returns the cleaned text **unwrapped**. Cross-script homoglyphs are folded only to match a
+    /// role word (`roleConfusables`, #1342); the text itself keeps them. Wrapping the content in `<untrusted_context>` (and
     /// escaping any breakout closing tags) is the responsibility of `InjectionGuard.sanitize`,
     /// which owns the final encapsulation. This ordering is deliberate: the Tier 2/Tier 3
     /// classifiers in `InjectionGuard` must evaluate the *content*, not the XML scaffolding —
@@ -47,15 +48,68 @@ struct PromptInjectionGuard {
         options: [.caseInsensitive])
 
     static func isBareRoleLine(_ line: String) -> Bool {
-        let whole = NSRange(line.startIndex..., in: line)
-        return bareRoleLine.firstMatch(in: line, range: whole) != nil || bareRoleLineForms.firstMatch(in: line, range: whole) != nil
+        matchesFolded(line) { line in
+            let whole = NSRange(line.startIndex..., in: line)
+            return bareRoleLine.firstMatch(in: line, range: whole) != nil || bareRoleLineForms.firstMatch(in: line, range: whole) != nil
+        }
+    }
+
+    /// #1342: the Cyrillic and Greek letters Unicode's confusables.txt (18.0.0) gives as a look-alike of a
+    /// letter in a role word (a, c, d, e, f, g, h, i, l, m, n, o, p, r, s, t, u, v, y), so `Hуman:` and
+    /// `Usеr:` match as `Human:` and `User:`. Only letters NFKC leaves alone, and each a single UTF-16 unit
+    /// both ways, so a match in the folded line is the same range in the line itself. Matching only: what
+    /// is passed on keeps its own letters. `roleConfusableAlternates` covers the letters it gives a second reading.
+    static let roleConfusables: [Unicode.Scalar: Unicode.Scalar] = [
+        "\u{03B1}": "a", "\u{0430}": "a", "\u{0391}": "A", "\u{0410}": "A",
+        "\u{0441}": "c", "\u{0421}": "C",
+        "\u{0501}": "d",
+        "\u{0435}": "e", "\u{04BD}": "e", "\u{0395}": "E", "\u{0415}": "E",
+        "\u{03DC}": "F",
+        "\u{050C}": "G",
+        "\u{04BB}": "h", "\u{04BA}": "h", "\u{0397}": "H", "\u{041D}": "H",
+        "\u{03B9}": "i", "\u{0456}": "i",
+        "\u{0399}": "l", "\u{0406}": "l", "\u{04CF}": "l", "\u{04C0}": "l",
+        "\u{039C}": "M", "\u{03FA}": "M", "\u{041C}": "M",
+        "\u{039D}": "N",
+        "\u{03BF}": "o", "\u{03C3}": "o", "\u{03ED}": "o", "\u{043E}": "o", "\u{039F}": "O", "\u{041E}": "O",
+        "\u{03C1}": "p", "\u{03F8}": "p", "\u{0440}": "p", "\u{03A1}": "P", "\u{0420}": "P",
+        "\u{0433}": "r",
+        "\u{0455}": "s", "\u{0405}": "S",
+        "\u{03A4}": "T", "\u{0422}": "T",
+        "\u{03C5}": "u",
+        "\u{03BD}": "v", "\u{0475}": "v", "\u{0474}": "V",
+        "\u{03B3}": "y", "\u{0443}": "y", "\u{04AF}": "y", "\u{03A5}": "Y", "\u{0423}": "Y", "\u{04AE}": "Y",
+    ]
+
+    /// Not from confusables.txt, which gives Cyrillic `у` as `y` and capital I's look-alikes as `l` (its
+    /// prototype for Latin `I` too). In a role word they read as `u` (`Hуman:`, the case #1342 found) and `I`
+    /// (`Іnstruction:`), so a second fold reads them so. No role word has both `y` and `u`, or `I` and `l`.
+    static let roleConfusableAlternates: [Unicode.Scalar: Unicode.Scalar] = [
+        "\u{0443}": "u", "\u{0399}": "I", "\u{0406}": "I", "\u{04C0}": "I",
+    ]
+    private static let roleFolds = [roleConfusables, roleConfusables.merging(roleConfusableAlternates) { $1 }]
+
+    static func foldRoleConfusables(_ text: String, alternate: Bool = false) -> String {
+        let table = roleFolds[alternate ? 1 : 0]
+        var scalars = String.UnicodeScalarView()
+        scalars.append(contentsOf: text.unicodeScalars.map { table[$0] ?? $0 })
+        return String(scalars)
+    }
+
+    /// A role-word check that also holds for either folded spelling of the line. Only ever adds a match.
+    private static func matchesFolded(_ line: String, _ check: (String) -> Bool) -> Bool {
+        if check(line) { return true }
+        return [false, true].contains { alternate in
+            let folded = foldRoleConfusables(line, alternate: alternate)
+            return folded != line && check(folded)
+        }
     }
 
     /// Step 1 alone, for a caller that strips later through `InjectionGuard.sanitizeUntrusted`.
     static func normalize(_ rawInput: String) -> String {
-        // 1. Homoglyph & Encoding Normalization
-        // Normalize to prevent attackers from using invisible characters or weird encodings to bypass filters.
-        // We use NFKC to normalize compatibility characters.
+        // 1. Encoding normalization
+        // NFKC folds compatibility forms (fullwidth `Ｈｕｍａｎ：` becomes `Human:`), not cross-script
+        // look-alikes: a Cyrillic `у` stays one. Those are folded only for role-word matching (#1342).
         var clean = rawInput.precomposedStringWithCompatibilityMapping
 
         // Remove control characters (except common whitespace like newlines/tabs). Foundation's
@@ -101,7 +155,7 @@ struct PromptInjectionGuard {
     /// its cap on the strong ones first (planner, #735), so 64 padding `user:` lines can't push a
     /// `system:` line past it.
     static func delimiterStrength(_ line: String) -> Int {
-        strongDelimiter.firstMatch(in: line, range: NSRange(line.startIndex..., in: line)) != nil ? 0 : 1
+        matchesFolded(line) { strongDelimiter.firstMatch(in: $0, range: NSRange($0.startIndex..., in: $0)) != nil } ? 0 : 1
     }
 
     /// Markdown's own rules and headings, which strip without recording a line.
@@ -122,7 +176,7 @@ struct PromptInjectionGuard {
     /// anything (`IG###NORE`, `sys---tem:`): such a line stays stripped whatever a tier said.
     static func isStructureOnlyMarkerLine(_ normalizedLine: String) -> Bool {
         let whole = NSRange(normalizedLine.startIndex..., in: normalizedLine)
-        guard delimiterBeforeRole.firstMatch(in: normalizedLine, range: whole) == nil,
+        guard !matchesFolded(normalizedLine, { delimiterBeforeRole.firstMatch(in: $0, range: NSRange($0.startIndex..., in: $0)) != nil }),
               !isBareRoleWordLine(normalizedLine) else { return false }
         let remainder = standaloneStructure.stringByReplacingMatches(in: normalizedLine, range: whole, withTemplate: "")
         guard !remainder.contains("---"), !remainder.contains("###") else { return false }
@@ -137,7 +191,7 @@ struct PromptInjectionGuard {
         options: [.caseInsensitive])
 
     static func isBareRoleWordLine(_ normalizedLine: String) -> Bool {
-        bareRoleWord.firstMatch(in: normalizedLine, range: NSRange(normalizedLine.startIndex..., in: normalizedLine)) != nil
+        matchesFolded(normalizedLine) { bareRoleWord.firstMatch(in: $0, range: NSRange($0.startIndex..., in: $0)) != nil }
     }
 
     /// #1329: a line that is nothing but `---`/`###` runs, the pieces a split turn header is framed with. A heading
@@ -170,17 +224,37 @@ struct PromptInjectionGuard {
             return line.replacingOccurrences(of: pattern, with: "", options: [.caseInsensitive])
         }
         let regex = wordRegexes[pattern] ?? wordRegex(pattern)
-        return regex.stringByReplacingMatches(in: line, range: NSRange(line.startIndex..., in: line), withTemplate: "")
+        let stripped = regex.stringByReplacingMatches(in: line, range: NSRange(line.startIndex..., in: line), withTemplate: "")
+        // #1342: then a role word spelled with a look-alike, matched in the folded line and removed from
+        // this one at the same range. Its boundary is any letter, not only a Latin one, so a Cyrillic
+        // word whose ending folds to `model:` is not cut.
+        let foldedRegex = foldedWordRegexes[pattern] ?? wordRegex(pattern, boundary: foldedBoundary)
+        var result = stripped
+        for alternate in [false, true] {
+            let folded = foldRoleConfusables(result, alternate: alternate)
+            guard folded != result else { continue }
+            let line = NSMutableString(string: result)
+            for match in foldedRegex.matches(in: folded, range: NSRange(folded.startIndex..., in: folded)).reversed() {
+                line.deleteCharacters(in: match.range)
+            }
+            result = line as String
+        }
+        return result
     }
-    private static func wordRegex(_ pattern: String) -> NSRegularExpression {
+    private static let latinBoundary = "(?<![A-Za-z0-9_])"
+    private static let foldedBoundary = #"(?<![\p{L}\p{N}_])"#
+    private static func wordRegex(_ pattern: String, boundary: String = latinBoundary) -> NSRegularExpression {
         // A lookbehind, not a consumed character: `system:system:` would otherwise keep its second
         // marker, since the first match takes the `:` the second needs before it (#742 review).
-        try! NSRegularExpression(pattern: "(?<![A-Za-z0-9_])" + NSRegularExpression.escapedPattern(for: pattern),
+        try! NSRegularExpression(pattern: boundary + NSRegularExpression.escapedPattern(for: pattern),
                                  options: [.caseInsensitive])
     }
     /// Built once: `malRolePatterns` covers tier 1's own list too.
     private static let wordRegexes: [String: NSRegularExpression] = Dictionary(
         malRolePatterns.filter { $0.first?.isLetter == true }.map { ($0, wordRegex($0)) },
+        uniquingKeysWith: { first, _ in first })
+    private static let foldedWordRegexes: [String: NSRegularExpression] = Dictionary(
+        malRolePatterns.filter { $0.first?.isLetter == true }.map { ($0, wordRegex($0, boundary: foldedBoundary)) },
         uniquingKeysWith: { first, _ in first })
 
     /// #970: a single pass over the pattern list can REASSEMBLE a marker it was supposed to
@@ -243,7 +317,7 @@ struct PromptInjectionGuard {
                 return nestedDelimiterPlaceholder
             }
             if !counts, line != original,
-               delimiterBeforeRole.firstMatch(in: original, range: NSRange(original.startIndex..., in: original)) != nil {
+               matchesFolded(original, { delimiterBeforeRole.firstMatch(in: $0, range: NSRange($0.startIndex..., in: $0)) != nil }) {
                 counts = true
             }
             // After the strip too: `<|im_start|>assistant` leaves a bare `assistant`.
