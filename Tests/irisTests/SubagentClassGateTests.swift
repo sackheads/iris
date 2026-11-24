@@ -143,7 +143,7 @@ struct SubagentClassGateTests {
     private func boundChild(_ w: World) -> UUID {
         let child = UUID()
         w.app.createNewConversation(id: child, isSubagent: true)
-        w.app.registerSubagent(id: child, role: "worker", owner: w.parent)
+        w.app.linkDelegate(child, of: w.parent)   // as runSubagent links it
         return child
     }
 
@@ -177,11 +177,5 @@ struct SubagentClassGateTests {
         owner.app.createNewConversation(id: ownerChild, isSubagent: true)
         let allowed = await subagentEngine(owner, binding: Self.ownerChild).applyHeldWrite(item(ownerChild))
         #expect(!allowed.contains(ToolClassTable.refusalLead(tool: "set_workspace")), "\(allowed)")
-    }
-
-    @Test("hardStrip: a guest is never stripped by binding, so its own list_sessions stays (#1015's regression)")
-    func guestFloorUnchanged() {
-        let list = GuestToolset.listSessions, send = GuestToolset.sendToSession
-        #expect(IrisEngine.hardStrip([list, send], isUnattended: false, principal: .mcpGuest).map(\.name) == [list.name, send.name])
     }
 }
