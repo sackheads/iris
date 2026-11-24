@@ -21,6 +21,8 @@ struct SyncCoalescerTests {
             await gate.wait()
         }
 
+        /// Frees the oldest parked run. With none parked it banks a pass for the next one, where the old probe
+        /// dropped it; every caller here waits for a parked run first (#1384 review).
         nonisolated func releaseOne() { gate.release() }
 
         nonisolated func releaseAll() { gate.open() }
