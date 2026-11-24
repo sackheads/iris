@@ -225,7 +225,53 @@ struct PromptInjectionGuard {
     /// (#736): as a suffix it mangled ordinary keys, `filesystem:` into `file`, in every tool result
     /// the model read. Anywhere in a line, not only at its start, so a mid-line `system:` is still
     /// stripped. The chat-template tokens and `---`/`###` stay plain substrings.
-    private static func remove(_ pattern: String, from line: String, foldable: Bool) -> String {
+    /// A line's two folded spellings, built when first asked for and again only once the line has changed, so a
+    /// pass folds a line once rather than once per pattern (#1385). Equal content means equal folds, so a stale
+    /// check by value is exact; an unchanged line is the same storage, which `==` answers at once.
+    private struct LineFolds {
+        private var line: String?
+        private var folds: [(text: String, differs: Bool, roleWord: Bool)] = []
+
+        /// `line` folded, or nil when the fold changes nothing in it. `roleWord` is false when no word of
+        /// `malRolePatterns` is anywhere in the fold, so none of their regexes can match it.
+        mutating func folded(_ line: String, alternate: Bool) -> (text: String, roleWord: Bool)? {
+            if self.line != line {
+                self.line = line
+                folds = [false, true].map { alternate in
+                    let text = PromptInjectionGuard.foldRoleConfusables(line, alternate: alternate)
+                    let roleWord = PromptInjectionGuard.anyRoleWord.firstMatch(in: text, range: NSRange(text.startIndex..., in: text)) != nil
+                    return (text, text != line, roleWord)
+                }
+            }
+            let fold = folds[alternate ? 1 : 0]
+            return fold.differs ? (fold.text, fold.roleWord) : nil
+        }
+
+        /// `matchesFolded`, from these folds.
+        mutating func matches(_ line: String, _ check: (String) -> Bool) -> Bool {
+            if check(line) { return true }
+            for alternate in [false, true] {
+                if let fold = folded(line, alternate: alternate), check(fold.text) { return true }
+            }
+            return false
+        }
+    }
+
+    /// Every word pattern of `malRolePatterns`, unbounded: a superset of their regexes, on ICU's own case folding.
+    private static let anyRoleWord = try! NSRegularExpression(
+        pattern: malRolePatterns.filter { $0.first?.isLetter == true }.map(NSRegularExpression.escapedPattern(for:)).joined(separator: "|"),
+        options: [.caseInsensitive])
+
+    /// `isBareRoleLine` from a line's folds: nil folds mean it has no table letter, so only its own spelling counts.
+    private static func isBareRoleLine(_ line: String, folds: inout LineFolds?) -> Bool {
+        guard folds != nil else { return isBareRoleLine(line) }
+        return folds!.matches(line) { line in
+            let whole = NSRange(line.startIndex..., in: line)
+            return bareRoleLine.firstMatch(in: line, range: whole) != nil || bareRoleLineForms.firstMatch(in: line, range: whole) != nil
+        }
+    }
+
+    private static func remove(_ pattern: String, from line: String, folds: inout LineFolds?) -> String {
         guard pattern.first?.isLetter == true else {
             return line.replacingOccurrences(of: pattern, with: "", options: [.caseInsensitive])
         }
@@ -235,16 +281,16 @@ struct PromptInjectionGuard {
         // this one at the same range. Skipped for a line with no table letter. Its boundary adds Cyrillic
         // and Greek letters to the Latin one, so a word of theirs whose ending folds to `model:` is not cut,
         // while `中Usеr:` is stripped as `中User:` is.
-        guard foldable else { return stripped }
+        guard folds != nil else { return stripped }
         let foldedRegex = foldedWordRegexes[pattern] ?? wordRegex(pattern, boundary: foldedBoundary)
         var result = stripped
         for alternate in [false, true] {
-            let folded = foldRoleConfusables(result, alternate: alternate)
-            guard folded != result else { continue }
+            guard let fold = folds?.folded(result, alternate: alternate), fold.roleWord || wordRegexes[pattern] == nil else { continue }
+            let folded = fold.text
+            let matches = foldedRegex.matches(in: folded, range: NSRange(folded.startIndex..., in: folded))
+            guard !matches.isEmpty else { continue }
             let line = NSMutableString(string: result)
-            for match in foldedRegex.matches(in: folded, range: NSRange(folded.startIndex..., in: folded)).reversed() {
-                line.deleteCharacters(in: match.range)
-            }
+            for match in matches.reversed() { line.deleteCharacters(in: match.range) }
             result = line as String
         }
         return result
@@ -307,13 +353,13 @@ struct PromptInjectionGuard {
             let original = String(raw)
             var line = original
             // Stripping only removes characters, so a line with no table letter never gains one.
-            let foldable = hasRoleConfusable(original)
+            var folds: LineFolds? = hasRoleConfusable(original) ? LineFolds() : nil
             var counts = false
             var reachedFixedPoint = false
             for _ in 0..<maxStripPasses {
                 var changedThisPass = false
                 for pattern in patterns {
-                    let stripped = remove(pattern, from: line, foldable: foldable)
+                    let stripped = remove(pattern, from: line, folds: &folds)
                     if stripped != line {
                         changedThisPass = true
                         if !markdownOnly.contains(pattern) { counts = true }
@@ -331,7 +377,7 @@ struct PromptInjectionGuard {
                 counts = true
             }
             // After the strip too: `<|im_start|>assistant` leaves a bare `assistant`.
-            if bareRoleLines, isBareRoleLine(original) || isBareRoleLine(line) {
+            if bareRoleLines, isBareRoleLine(original, folds: &folds) || isBareRoleLine(line, folds: &folds) {
                 recorded[index] = original
                 return ""
             }
