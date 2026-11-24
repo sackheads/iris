@@ -2147,6 +2147,18 @@ actor IrisEngine {
         return SessionRoles.holder(of: role, in: conversations) == nil
     }
 
+    /// The chains among `chains` that are gone. None when launch failed to read the conversations, since an
+    /// empty list would make every sender look gone; and a conversation launch could not read (#163) is
+    /// not gone either, only unreadable this launch (dev-2's #1375 review).
+    nonisolated static func goneInboxChains(_ chains: [String], in conversations: [Conversation], loadFailed: Bool,
+                                            unloaded: Set<UUID>) -> Set<String> {
+        guard !loadFailed else { return [] }
+        return Set(chains.filter { chain in
+            if let id = UUID(uuidString: chain), unloaded.contains(id) { return false }
+            return inboxChainGone(chain, in: conversations)
+        })
+    }
+
     /// #920 slice 3: marks stale every open item quiet for `inboxStaleAfter` whose chain is gone. Run on
     /// the veto watcher's tick (launch, the dispatch timer, wake). Returns how many it marked.
     @discardableResult
@@ -2156,8 +2168,9 @@ actor IrisEngine {
         guard let store = await MainActor.run(body: { localState?.store }),
               let quiet = try? store.inbox.quietOpenItems(since: cutoff), !quiet.isEmpty else { return 0 }
         let gone = await MainActor.run { () -> Set<String> in
-            let conversations = localState?.conversations ?? []
-            return Set(quiet.map(\.ownerChain).filter { Self.inboxChainGone($0, in: conversations) })
+            guard let s = localState else { return [] }
+            return Self.goneInboxChains(quiet.map(\.ownerChain), in: s.conversations,
+                                        loadFailed: s.conversationLoadFailed, unloaded: s.unloadedConversationIds)
         }
         var marked = 0
         for item in quiet where gone.contains(item.ownerChain) {

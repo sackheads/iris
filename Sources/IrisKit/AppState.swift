@@ -6301,6 +6301,14 @@ class AppState {
     /// Set by `loadConversations()` when `store.loadAll()` itself threw (not a per-row skip).
     private var loadFailureHeadline: String? = nil
 
+    /// #920 slice 3 (dev-2's #1375 review): whether launch failed to read the conversations at all, and
+    /// which ones it could not read. The inbox's stale sweep must never read "not loaded" as "gone".
+    var conversationLoadFailed: Bool { loadFailureHeadline != nil }
+    var unloadedConversationIds: Set<UUID> {
+        let loaded = Set(conversations.map(\.id))
+        return Set(loadedSkippedRows.compactMap(\.conversationId)).union(loadedRepairFailed).subtracting(loaded)
+    }
+
     /// #182 §5. `position` is assigned at INSERT and never changed, so the last row may well be an
     /// archived one — which would open every launch inside the collapsed section. Prefer the last
     /// active conversation; fall back to an archived one only when there is nothing else, in which
