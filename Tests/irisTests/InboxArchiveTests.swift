@@ -8,6 +8,9 @@ import GRDB
 /// lifecycle, and a follow-up (which reopens the thread) brings it back.
 @Suite("Inbox archive (#920 slice 2)")
 struct InboxArchiveTests {
+    private func ok(_ r: Result<Void, InboxError>) -> Bool { if case .success = r { return true }; return false }
+    private func failure(_ r: Result<Void, InboxError>) -> InboxError? { if case .failure(let e) = r { return e }; return nil }
+
     private func item(_ threadId: String, mode: InboxResponseMode = .optionsAndFreeform, at: Date = Date(timeIntervalSince1970: 1_000)) -> InboxItem {
         InboxItem(id: UUID().uuidString, threadId: threadId, ownerChain: "dev-1", emitter: UUID(), emitterLabel: "dev-1",
                   title: "Ship it?", situation: "Context.",
@@ -29,13 +32,13 @@ struct InboxArchiveTests {
         let it = try answered(s, "t-1")
         #expect(it.state == .answered && it.archivedAt == nil)
         #expect(try s.inbox.settledItems().map(\.id) == [it.id], "answered stays in the mailbox")
-        #expect(try s.inbox.setArchived(itemId: it.id, true, at: Date(timeIntervalSince1970: 3_000)) == .success(()))
+        #expect(ok(try s.inbox.setArchived(itemId: it.id, true, at: Date(timeIntervalSince1970: 3_000))))
         let archived = try #require(try s.inbox.item(id: it.id))
         #expect(archived.archivedAt == Date(timeIntervalSince1970: 3_000))
         #expect(archived.state == .answered && archived.answer?.chosenOptionId == "a", "archiving keeps the state and the answer")
         #expect(try s.inbox.settledItems().isEmpty)
         #expect(try s.inbox.archivedItems().map(\.id) == [it.id])
-        #expect(try s.inbox.setArchived(itemId: it.id, false, at: Date()) == .success(()))
+        #expect(ok(try s.inbox.setArchived(itemId: it.id, false, at: Date())))
         #expect(try #require(try s.inbox.item(id: it.id)).archivedAt == nil, "unarchive clears it")
         #expect(try s.inbox.settledItems().map(\.id) == [it.id])
         #expect(try s.inbox.archivedItems().isEmpty)
@@ -46,15 +49,15 @@ struct InboxArchiveTests {
         let s = try ConversationStore.inMemory()
         let open = item("t-open")
         try s.inbox.createItem(open, question: "Context.")
-        #expect(try s.inbox.setArchived(itemId: open.id, true, at: Date()) == .failure(.notArchivable))
+        #expect(failure(try s.inbox.setArchived(itemId: open.id, true, at: Date())) == .notArchivable)
         let waiting = item("t-wait")
         try s.inbox.createItem(waiting, question: "Context.")
         _ = try s.inbox.submitAnswer(itemId: waiting.id, answer: InboxAnswer(chosenOptionId: "a", freeText: nil, at: Date()),
                                      pendingTargets: ["role:planner"])
         #expect(try #require(try s.inbox.item(id: waiting.id)).state == .awaitingDelivery)
-        #expect(try s.inbox.setArchived(itemId: waiting.id, true, at: Date()) == .failure(.notArchivable))
+        #expect(failure(try s.inbox.setArchived(itemId: waiting.id, true, at: Date())) == .notArchivable)
         #expect(try s.inbox.archivedItems().isEmpty)
-        #expect(try s.inbox.setArchived(itemId: "nope", true, at: Date()) == .failure(.unknownItem))
+        #expect(failure(try s.inbox.setArchived(itemId: "nope", true, at: Date())) == .unknownItem)
     }
 
     @Test("an answer arriving on an archived item leaves it archived")
@@ -63,10 +66,10 @@ struct InboxArchiveTests {
         let it = item("t-stale")
         try s.inbox.createItem(it, question: "Context.")
         try s.inbox.setState(itemId: it.id, .stale)
-        #expect(try s.inbox.setArchived(itemId: it.id, true, at: Date(timeIntervalSince1970: 3_000)) == .success(()))
+        #expect(ok(try s.inbox.setArchived(itemId: it.id, true, at: Date(timeIntervalSince1970: 3_000))))
         // A stale item is still answerable; answering it is not a reopening.
-        #expect(try s.inbox.submitAnswer(itemId: it.id, answer: InboxAnswer(chosenOptionId: "a", freeText: nil, at: Date()),
-                                         pendingTargets: []) == .success(()))
+        #expect(ok(try s.inbox.submitAnswer(itemId: it.id, answer: InboxAnswer(chosenOptionId: "a", freeText: nil, at: Date()),
+                                         pendingTargets: [])))
         let after = try #require(try s.inbox.item(id: it.id))
         #expect(after.state == .answered)
         #expect(after.archivedAt == Date(timeIntervalSince1970: 3_000), "the answer did not un-archive it")
@@ -125,7 +128,7 @@ struct InboxArchiveTests {
         #expect(old.archivedAt == nil)
         #expect(old.state == .answered && old.answer?.freeText == "ok")
         #expect(try store.inbox.settledItems().map(\.id) == ["old"], "an answered item from before the column is listed, not lost")
-        #expect(try store.inbox.setArchived(itemId: "old", true, at: Date()) == .success(()), "and can be archived after migrating")
+        #expect(ok(try store.inbox.setArchived(itemId: "old", true, at: Date())), "and can be archived after migrating")
     }
 
     @Test("the badge still counts open items only: answered and archived ones don't add to it")
