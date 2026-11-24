@@ -76,6 +76,19 @@ struct InboxArchiveTests {
         #expect(try s.inbox.settledItems().isEmpty)
     }
 
+    @Test("an item its chain resolved stays listed until archived, and can be archived")
+    func resolvedIsSettled() throws {
+        let s = try ConversationStore.inMemory()
+        let it = item("t-res")
+        try s.inbox.createItem(it, question: "Context.")
+        _ = try s.inbox.resolve(threadId: "t-res", fromChain: "dev-1", note: "merged", at: Date(timeIntervalSince1970: 2_000))
+        #expect(try #require(try s.inbox.item(id: it.id)).state == .resolved)
+        #expect(try s.inbox.settledItems().map(\.id) == [it.id])
+        #expect(ok(try s.inbox.setArchived(itemId: it.id, true, at: Date())))
+        #expect(try s.inbox.settledItems().isEmpty)
+        #expect(try s.inbox.archivedItems().map(\.id) == [it.id])
+    }
+
     @Test("a follow-up reopens the thread and brings it out of the archive")
     func followupUnarchives() throws {
         let s = try ConversationStore.inMemory()
