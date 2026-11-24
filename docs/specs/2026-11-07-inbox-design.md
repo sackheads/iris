@@ -66,7 +66,9 @@ An item has a single anatomy regardless of what kind of answer it wants:
   - *free-form only:* open-ended direction, no options (e.g. "what to do about Tony");
   - *timed veto:* Approve now / Veto, with a deadline; **at expiry it auto-approves the default,
     except it auto-holds (goes overdue, waits) when the emitter carries the taint marker** (decided;
-    see resolutions);
+    see resolutions). **Veto** is Brian's explicit decision (F2, #920 slice 4): the default vetoed, no
+    option chosen, and his words if he gives any, delivered as an answer, never as silence.
+    **Approve now** is his own choice of the default, before the deadline, delivered as any answer is;
   - *notification:* Dismiss / acknowledge, no decision owed.
 - **Route-back footer** — which agents receive the answer, and who is merely notified.
 
@@ -225,7 +227,8 @@ notifies the emitter's own chain once (with no user-authority framing) that the 
 Brian's review (#1095).
 
 When the Mac was asleep or Iris wasn't running at the deadline, an auto-approve fires on next launch
-or at the wake, flagged "decided while you were away," and routes the default through the
+or at the wake, flagged "decided while you were away" (`InboxAnswer.decidedWhileAway`, set when it fires more than
+two watcher ticks, 60 s, after the deadline), and routes the default through the
 durable-reply path above. The stored wall-clock deadline decides; it is checked at launch, on a
 dispatch timer and at wake, and fires once.
 
