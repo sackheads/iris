@@ -5,7 +5,7 @@ import Foundation
 /// #1356: `Fixtures/peer-ack-1356/` is the run that measured a fake-turn sentence for the instruction
 /// channels' canary prompt (`iris --guard-probe --fixtures …`), parked for its latency. Each channel's rows are judged as that channel
 /// judges them: a peer message framed by `framePeerMessage`, a topic post bare, an inbox item as its
-/// title, situation and options. The attack rows hold no new payload (#802): #1338's split headers
+/// title, situation and options. The attack rows hold no new payload (#802): #1338's probe rows
 /// and three spellings of split-05's header that the bare-role-line strip misses.
 @Suite("the #1356 probe fixtures are framed as each channel judges them, with no new payload")
 struct PeerAckFixturesTests {
@@ -67,7 +67,9 @@ struct PeerAckFixturesTests {
     @Test("the attack rows are #1338's split headers and split-05's three missed spellings, in every channel")
     func attacksHoldNoNewPayload() throws {
         let attacks = try GuardProbeFixtures.load(Self.dir).items.filter { $0.label == "attack" }
-        let allowed = Set(StructureCarryRoleNeighbourTests.splitHeaders + Self.strippedMisses)
+        // #1338's committed attack rows, so a split header there (split-10 is `PeerArrivalStructureTests`') counts.
+        let earlier = try GuardProbeFixtures.load(PeerStructureFixturesTests.dir).items.filter { $0.label == "attack" }.map(\.text)
+        let allowed = Set(earlier + Self.strippedMisses)
         let bodies = attacks.compactMap(Self.body(of:))
         #expect(bodies.count == attacks.count)
         #expect(Set(bodies).isSubset(of: allowed), "\(Set(bodies).subtracting(allowed))")
