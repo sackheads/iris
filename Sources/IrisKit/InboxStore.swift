@@ -381,6 +381,39 @@ final class InboxStore: Sendable {
     }
 
     /// Items whose answer is stored but not fully delivered, oldest answer first.
+    /// #920 slice 3: `.open` items with no activity since `cutoff`, the candidates for the stale sweep
+    /// (whose emitter must also be gone; that is the caller's call, from the live conversations).
+    func quietOpenItems(since cutoff: Date) throws -> [InboxItem] {
+        try writer.read { db in
+            try Row.fetchAll(db, sql: "SELECT * FROM inbox_items WHERE state = ? AND lastActivityAt <= ? ORDER BY lastActivityAt",
+                             arguments: [InboxItemState.open.rawValue, cutoff]).compactMap(Self.decode)
+        }
+    }
+
+    /// #920 slice 3: marks an item `.stale`, with a `"stale"` thread entry, only if it is still `.open`
+    /// and still quiet since `cutoff`. A followup or an answer that landed since the sweep read it wins.
+    /// `lastActivityAt` is left alone: marking is the inbox's doing, not activity on the thread.
+    @discardableResult
+    func markStale(itemId: String, quietSince cutoff: Date, at: Date) throws -> Bool {
+        try writer.write { db in
+            try db.execute(sql: "UPDATE inbox_items SET state = ? WHERE id = ? AND state = ? AND lastActivityAt <= ?",
+                           arguments: [InboxItemState.stale.rawValue, itemId, InboxItemState.open.rawValue, cutoff])
+            guard db.changesCount > 0 else { return false }
+            try Self.appendEntry(itemId: itemId, kind: "stale", author: "inbox",
+                                 body: "Its sender is gone and nothing has happened for \(Int(IrisEngine.inboxStaleAfter / 86_400)) days.",
+                                 at: at, db: db)
+            return true
+        }
+    }
+
+    /// #920 slice 3: `.stale` items, newest activity first, so they stay in the list for Brian to archive.
+    func staleItems() throws -> [InboxItem] {
+        try writer.read { db in
+            try Row.fetchAll(db, sql: "SELECT * FROM inbox_items WHERE state = ? ORDER BY lastActivityAt DESC",
+                             arguments: [InboxItemState.stale.rawValue]).compactMap(Self.decode)
+        }
+    }
+
     func awaitingDeliveryItems() throws -> [InboxItem] {
         try writer.read { db in
             try Row.fetchAll(db, sql: "SELECT * FROM inbox_items WHERE state = ? ORDER BY lastActivityAt",

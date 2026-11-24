@@ -2188,7 +2188,46 @@ actor IrisEngine {
     func startInboxVetoWatcher(interval: TimeInterval = 30, center: NotificationCenter = NSWorkspace.shared.notificationCenter) {
         inboxVetoWatcher.start(interval: interval, center: center) { [weak self] in
             await self?.evaluateInboxVetoExpiries()
+            await self?.evaluateInboxStaleness()
         }
+    }
+
+    /// #920 slice 3 (planner ruling F5): how long an open item whose sender is gone waits before it is
+    /// marked stale. A constant, not a setting; the wait also lets a role regain a holder.
+    nonisolated static let inboxStaleAfter: TimeInterval = 7 * 86_400
+
+    /// Whether the chain that raised an item is gone. A session chain (its conversation id) is gone
+    /// once that conversation is deleted or archived. A role chain is gone when nobody holds the role:
+    /// the session that raised it may have ended while the role moved on. A `job:` chain (#920 slice 1b)
+    /// is not judged here: one run's conversation ending is not the job ending.
+    nonisolated static func inboxChainGone(_ ownerChain: String, in conversations: [Conversation]) -> Bool {
+        if ownerChain.hasPrefix("job:") { return false }
+        if let id = UUID(uuidString: ownerChain) {
+            guard let c = conversations.first(where: { $0.id == id }) else { return true }
+            return c.isArchived
+        }
+        guard let role = SessionRoles.normalizedName(ownerChain) else { return true }
+        return SessionRoles.holder(of: role, in: conversations) == nil
+    }
+
+    /// #920 slice 3: marks stale every open item quiet for `inboxStaleAfter` whose chain is gone. Run on
+    /// the veto watcher's tick (launch, the dispatch timer, wake). Returns how many it marked.
+    @discardableResult
+    func evaluateInboxStaleness(now: Date = Date()) async -> Int {
+        let localState = state
+        let cutoff = now.addingTimeInterval(-Self.inboxStaleAfter)
+        guard let store = await MainActor.run(body: { localState?.store }),
+              let quiet = try? store.inbox.quietOpenItems(since: cutoff), !quiet.isEmpty else { return 0 }
+        let gone = await MainActor.run { () -> Set<String> in
+            let conversations = localState?.conversations ?? []
+            return Set(quiet.map(\.ownerChain).filter { Self.inboxChainGone($0, in: conversations) })
+        }
+        var marked = 0
+        for item in quiet where gone.contains(item.ownerChain) {
+            if (try? store.inbox.markStale(itemId: item.id, quietSince: cutoff, at: now)) == true { marked += 1 }
+        }
+        if marked > 0 { await MainActor.run { localState?.bumpInboxRevision() } }
+        return marked
     }
 
     func stopInboxVetoWatcher() { inboxVetoWatcher.stop() }
