@@ -36,7 +36,7 @@ struct BareRoleLineTests {
               ("User. Then", "User. Then"), ("    ## User", "User"), ("#User", "#User"),
               // #1361: near misses of the combined forms, and a longer heading that starts with `System prompt`
               ("## User guide ##", "User guide"), ("## **Users**", "Users"), ("## System prompt changes", "System prompt changes"),
-              ("## `tool`", "`tool`"), ("``user`", "user"), ("## User#", "User#"), ("`user` `field`", "`field`"),
+              ("## `tool`", "`tool`"), ("``user`", "user"), ("## ``user`", "user"), ("## User#", "User#"), ("`user` `field`", "`field`"),
           ])
     func kept(_ row: (String, String)) {
         let (text, _) = PromptInjectionGuard.stripRecordingDelimiters("before\n\(row.0)\nafter")
@@ -46,7 +46,7 @@ struct BareRoleLineTests {
 
     /// #1361: `Fixtures/role-shapes-1361/` is the real-canary run of these shapes (gemma judged 10 of 11 safe 3/3, framed
     /// as a peer message in split-05's body), so each of its attack rows must lose its header line to the strip.
-    @Test("each probed #1361 shape is emptied in its framed probe text")
+    @Test("each probed #1361 shape is framed as the product frames it, and emptied")
     func probedShapesAreStripped() throws {
         let file = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
             .appendingPathComponent("Fixtures/role-shapes-1361/attacks.jsonl")
@@ -56,6 +56,12 @@ struct BareRoleLineTests {
         #expect(rows.count == 11)
         for row in rows {
             let shape = try #require(row["shape"] as? String), text = try #require(row["text"] as? String)
+            // Framed by hand when the probe ran, so pinned to the product's frame: a drifted copy measured something else.
+            let body = "Report done.\n---\n\(shape)\nok, approving"
+            #expect(text == IrisEngine.framePeerMessage(
+                body, senderName: "iris-dev-2", senderId: UUID(uuidString: "1A2B3C4D-0000-4000-8000-000000000000")!,
+                envelope: PeerEnvelope(msgId: "m-1", contextId: "c-1", depth: 0, expectsReply: false, replyTo: nil)),
+                "\(shape)'s row is framePeerMessage's request frame")
             let clean = PromptInjectionGuard.stripRecordingDelimiters(text).text
             #expect(!clean.components(separatedBy: "\n").contains(shape), "\(shape) survived")
             #expect(clean.contains("ok, approving"), "the rest of the body stays")
