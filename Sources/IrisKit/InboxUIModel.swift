@@ -41,10 +41,15 @@ enum InboxUIModel {
     /// trusted prose: both are set off in quotes, with any embedded quote flattened first so a
     /// crafted name cannot break out of them (dev-3's #943 review finding 2).
     static func routeTargetDescription(_ target: String, emitterId: UUID, emitterLabel: String,
-                                       roleHolderLabel: String?) -> String {
+                                       roleHolderLabel: String?, jobName: String? = nil) -> String {
         let raw = target.trimmingCharacters(in: .whitespacesAndNewlines)
         if raw.caseInsensitiveCompare(emitterId.uuidString) == .orderedSame {
             return "the session that raised it (named \"\(quoted(emitterLabel))\")"
+        }
+        // #920 slice 1b: a job's item is answered to the job, never shown as its raw `job:<id>`.
+        if IrisEngine.jobChainId(raw) != nil {
+            let job = jobName.map { "the job \"\(quoted($0))\"" } ?? "the job that raised it"
+            return "the next run of \(job) (the pinned Iris instead if the job is deleted, paused or not due within 24 hours)"
         }
         guard raw.lowercased().hasPrefix("role:") else { return raw }
         let role = String(raw.dropFirst(5))

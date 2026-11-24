@@ -324,8 +324,9 @@ struct InboxView: View {
             SessionRoles.holder(of: role, in: state.conversations)
                 .flatMap { id in state.conversations.first { $0.id == id }?.sessionCard?.name }
         }
+        let jobName = IrisEngine.jobChainId(target).flatMap { id in (try? state.store.ledger.job(id: id))??.name }
         return InboxUIModel.routeTargetDescription(target, emitterId: item.emitter, emitterLabel: item.emitterLabel,
-                                                    roleHolderLabel: holderLabel)
+                                                    roleHolderLabel: holderLabel, jobName: jobName)
     }
 
     private func countdownSection(_ item: InboxItem) -> some View {
