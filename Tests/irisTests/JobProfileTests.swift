@@ -505,7 +505,9 @@ struct JobProfileTests {
                 "offered to a job but missing from jobRunToolNames: \(offered.subtracting(IrisEngine.jobRunToolNames).sorted())")
         let workspace = Set(await ToolExecutor.shared.getTools(workspaceToolsEnabled: true, githubToolsEnabled: true).map(\.name))
             .subtracting(await ToolExecutor.shared.getTools(workspaceToolsEnabled: false).map(\.name))
+        // `resolve_inbox_item` is offered to a job's run only once the job owns an open item (#920 slice 1b).
         let extra = IrisEngine.jobRunToolNames.subtracting(offered).subtracting(workspace)
+            .subtracting([IrisEngine.resolveInboxItemTool])
         #expect(extra.isEmpty, "in jobRunToolNames but offered to no job: \(extra.sorted())")
     }
 

@@ -8499,7 +8499,7 @@ actor IrisEngine {
     /// `readOnlyVerdict`. `JobProfileTests` pins this against a mutating job turn's declarations.
     nonisolated static let jobRunToolNames: Set<String> =
         pathWritingTools.union(toolsThatWriteNoPath).union(inlineDeclaredToolNames)
-            .subtracting(unattendedNeverDeclared)
+            .subtracting(unattendedNeverDeclared.subtracting(jobRunInboxTools))   // #920 slice 1b: a job run keeps these
             .subtracting(jobToolDeclarations(isPinned: true).map(\.name))
             .subtracting(["rename_conversation", "propose_goal_contract", "goal_complete",
                           "amend_goal_contract", "reach_checkpoint", "waive_criterion", "delegate_milestone",
