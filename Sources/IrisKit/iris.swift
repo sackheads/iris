@@ -6048,12 +6048,8 @@ actor IrisEngine {
         let binding = await bindingForCall(conversationId: conversationId)
         guard !binding.isOwner else { return nil }
         let localState = state
-        // A subagent's own conversation carries no profile; the session it was delegated from does (#1306).
-        let named = principal == .main ? conversationId : nil
-        let profileId = await MainActor.run { () -> String? in
-            guard let localState else { return nil }
-            return localState.persistedAccessProfileId(for: named ?? localState.delegationRoot(of: conversationId))
-        }
+        // A subagent's conversation names its delegation root's profile (`persistedAccessProfileId` falls back to it).
+        let profileId = await MainActor.run { localState?.persistedAccessProfileId(for: conversationId) }
         // What the refusal says is `ToolClassTable.refusal`: the tool and its class first, then whose turn it is.
         // `hardStrip` only stops a well-behaved model, so this is the half that holds against a forged call or a
         // stale declaration, and it comes before anything that could read or write.
