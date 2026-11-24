@@ -112,6 +112,17 @@ struct InboxStaleTests {
         #expect(try state(app, reopenable) == .open)
     }
 
+    @Test("a failed or partial load marks nothing it could not read as gone (dev-2's #1375 review)")
+    func loadFailureMarksNothing() {
+        let dropped = UUID()
+        let chains = [UUID().uuidString, dropped.uuidString, "reviewer"]
+        // A store that failed to load reads as no conversations at all: without the guard, every chain looks gone.
+        #expect(IrisEngine.goneInboxChains(chains, in: [], loadFailed: true, unloaded: []).isEmpty)
+        // A conversation the load dropped (#163) is not gone; the others are judged as usual.
+        let gone = IrisEngine.goneInboxChains(chains, in: [], loadFailed: false, unloaded: [dropped])
+        #expect(gone == [chains[0], "reviewer"])
+    }
+
     @Test("the gone-chain rule, by shape")
     func chainGoneTable() {
         let live = Conversation(title: "live")
