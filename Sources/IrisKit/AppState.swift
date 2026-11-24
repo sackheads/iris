@@ -1150,6 +1150,14 @@ class AppState {
     /// The app's state when the policy decides. `.off` until `IrisApp.init` replaces it, so a
     /// sink installed with no context still posts nothing.
     @ObservationIgnored var notificationContext: @MainActor () -> NotificationContext = { .off }
+    /// #920 slice 5: inbox notices waiting for their window to close (`noteInboxNotice`).
+    @ObservationIgnored var pendingInboxNotices: [InboxNotice] = []
+    /// How long inbox notices gather before one banner posts.
+    @ObservationIgnored var inboxNotifyWindow: TimeInterval = 3
+    /// Runs the flush after the window; a test replaces it to run it by hand.
+    @ObservationIgnored var scheduleInboxFlush: (TimeInterval, @escaping @MainActor () -> Void) -> Void = { delay, work in
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay) { MainActor.assumeIsolated { work() } }
+    }
     /// Fail-closed denials recorded for background (unattended) conversations (#187) — never
     /// enqueued in `pendingApprovals`, since nobody is watching to resolve them. The ledger drains
     /// this per run via `takeBackgroundDenials(for:)` to mark it `blockedOnApproval`. The whole

@@ -1813,7 +1813,12 @@ actor IrisEngine {
                                                             at: now, tainted: tainted, ask: ask)
                 switch result {
                 case .success(let landed):
-                    await MainActor.run { localState?.bumpInboxRevision() }
+                    let reopened = InboxNotice(itemId: landed.itemId, title: title, tainted: landed.tainted, reopened: true)
+                    await MainActor.run {
+                        localState?.bumpInboxRevision()
+                        // #920 slice 5: an answered or stale item back open is news, once; an open one's new ask isn't.
+                        if landed.reopened { localState?.noteInboxNotice(reopened) }
+                    }
                     let routing = (routeBack.isEmpty && notify.isEmpty) ? "" : " route_back and notify were left as first raised."
                     return "Follow-up recorded on #\(landed.itemId) (thread \(threadId))\(deadlineNote). It is open in Brian's inbox again with your new title, situation and options in place of the ones he answered.\(routing)\(taintHoldNote)"
                 case .failure(.notOwner):
@@ -1843,7 +1848,11 @@ actor IrisEngine {
                 let result = try store.inbox.createItem(item, question: situation)
                 switch result {
                 case .success:
-                    await MainActor.run { localState?.bumpInboxRevision() }
+                    let raised = InboxNotice(itemId: id, title: title, tainted: tainted, reopened: false)
+                    await MainActor.run {
+                        localState?.bumpInboxRevision()
+                        localState?.noteInboxNotice(raised)   // #920 slice 5
+                    }
                     return "Recorded #\(id) (thread \(newThreadId))\(deadlineNote). It's in Brian's inbox now (sidebar row, open-items count) — you may tell him you raised it.\(taintHoldNote)"
                 case .failure:
                     await MainActor.run { localState?.refundInboxEmit(from: conversationId) }

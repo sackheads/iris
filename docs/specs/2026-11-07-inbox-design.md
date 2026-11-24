@@ -145,8 +145,9 @@ going back out to the agents.
   **badge count**, opening the mailbox view (list + detail). Validated in the mockup.
 - Reading the Inbox must not re-evaluate the chat window or load the pinned Iris conversation
   (Invariant-style separation; cf. the streaming-read lesson in AGENTS.md).
-- Optional: a macOS notification on a new or reopened item, and a visible countdown on a timed-veto
-  item.
+- A macOS notification on a new or reopened item (#920 slice 5, Brian F6: on by default, title only): a constant `Iris: Inbox`
+  title, the item's title quoted as the body (generic `New Inbox item` for a tainted emitter), one banner per few-second burst,
+  none while the Inbox is in front, Open to the item. Optional still: a visible countdown on a timed-veto item.
 
 ## Agent-facing surface (emit contract)
 
@@ -161,7 +162,7 @@ open (`IrisEngine.inboxItemDeclared`; see "Emit is open" above), never on every 
 
 - Whether emit is a new tool or an extension of `send_to_session`'s address space: a new tool,
   `inbox_item`, gated as above (#920 slice 1).
-- The per-emitter rate-limit numbers, and whether the inbox badge/notification is on by default.
+- The per-emitter rate-limit numbers. (The badge counts open items, F1; the notification is on by default, F6.)
 - The SQLite schema specifics and migration id.
 - Whether the "notify set" reuses pub/sub or is a direct lighter send.
 - The timed-veto clock source: decided in Task 4 (planner, 2026-11-07). A veto deadline is a

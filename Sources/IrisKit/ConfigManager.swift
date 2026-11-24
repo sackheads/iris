@@ -234,6 +234,12 @@ class ConfigManager: @unchecked Sendable {
         didSet { store.set(notificationMode.rawValue, forKey: "NOTIFICATION_MODE") }
     }
 
+    /// #920 slice 5: a banner for a new or reopened Inbox item. On by default (Brian, F6); `notificationMode`
+    /// Off silences it too.
+    var inboxNotifications: Bool {
+        didSet { store.set(inboxNotifications, forKey: "INBOX_NOTIFICATIONS") }
+    }
+
     /// #231: how long a session goes untouched before it's archived automatically.
     var autoArchiveDays: AutoArchiveDays {
         didSet { store.set(autoArchiveDays.rawValue, forKey: "AUTO_ARCHIVE_DAYS") }
@@ -807,6 +813,7 @@ class ConfigManager: @unchecked Sendable {
         } else {
             self.checkpointAutoAdvance = true
         }
+        self.inboxNotifications = saved.object(forKey: "INBOX_NOTIFICATIONS") == nil ? true : saved.bool(forKey: "INBOX_NOTIFICATIONS")
         self.notificationMode = NotificationMode(rawValue: saved.string(forKey: "NOTIFICATION_MODE") ?? "")
             ?? .needsAttention
         self.autoArchiveDays = (saved.object(forKey: "AUTO_ARCHIVE_DAYS") as? Int).flatMap(AutoArchiveDays.init(rawValue:))

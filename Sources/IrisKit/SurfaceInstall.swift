@@ -52,7 +52,8 @@ enum SurfaceInstall {
         state.notificationContext = { [weak state] in
             NotificationContext(enabled: config.notificationMode == .needsAttention,
                                 appActive: appActive(), mainWindowVisible: mainWindowVisible(),
-                                selectedConversationId: state?.selectedConversationId)
+                                selectedConversationId: state?.selectedConversationId,
+                                inboxEnabled: config.inboxNotifications, inboxSelected: state?.inboxSelected == true)
         }
     }
 

@@ -34,6 +34,26 @@ extension AppState {
         }
     }
 
+    /// #920 slice 5: an inbox item raised or reopened. Gathered for `inboxNotifyWindow`, then posted as one
+    /// banner, so a session raising several at once taps Brian once. A second notice for an item already
+    /// gathered replaces it. Nothing is gathered without a sink (a test, `--run-job`, the bare binary).
+    func noteInboxNotice(_ notice: InboxNotice) {
+        guard notificationSink != nil else { return }
+        let first = pendingInboxNotices.isEmpty
+        pendingInboxNotices.removeAll { $0.itemId == notice.itemId }
+        pendingInboxNotices.append(notice)
+        if first { scheduleInboxFlush(inboxNotifyWindow) { [weak self] in self?.flushInboxNotices() } }
+    }
+
+    /// Posts what was gathered, asking the policy with the context as it is now: an Inbox Brian has opened
+    /// since gets no banner.
+    func flushInboxNotices() {
+        let notices = pendingInboxNotices
+        pendingInboxNotices = []
+        guard let sink = notificationSink, !notices.isEmpty else { return }
+        if let planned = NotificationPolicy.decide(.inbox(notices), context: notificationContext()) { sink.post(planned) }
+    }
+
     /// A card's banner comes down once its run is acknowledged (the card's or the banner's
     /// Dismiss, `/jobs ack`, or an Approve-and-run claim): it no longer needs the owner. A banner still held behind the
     /// permission prompt is dropped by the same withdraw.
@@ -83,6 +103,13 @@ extension AppState {
         let askId = info[NotificationPolicy.Key.askId].flatMap(UUID.init(uuidString:))
         switch response.actionId {
         case NotificationPolicy.Action.open:
+            // #920 slice 5: the mailbox, at the item when the banner named one (a burst names none).
+            if let itemId = info[NotificationPolicy.Key.inboxItemId] {
+                selectInbox()
+                selectedInboxItemId = itemId.isEmpty ? nil : itemId
+                showMainWindow(selecting: nil)
+                return nil
+            }
             if let runId, let jobId {
                 return Task { [weak self] in await self?.revealCard(runId: runId, jobId: jobId) }
             }

@@ -140,6 +140,11 @@ struct InboxThreadEntry: Equatable, Sendable {
 /// What a successful follow-up reports back: the item it landed on, so the tool can name it.
 struct InboxFollowupResult: Equatable, Sendable {
     let itemId: String
+    /// #920 slice 5: it was answered or stale, and is open again, so Brian is told once. A follow-up on an
+    /// item already open changes its question but is not news.
+    var reopened = false
+    /// The item's `emitterTainted` after this follow-up: the flags OR'd.
+    var tainted = false
 }
 
 enum InboxError: Error, Equatable {
@@ -246,7 +251,8 @@ final class InboxStore: Sendable {
                     """, arguments: [ask.title, ask.situation, optionsJSON, ask.responseMode.rawValue, ask.deadline,
                                      ask.vetoDefaultOptionId, itemId])
             }
-            return .success(InboxFollowupResult(itemId: itemId))
+            return .success(InboxFollowupResult(itemId: itemId, reopened: stateRaw != InboxItemState.open.rawValue,
+                                                tainted: wasTainted || tainted))
         }
     }
 
