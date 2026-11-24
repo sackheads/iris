@@ -229,9 +229,13 @@ struct OutboundGateDispatchTests {
     private let send = "testsrv___post_message"
     private let sendArgs: [String: JSONValue] = ["to": .string("someone@example.com"), "body": .string("hi")]
 
+    /// A delegate gets its owner parent's binding, capped, as `runSubagent` passes it: an engine built with none is
+    /// the deny-all non-owner, which the class gate refuses owner-only tools to (#1306).
     private func engine(_ app: AppState, principal: Principal = .main) -> IrisEngine {
-        IrisEngine(state: app, tier: .medium, principal: principal, client: FakeLLMClient(responses: []),
-                   retryDelays: [], protectionEnabled: false, sessionPeerCount: 1)
+        let owner = AccessBinding(profile: .owner, principal: .main, isOwner: true)
+        return IrisEngine(state: app, tier: .medium, principal: principal, client: FakeLLMClient(responses: []),
+                          retryDelays: [], protectionEnabled: false, sessionPeerCount: 1,
+                          binding: principal == .main ? nil : SubagentManager.childBinding(ofParent: owner, principal: principal))
     }
 
     @MainActor private final class Flag { var value = false }
