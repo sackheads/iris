@@ -212,4 +212,73 @@ struct JobRunInboxTests {
         #expect(!names.contains("write_file"))
         #expect(try #require(try store.inbox.item(id: item.id)).state == .answered)
     }
+
+    @Test("a tainted item's answer taints the run it is handed to; a clean one does not (dev-2's #1377 review)")
+    func answerTaintCarries() async throws {
+        let (store, app) = try state()
+        let j = job(); try store.ledger.upsert(j)
+        let e = engine(app)
+        for tainted in [false, true] {
+            let run = runConversation(app, for: j)
+            var item = try raise(app, from: run, for: j)
+            if tainted {
+                // Raised clean, then marked as an emitter that had read outside content.
+                item = InboxItem(id: try store.inbox.newItemId(), threadId: try store.inbox.newThreadId(ownerChain: item.ownerChain),
+                                 ownerChain: item.ownerChain, emitter: run, emitterLabel: "nightly-check", title: "Tainted?",
+                                 situation: "Read from the web.", options: item.options, responseMode: .optionsAndFreeform,
+                                 routeBack: [], notify: [], deadline: nil, vetoDefaultOptionId: nil, emitterTainted: true,
+                                 state: .open, createdAt: Date(), lastActivityAt: Date(), answer: nil)
+                guard case .success(let created) = try store.inbox.createItem(item, question: item.situation) else {
+                    Issue.record("createItem failed"); return
+                }
+                item = created
+            }
+            _ = await e.submitInboxAnswer(itemId: item.id, choice: "a", freeText: nil, deliver: Sink().deliver)
+            let next = runConversation(app, for: j)
+            app.conversations[app.conversations.firstIndex { $0.id == next }!].hasUntrustedToolOutput = false
+            #expect(await e.takeJobInboxAnswers(jobId: j.id, for: next) != nil)
+            #expect(app.conversations.first { $0.id == next }?.hasUntrustedToolOutput == tainted, Comment(rawValue: "tainted: \(tainted)"))
+        }
+    }
+
+    @Test("a sweep whose snapshot predates the next run's take does not deliver that answer again (dev-2's #1377 review)")
+    func staleSnapshotDoesNotDoubleDeliver() async throws {
+        let (store, app) = try state()
+        let iris = app.createNewConversation(select: false)
+        app.conversations[app.conversations.firstIndex { $0.id == iris }!].isPinned = true
+        var j = job(); try store.ledger.upsert(j)
+        let e = engine(app)
+        // An earlier item whose target is refused, so it is still awaiting delivery, ahead of the job's.
+        let other = app.createNewConversation(select: false)
+        let first = try raise(app, from: other, for: j)   // owner chain is `other`'s own id: no stamp
+        _ = await e.submitInboxAnswer(itemId: first.id, choice: "a", freeText: nil, deliver: { _, _, _ in .refused })
+        let jobItem = try raise(app, from: runConversation(app, for: j), for: j)
+        _ = await e.submitInboxAnswer(itemId: jobItem.id, choice: "a", freeText: nil, deliver: Sink().deliver)
+        // Now the job is paused, so a sweep that still thinks the answer is pending would send it to Iris.
+        j.pausedReason = "paused by you"; try store.ledger.upsert(j)
+        let next = runConversation(app, for: j)
+        let jobId = j.id
+        let sink = Sink()
+        let tookDuringSweep = Sink()
+        await e.redeliverAwaitingInbox(deliver: { [sink, tookDuringSweep] id, text, t in
+            // While the sweep delivers the first item, the job's next run takes its answer.
+            if id == other, tookDuringSweep.calls.isEmpty, let taken = await e.takeJobInboxAnswers(jobId: jobId, for: next) {
+                await tookDuringSweep.deliver(next, taken, false)
+            }
+            return await sink.deliver(id, text, t)
+        })
+        #expect(tookDuringSweep.calls.count == 1, "precondition: the next run took the answer mid-sweep")
+        #expect(!sink.calls.contains { $0.0 == iris }, "the answer the run took is not also sent to Iris")
+        #expect(try #require(try store.inbox.item(id: jobItem.id)).state == .answered)
+    }
+
+    @Test("hardStrip's keep list lifts only the job-run inbox tools, whatever it is handed (dev-3's #1377 review)")
+    func keepUnattendedLiftsOnlyInboxTools() {
+        let tools = ["schedule_job", "set_workspace", "list_sessions", "inbox_item", IrisEngine.resolveInboxItemTool, "read_file"]
+            .map { FunctionDeclaration(name: $0, description: "", parameters: Schema(type: "OBJECT", properties: [:])) }
+        let kept = IrisEngine.hardStrip(tools, isUnattended: true, principal: .main,
+                                        keepUnattended: ["schedule_job", "set_workspace", "list_sessions", "inbox_item"]).map(\.name)
+        #expect(kept == ["inbox_item", "read_file"])
+        #expect(IrisEngine.hardStrip(tools, isUnattended: true, principal: .main).map(\.name) == ["read_file"])
+    }
 }
