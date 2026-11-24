@@ -89,6 +89,11 @@ struct PromptInjectionGuard {
     ]
     private static let roleFolds = [roleConfusables, roleConfusables.merging(roleConfusableAlternates) { $1 }]
 
+    /// Whether `text` has a letter either fold changes: the strip's fast path for a line that has none.
+    static func hasRoleConfusable(_ text: String) -> Bool {
+        text.unicodeScalars.contains { roleFolds[1][$0] != nil }
+    }
+
     static func foldRoleConfusables(_ text: String, alternate: Bool = false) -> String {
         let table = roleFolds[alternate ? 1 : 0]
         var scalars = String.UnicodeScalarView()
@@ -99,6 +104,7 @@ struct PromptInjectionGuard {
     /// A role-word check that also holds for either folded spelling of the line. Only ever adds a match.
     private static func matchesFolded(_ line: String, _ check: (String) -> Bool) -> Bool {
         if check(line) { return true }
+        guard hasRoleConfusable(line) else { return false }
         return [false, true].contains { alternate in
             let folded = foldRoleConfusables(line, alternate: alternate)
             return folded != line && check(folded)
@@ -219,15 +225,17 @@ struct PromptInjectionGuard {
     /// (#736): as a suffix it mangled ordinary keys, `filesystem:` into `file`, in every tool result
     /// the model read. Anywhere in a line, not only at its start, so a mid-line `system:` is still
     /// stripped. The chat-template tokens and `---`/`###` stay plain substrings.
-    private static func remove(_ pattern: String, from line: String) -> String {
+    private static func remove(_ pattern: String, from line: String, foldable: Bool) -> String {
         guard pattern.first?.isLetter == true else {
             return line.replacingOccurrences(of: pattern, with: "", options: [.caseInsensitive])
         }
         let regex = wordRegexes[pattern] ?? wordRegex(pattern)
         let stripped = regex.stringByReplacingMatches(in: line, range: NSRange(line.startIndex..., in: line), withTemplate: "")
         // #1342: then a role word spelled with a look-alike, matched in the folded line and removed from
-        // this one at the same range. Its boundary is any letter, not only a Latin one, so a Cyrillic
-        // word whose ending folds to `model:` is not cut.
+        // this one at the same range. Skipped for a line with no table letter. Its boundary adds Cyrillic
+        // and Greek letters to the Latin one, so a word of theirs whose ending folds to `model:` is not cut,
+        // while `中Usеr:` is stripped as `中User:` is.
+        guard foldable else { return stripped }
         let foldedRegex = foldedWordRegexes[pattern] ?? wordRegex(pattern, boundary: foldedBoundary)
         var result = stripped
         for alternate in [false, true] {
@@ -242,7 +250,7 @@ struct PromptInjectionGuard {
         return result
     }
     private static let latinBoundary = "(?<![A-Za-z0-9_])"
-    private static let foldedBoundary = #"(?<![\p{L}\p{N}_])"#
+    private static let foldedBoundary = #"(?<![A-Za-z0-9_\p{Script=Cyrillic}\p{Script=Greek}])"#
     private static func wordRegex(_ pattern: String, boundary: String = latinBoundary) -> NSRegularExpression {
         // A lookbehind, not a consumed character: `system:system:` would otherwise keep its second
         // marker, since the first match takes the `:` the second needs before it (#742 review).
@@ -298,12 +306,14 @@ struct PromptInjectionGuard {
         let lines = text.split(separator: "\n", omittingEmptySubsequences: false).enumerated().map { index, raw -> String in
             let original = String(raw)
             var line = original
+            // Stripping only removes characters, so a line with no table letter never gains one.
+            let foldable = hasRoleConfusable(original)
             var counts = false
             var reachedFixedPoint = false
             for _ in 0..<maxStripPasses {
                 var changedThisPass = false
                 for pattern in patterns {
-                    let stripped = remove(pattern, from: line)
+                    let stripped = remove(pattern, from: line, foldable: foldable)
                     if stripped != line {
                         changedThisPass = true
                         if !markdownOnly.contains(pattern) { counts = true }
