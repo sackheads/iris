@@ -88,6 +88,18 @@ struct InboxVetoSemanticsTests {
         #expect(r.fired == 0 && sink.calls.count == 1)
     }
 
+    @Test("a notify target is told it was a veto, not handed an empty answer (dev-1's #1379 review)")
+    func vetoNotifyFrame() throws {
+        let item = InboxItem(id: "1", threadId: "t", ownerChain: "c", emitter: UUID(), emitterLabel: "dev-1", title: "Ship?",
+                             situation: "s", options: [InboxOption(id: "a", label: "Ship", pros: [], cons: [])],
+                             responseMode: .timedVeto, routeBack: [], notify: ["role:qa"], deadline: t0, vetoDefaultOptionId: "a",
+                             emitterTainted: false, state: .answered, createdAt: t0, lastActivityAt: t0, answer: nil)
+        let frame = IrisEngine.inboxNotifyFrame(item: item, answer: InboxAnswer(chosenOptionId: nil, freeText: nil, at: t0, vetoed: true),
+                                                echoedTitle: "Ship?")
+        #expect(frame.contains("He vetoed the default the session proposed, option 1, so it does not go ahead."), "\(frame)")
+        #expect(!frame.contains("He chose"))
+    }
+
     // MARK: Approve now
 
     @Test("Approve now is Brian's choice of the default, delivered as his answer, and ends the timer")
@@ -130,6 +142,16 @@ struct InboxVetoSemanticsTests {
         #expect(!lateFrame.contains("Brian's decision") && !lateFrame.contains("He chose"), "no Brian-authority words")
         #expect(!IrisEngine.inboxAnswerFrame(item: onTime, answer: onTimeAnswer, echoed: "x").contains("not running"))
         #expect(IrisEngine.inboxNotifyFrame(item: late, answer: lateAnswer, echoedTitle: "x").contains("not running"))
+    }
+
+    @Test("the away threshold is two watcher ticks: 45 s late is on time, 90 s late is flagged (dev-1's #1379 review)")
+    func awayBoundary() async throws {
+        let (app, engine, emitter) = try await setup()
+        let near = try item(app, emitter: emitter, deadline: t0.addingTimeInterval(-45))
+        let past = try item(app, emitter: emitter, deadline: t0.addingTimeInterval(-90))
+        #expect(await engine.evaluateInboxVetoExpiries(now: t0, deliver: Sink().deliver).fired == 2)
+        #expect(try app.store.inbox.item(id: near.id)?.answer?.decidedWhileAway == false)
+        #expect(try app.store.inbox.item(id: past.id)?.answer?.decidedWhileAway == true)
     }
 
     // MARK: the summary Brian sees
