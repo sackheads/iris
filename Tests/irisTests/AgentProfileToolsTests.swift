@@ -107,7 +107,8 @@ struct AgentProfileToolsTests {
     func stickyClassified() {
         let exempt: Set<String> = ["goal_complete", "amend_goal_contract", "reach_checkpoint", "delegate_milestone", "waive_criterion",
                                    IrisEngine.scheduleNextTickTool]
-        let narrowed: Set<String> = ["manage_fact", "list_sessions", "describe_session", "send_to_session", "set_session_card", "close_request"]
+        let narrowed: Set<String> = ["manage_fact", "list_sessions", "describe_session", "send_to_session", "set_session_card", "close_request",
+                                     "inbox_item", IrisEngine.resolveInboxItemTool]
         #expect(exempt.union(narrowed) == StickyTools.eligible, "classify the new state-gated tool")
         for name in StickyTools.eligible {
             #expect(AgentProfile.flowTools.contains(name) == exempt.contains(name), "\(name)")

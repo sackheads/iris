@@ -139,6 +139,7 @@ struct InboxView: View {
         case .awaitingDelivery: return "Awaiting delivery"
         case .closed: return "Closed"
         case .stale: return "Stale"
+        case .resolved: return "Resolved"
         }
     }
 

@@ -2,9 +2,10 @@ import Testing
 import Foundation
 @testable import IrisKit
 
-/// #920 Task 2: `inbox_item`, the emit tool. Open emit — any attended main session may raise one —
-/// with the inbox's own anti-flood (rate limit, dedup-by-thread) as the whole defense, not a
-/// curation gate in code (design spec "the firehose, precisely").
+/// #920 Task 2: `inbox_item`, the emit tool, with the inbox's own anti-flood (rate limit,
+/// dedup-by-thread) as its defense, not a curation gate in code (design spec "the firehose,
+/// precisely"). Since #920 slice 1 it is declared to a role-bound session, the pinned Iris, or one
+/// with an item of its own still open (`InboxResolveTests`), so these emit from a role-bound session.
 @MainActor
 @Suite("Inbox emit tool (#920)", .timeLimit(.minutes(1)))
 struct InboxEmitTests {
@@ -35,8 +36,16 @@ struct InboxEmitTests {
 
     private func app() -> (AppState, UUID) {
         let app = AppState(); app.conversations.removeAll()
+        return (app, emitter(in: app))
+    }
+
+    /// A session that may raise items (#920 slice 1): a role of its own, so two emitters stay two chains.
+    private func emitter(in app: AppState) -> UUID {
         let id = app.createNewConversation(select: false)
-        return (app, id)
+        if let i = app.conversations.firstIndex(where: { $0.id == id }) {
+            app.conversations[i].role = "e-" + String(id.uuidString.prefix(8)).lowercased()
+        }
+        return id
     }
 
     private func emitCall(title: String = "Ship it?", situation: String = "Here is the context.",
@@ -51,7 +60,7 @@ struct InboxEmitTests {
         return FunctionCall(name: "inbox_item", args: args, id: "c1")
     }
 
-    @Test("inbox_item is declared on an attended main turn, and absent for a background one")
+    @Test("inbox_item is declared on a role-bound attended main turn, and absent for a background one")
     func emitDeclaredOnlyOnAttendedMainTurn() async {
         let (app, id) = app()
         let attended = await toolNames(conversationId: id, on: app)
@@ -279,7 +288,7 @@ struct InboxEmitTests {
         _ = await runToolCall(emitCall(), on: appA, as: a)
         let item = try #require(try appA.store.inbox.openItems().first)
 
-        let b = appA.createNewConversation(select: false)
+        let b = emitter(in: appA)
         let result = await runToolCall(emitCall(situation: "I'll take this one", threadId: item.threadId), on: appA, as: b)
         #expect(result.contains("Not raised"), Comment(rawValue: result))
         #expect(try appA.store.inbox.item(id: item.id)?.ownerChain != nil)
@@ -288,13 +297,13 @@ struct InboxEmitTests {
     @Test("ownership never derives from a card name: a dead emitter's archived name is free to take, but its thread is not (dev-3 #929 review finding 1)")
     func archivedEmitterNameIsNotOwnership() async throws {
         let app = AppState(); app.conversations.removeAll()
-        let a = app.createNewConversation(select: false)
+        let a = emitter(in: app)
         app.setSessionCard(for: a, SessionCard(name: "scout", description: "x"))
         _ = await runToolCall(emitCall(), on: app, as: a)
         let item = try #require(try app.store.inbox.openItems().first)
 
         app.conversations[app.conversations.firstIndex { $0.id == a }!].isArchived = true
-        let b = app.createNewConversation(select: false)
+        let b = emitter(in: app)
         app.setSessionCard(for: b, SessionCard(name: "scout", description: "y"))
 
         let result = await runToolCall(emitCall(situation: "I'll take this one", threadId: item.threadId), on: app, as: b)

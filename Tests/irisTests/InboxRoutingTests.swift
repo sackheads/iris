@@ -550,6 +550,8 @@ struct InboxAnswerNoForgeTests {
     func noAgentToolAnswers() async {
         let app = AppState(); app.conversations.removeAll()
         let id = app.createNewConversation(select: false)
+        // #920 slice 1: a role-bound session, which is offered inbox_item.
+        if let i = app.conversations.firstIndex(where: { $0.id == id }) { app.conversations[i].role = "planner" }
         let client = CapturingLLMClient(reply: "ok")
         let engine = IrisEngine(state: app, tier: .medium, principal: .main, client: client, retryDelays: [], sessionPeerCount: 1)
         await engine.processInput("hello", source: "UI", conversationId: id)

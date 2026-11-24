@@ -354,6 +354,23 @@ struct ToolSurfaceTrimTests {
             observed.formUnion(client.requests.first?.tools?.flatMap { $0.functionDeclarations.map(\.name) } ?? [])
         }
 
+        // resolve_inbox_item needs an inbox item this session's chain raised and has not closed (#920 slice 1).
+        do {
+            let app = AppState()
+            let id = UUID()
+            app.createNewConversation(id: id)
+            let item = InboxItem(id: UUID().uuidString, threadId: "t-trim", ownerChain: id.uuidString, emitter: id, emitterLabel: "s",
+                                 title: "t", situation: "s", options: [], responseMode: .freeform, routeBack: [], notify: [],
+                                 deadline: nil, vetoDefaultOptionId: nil, emitterTainted: false, state: .open,
+                                 createdAt: Date(), lastActivityAt: Date(), answer: nil)
+            _ = try app.store.inbox.createItem(item, question: "q")
+            let client = CapturingLLMClient(reply: "ok")
+            let engine = IrisEngine(state: app, tier: .medium, principal: .main, client: client, retryDelays: [],
+                                    factStore: try FactStoreManager(inMemory: true), sessionPeerCount: 0)
+            await engine.processInput("hello", source: "UI", conversationId: id)
+            observed.formUnion(client.requests.first?.tools?.flatMap { $0.functionDeclarations.map(\.name) } ?? [])
+        }
+
         // Subtract the two OTHER sources of declared tool names — this test is only about the
         // hand-maintained inline set, not the whole declared surface.
         let executorNames = Set(await ToolExecutor.shared.getTools(workspaceToolsEnabled: true, githubToolsEnabled: true).map(\.name))

@@ -9,7 +9,12 @@ enum InboxResponseMode: String, Codable, Sendable {
 /// A thread's lifecycle: `open` needs attention, `answered` has Brian's verdict, `awaitingDelivery`
 /// has it but no live recipient yet, `closed` is done, `stale` is a zombie (#920 spec: lifecycle).
 enum InboxItemState: String, Codable, Sendable {
-    case open, answered, awaitingDelivery, closed, stale
+    /// `resolved` (#920 slice 1): the chain that raised it closed it, the decision consumed. Like
+    /// `closed` it is final, but nothing a human did; archiving (Brian's visibility) is separate.
+    case open, answered, awaitingDelivery, closed, stale, resolved
+
+    /// Closed or resolved: nothing appends to, answers or reopens it.
+    static func isFinished(_ raw: String) -> Bool { raw == closed.rawValue || raw == resolved.rawValue }
 }
 
 /// One choice in an item's decision, with its own pros and cons. Persisted as a JSON blob
@@ -216,7 +221,7 @@ final class InboxStore: Sendable {
                 return .failure(.unknownThread)
             }
             guard storedOwner == ownerChain else { return .failure(.notOwner) }
-            guard stateRaw != InboxItemState.closed.rawValue else { return .failure(.itemClosed) }
+            guard !InboxItemState.isFinished(stateRaw) else { return .failure(.itemClosed) }
             guard stateRaw != InboxItemState.awaitingDelivery.rawValue else { return .failure(.awaitingDelivery) }
 
             try Self.appendEntry(itemId: itemId, kind: "followup", author: author, body: body, at: at, db: db)
@@ -234,6 +239,38 @@ final class InboxStore: Sendable {
         }
     }
 
+    /// #920 slice 1: the chain that raised a thread marks it resolved (the decision consumed, the PR
+    /// merged): a `"resolved"` entry and `.resolved`, in one write. Only the owner chain, like a
+    /// followup. Refused while an answer is still awaiting delivery, since resolving would end the
+    /// redelivery and the spec never drops a reply silently; refused again once finished.
+    func resolve(threadId: String, fromChain ownerChain: String, note: String, at: Date) throws -> Result<String, InboxError> {
+        try writer.write { db in
+            guard let row = try Row.fetchOne(db, sql: "SELECT id, ownerChain, state FROM inbox_items WHERE threadId = ?",
+                                             arguments: [threadId]),
+                  let itemId = row["id"] as String?, let storedOwner = row["ownerChain"] as String?,
+                  let stateRaw = row["state"] as String? else {
+                return .failure(.unknownThread)
+            }
+            guard storedOwner == ownerChain else { return .failure(.notOwner) }
+            guard !InboxItemState.isFinished(stateRaw) else { return .failure(.itemClosed) }
+            guard stateRaw != InboxItemState.awaitingDelivery.rawValue else { return .failure(.awaitingDelivery) }
+            try Self.appendEntry(itemId: itemId, kind: "resolved", author: ownerChain, body: note, at: at, db: db)
+            try db.execute(sql: "UPDATE inbox_items SET state = ?, lastActivityAt = ? WHERE id = ?",
+                           arguments: [InboxItemState.resolved.rawValue, at, itemId])
+            return .success(itemId)
+        }
+    }
+
+    /// #920 slice 1: whether `ownerChain` raised an item it can still follow up or resolve, which is
+    /// what keeps `inbox_item` and `resolve_inbox_item` declared for a session that is neither a
+    /// role nor the pinned Iris.
+    func hasUnfinishedItems(ownerChain: String) throws -> Bool {
+        try writer.read { db in
+            try Bool.fetchOne(db, sql: "SELECT EXISTS(SELECT 1 FROM inbox_items WHERE ownerChain = ? AND state NOT IN (?, ?))",
+                              arguments: [ownerChain, InboxItemState.closed.rawValue, InboxItemState.resolved.rawValue]) ?? false
+        }
+    }
+
     /// Records Brian's verdict: writes the answer, appends an `"answer"` thread entry, sets
     /// `.answered`. Refuses `.unknownItem` on an id with no row (dev-2 finding 4: used to insert an
     /// orphan thread entry for nothing) and `.itemClosed` once the item is closed.
@@ -245,7 +282,7 @@ final class InboxStore: Sendable {
                                                       arguments: [itemId]) else {
                 return .failure(.unknownItem)
             }
-            guard stateRaw != InboxItemState.closed.rawValue else { return .failure(.itemClosed) }
+            guard !InboxItemState.isFinished(stateRaw) else { return .failure(.itemClosed) }
 
             // His own answer is not news to him; an automatic one is (viewedAt stays behind it).
             try db.execute(sql: "UPDATE inbox_items SET answerJSON = ?, state = ?, lastActivityAt = ?, viewedAt = CASE WHEN ? THEN viewedAt ELSE ? END WHERE id = ?",
@@ -269,7 +306,7 @@ final class InboxStore: Sendable {
             guard let stateRaw = try String.fetchOne(db, sql: "SELECT state FROM inbox_items WHERE id = ?",
                                                       arguments: [itemId]) else { return .failure(.unknownItem) }
             guard stateRaw == InboxItemState.open.rawValue || stateRaw == InboxItemState.stale.rawValue else {
-                return .failure(stateRaw == InboxItemState.closed.rawValue ? .itemClosed : .notAnswerable)
+                return .failure(InboxItemState.isFinished(stateRaw) ? .itemClosed : .notAnswerable)
             }
             let state: InboxItemState = pendingTargets.isEmpty ? .answered : .awaitingDelivery
             try db.execute(sql: "UPDATE inbox_items SET answerJSON = ?, state = ?, lastActivityAt = ?, pendingTargetsJSON = ?, viewedAt = CASE WHEN ? THEN viewedAt ELSE ? END WHERE id = ?",
