@@ -32,7 +32,7 @@ extension JobProfile {
     /// surface of a run the docs said could not change anything.
     ///
     /// Adding a name here is a deliberate decision about a tool that changes nothing outside the
-    /// run's own conversation, and `JobProfileTests` pins the resulting surface as a set so the
+    /// run's own conversation, except raising or resolving an item in the owner's Inbox (#920), and `JobProfileTests` pins the resulting surface as a set so the
     /// decision cannot be made by accident.
     ///
     /// It is a ceiling, not the offer. `list_jobs` and `get_job_run` are declared only in a pinned
@@ -49,6 +49,9 @@ extension JobProfile {
     static let readOnlyAllowed: Set<String> = [
         "read_file", "search_web", "search_memory", "reflect", IrisEngine.currentTimeTool,
         "list_jobs", "get_job_run",
+        // #920 slice 1b (planner, 2026-11-23): the one write a read-only run may make, to the owner's own
+        // inbox, guard-judged and rate-limited per job.
+        "inbox_item", IrisEngine.resolveInboxItemTool,
         "google_tasks_list_tasklists", "google_tasks_list_tasks", "google_calendar_list_events",
         "google_docs_get", "google_drive_search", "google_sheets_get", "gmail_list_unread",
     ]

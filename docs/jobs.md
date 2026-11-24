@@ -152,13 +152,18 @@ Every job has a profile, `readOnly` or `mutating`, and `readOnly` is the default
 
 **A read-only run's tool surface is an allowlist, not a denylist.** `JobProfile.readOnlyAllowed`
 names every tool such a run may call — today `read_file`, `search_web`, `search_memory`, `reflect`,
-the two job-reading tools, and the Google read tools (list, get, search) — and everything else is
+the two job-reading tools, the Google read tools (list, get, search), and the two inbox tools
+(`inbox_item`, `resolve_inbox_item`) — and everything else is
 refused, including every tool added to Iris after this was written. The allowlist is a ceiling, not
 a promise: what a run is actually *offered* is the intersection of it with the declarations that
 conversation builds, and the two job-reading tools are declared only in a pinned conversation (see
 "The job tools" below) while a run's hidden conversation never is. So a read-only fire's surface
-today is `read_file`, `search_web`, `search_memory` and `reflect`, plus a sandboxed `run_command`
-and whatever read-only MCP tools are connected — it cannot read its own job records, and nothing
+today is `read_file`, `search_web`, `search_memory` and `reflect`, plus a sandboxed `run_command`,
+whatever read-only MCP tools are connected, and, for a scheduled or polled job (not a watch), the
+two inbox tools. Those are the one write a read-only run makes: raising or resolving an item in your
+Inbox, judged by the guard and limited per job. Your answer reaches the job's next run, framed as
+your decision, and does not widen that run's tools; if the job is deleted, paused, or not due within
+24 hours of the answer, it goes to the pinned Iris instead. A read-only run cannot read its own job records, and nothing
 here offers to widen that. That direction is deliberate: a
 denylist's default answer is "allowed", and the first draft of this gate was a denylist that let a
 read-only run rewrite `SOUL.md`, `USER.md`, `memory.md` and the fact store because nobody had

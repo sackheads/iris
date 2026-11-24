@@ -1648,9 +1648,13 @@ actor IrisEngine {
     /// team's chain), the pinned Iris, a conversation working a `/goal` (Brian, 2026-11-23: the work
     /// nobody is watching turn by turn), or a session with an item of its own still open; sticky once
     /// declared. Never a subagent, evaluator or background run.
+    /// An unattended turn is offered it only as a scheduled or polled job's run (`isEmittingJobRun`, #920
+    /// slice 1b: Brian, "goal/job runs"); a filesystem watch's run and every other background turn are not.
     nonisolated static func inboxItemDeclared(principal: Principal, isUnattended: Bool, role: String?, isPinned: Bool,
-                                              hasActiveGoal: Bool, ownsUnfinishedItem: Bool, sticky: Set<String>) -> Bool {
-        guard principal == .main, !isUnattended else { return false }
+                                              hasActiveGoal: Bool, ownsUnfinishedItem: Bool, sticky: Set<String>,
+                                              isEmittingJobRun: Bool = false) -> Bool {
+        guard principal == .main else { return false }
+        if isUnattended { return isEmittingJobRun }
         return inboxItemStateOn(role: role, isPinned: isPinned, hasActiveGoal: hasActiveGoal, ownsUnfinishedItem: ownsUnfinishedItem)
             || sticky.contains("inbox_item")
     }
@@ -1681,8 +1685,8 @@ actor IrisEngine {
         }
         let localState = state
         guard let ownerChain = await MainActor.run(body: { () -> String? in
-            guard let c = localState?.conversations.first(where: { $0.id == conversationId }) else { return nil }
-            return c.role ?? conversationId.uuidString
+            guard let s = localState, s.conversations.contains(where: { $0.id == conversationId }) else { return nil }
+            return s.inboxOwnerChain(for: conversationId)
         }) else { return "That conversation no longer exists." }
         let note = Self.flattenCardField(args["note"]?.stringValue ?? "", cap: 200)
         let outcome: Result<String, InboxError>
@@ -2142,6 +2146,26 @@ actor IrisEngine {
         // Two entries that resolve to one session (`role:dev` and ` ROLE:Dev `) are one recipient.
         var reached = Set<UUID>()
         for target in targets {
+            // #920 slice 1b: a job's answer waits for its next run (`takeJobInboxAnswers`), unless the job
+            // cannot take it in time; then it goes to the pinned Iris, with the job named.
+            if let jobId = Self.jobChainId(target) {
+                let fallback = await MainActor.run { () -> (UUID, String, String?, String?)? in
+                    guard let s = localState else { return nil }
+                    let job = (try? s.store.ledger.job(id: jobId)) ?? nil
+                    guard let reason = Self.jobInboxFallbackReason(job: job, answeredAt: answer.at),
+                          let iris = s.conversations.first(where: { $0.isPinned && !$0.isArchived })?.id else { return nil }
+                    return (iris, reason, job?.name, job?.prompt)
+                }
+                guard let (iris, reason, name, prompt) = fallback else { remaining.append(target); continue }
+                if reached.contains(iris) { continue }
+                reached.insert(iris)
+                let frame = Self.inboxJobFallbackFrame(answerFrame: body, jobName: name, jobPrompt: prompt, reason: reason)
+                switch await deliver(iris, frame, item.emitterTainted) {
+                case .delivered, .queued: delivered += 1
+                case .refused: remaining.append(target)
+                }
+                continue
+            }
             let id: UUID? = await MainActor.run {
                 Self.resolveInboxTarget(target, ownerChain: item.ownerChain, in: localState?.conversations ?? [])
             }
@@ -2246,6 +2270,7 @@ actor IrisEngine {
         inboxVetoWatcher.start(interval: interval, center: center) { [weak self] in
             await self?.evaluateInboxVetoExpiries()
             await self?.evaluateInboxStaleness()
+            await self?.evaluateJobInboxFallbacks()
         }
     }
 
@@ -2369,15 +2394,97 @@ actor IrisEngine {
     /// out) has no human behind it, so it goes only to the emitter or its owner chain, and `notify`
     /// is not used.
     nonisolated static func inboxRouteTargets(item: InboxItem, answer: InboxAnswer) -> [String] {
+        // #920 slice 1b: a job run's item is answered to its job (`job:<id>`), not the run that raised it,
+        // which has ended by the time Brian answers: the job's next run gets it, or the pinned Iris.
+        let selfTarget = jobChainId(item.ownerChain) != nil ? item.ownerChain : item.emitter.uuidString
         let requested = item.routeBack.isEmpty ? [item.emitter.uuidString] : item.routeBack
         let allowed = requested.filter { isAllowedInboxRoute($0, emitter: item.emitter) }
-        guard answer.automatic else { return allowed.isEmpty ? [item.emitter.uuidString] : allowed }
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == item.emitter.uuidString.lowercased() ? selfTarget : $0 }
+        guard answer.automatic else { return allowed.isEmpty ? [selfTarget] : allowed }
         let own = allowed.filter { t in
             let raw = t.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-            return raw == item.emitter.uuidString.lowercased()
-                || (UUID(uuidString: item.ownerChain) == nil && raw == "role:" + item.ownerChain.lowercased())
+            return raw == selfTarget.lowercased()
+                || (UUID(uuidString: item.ownerChain) == nil && jobChainId(item.ownerChain) == nil
+                    && raw == "role:" + item.ownerChain.lowercased())
         }
-        return own.isEmpty ? [item.emitter.uuidString] : own
+        return own.isEmpty ? [selfTarget] : own
+    }
+
+    /// The job a `job:<id>` chain or target names.
+    nonisolated static func jobChainId(_ chain: String) -> UUID? {
+        guard chain.hasPrefix("job:") else { return nil }
+        return UUID(uuidString: String(chain.dropFirst(4)))
+    }
+
+    /// #920 slice 1b (planner ruling): how long an answer for a job may wait for its next run before it
+    /// goes to the pinned Iris instead. A weekly cron must not sit on Brian's answer for days.
+    nonisolated static let jobInboxWaitLimit: TimeInterval = 24 * 3_600
+
+    /// Why a job's answer goes to the pinned Iris rather than waiting, or nil to wait for its next run:
+    /// the job is gone or paused, or its next fire is more than `jobInboxWaitLimit` after the answer.
+    nonisolated static func jobInboxFallbackReason(job: Job?, answeredAt: Date) -> String? {
+        guard let job else { return "the job has been deleted" }
+        if !job.enabled || job.pausedReason != nil { return "the job is paused" }
+        guard let next = job.nextFireAt, next.timeIntervalSince(answeredAt) <= jobInboxWaitLimit else {
+            return "the job does not run again within 24 hours"
+        }
+        return nil
+    }
+
+    /// What the pinned Iris is handed for a job's answer that cannot wait (#920 slice 1b): the job, so she
+    /// can act on it or relay it, then the ordinary answer frame (Brian's decision, the item as context).
+    nonisolated static func inboxJobFallbackFrame(answerFrame: String, jobName: String?, jobPrompt: String?, reason: String) -> String {
+        let job = jobName.map { "the job `\(flattenCardField($0, cap: cardNameCap))`" } ?? "a job"
+        let what = jobPrompt.map { "\nWhat the job does, as its owner wrote it: \(flattenCardField($0, cap: 600))\n" } ?? ""
+        return """
+        Brian answered an inbox item that \(job) raised, but it cannot go to that job: \(reason). It comes to you instead, \
+        so you can act on it or tell him what it means.
+        \(what)
+        \(answerFrame)
+        """
+    }
+
+    /// #920 slice 1b: Brian's answers waiting for job `jobId`, handed to that job's run now starting. Each
+    /// is the ordinary answer frame (his decision, the item as context, the emitter's taint), marked
+    /// delivered for the job, and a tainted item taints the run as any echoed outside text does. The run's
+    /// tools are not touched: a readOnly run stays readOnly. Nil when nothing waits.
+    func takeJobInboxAnswers(jobId: UUID, for runConversationId: UUID) async -> String? {
+        let localState = state
+        let target = "job:" + jobId.uuidString
+        guard let store = await MainActor.run(body: { localState?.store }),
+              let items = try? store.inbox.awaitingDeliveryItems() else { return nil }
+        var frames: [String] = []
+        for item in items {
+            guard let answer = item.answer,
+                  item.pendingTargets.contains(where: { $0.caseInsensitiveCompare(target) == .orderedSame }) else { continue }
+            guard inboxDelivering.insert(item.id).inserted else { continue }
+            defer { inboxDelivering.remove(item.id) }
+            frames.append(Self.inboxAnswerFrame(item: item, answer: answer,
+                                                echoed: await echoedInboxText(Self.inboxOriginalItemText(item))))
+            if item.emitterTainted { await markReadUntrusted(runConversationId) }
+            let remaining = item.pendingTargets.filter { $0.caseInsensitiveCompare(target) != .orderedSame }
+            _ = try? store.inbox.setPendingTargets(itemId: item.id, remaining)
+        }
+        guard !frames.isEmpty else { return nil }
+        await MainActor.run { localState?.bumpInboxRevision() }
+        return frames.joined(separator: "\n\n")
+    }
+
+    /// #920 slice 1b: re-checks answers still waiting for a job on the watcher's tick, so one whose job was
+    /// deleted or paused meanwhile, or whose wait passed the limit, reaches the pinned Iris then, not at
+    /// the next launch.
+    func evaluateJobInboxFallbacks(deliver: InboxDeliver? = nil) async {
+        let deliver = deliver ?? realInboxDeliver()
+        let localState = state
+        guard let store = await MainActor.run(body: { localState?.store }),
+              let items = try? store.inbox.awaitingDeliveryItems() else { return }
+        for item in items where item.pendingTargets.contains(where: { Self.jobChainId($0) != nil }) {
+            guard let answer = item.answer,
+                  let result = await deliverInboxAnswer(item: item, answer: answer, targets: item.pendingTargets, deliver: deliver),
+                  result.remaining != item.pendingTargets else { continue }
+            _ = try? store.inbox.setPendingTargets(itemId: item.id, result.remaining)
+            await MainActor.run { localState?.bumpInboxRevision() }
+        }
     }
 
     /// The targets Brian's answer will go to, for showing him before he submits (#943): exactly
@@ -4320,12 +4427,17 @@ actor IrisEngine {
         // the work, not on every plain turn: a role-bound session (the team's curators), the pinned
         // Iris, and a session with an item of its own still open, which may follow it up or resolve
         // it. Sticky once declared (5c §0.1). The dispatcher refuses it where it would not be declared.
-        let inboxChain = ownRole ?? conversationId.uuidString
-        let ownsUnfinishedInboxItem = (principal == .main && !isUnattended)
+        let (inboxChain, isEmittingJobRun) = await MainActor.run { () -> (String, Bool) in
+            (localState?.inboxOwnerChain(for: conversationId) ?? (ownRole ?? conversationId.uuidString),
+             localState?.isInboxEmittingJobRun(conversationId) ?? false)
+        }
+        let inboxReachable = principal == .main && (!isUnattended || isEmittingJobRun)
+        let ownsUnfinishedInboxItem = inboxReachable
             ? ((try? await MainActor.run(body: { localState?.store.inbox })?.hasUnfinishedItems(ownerChain: inboxChain)) ?? false)
             : false
         if Self.inboxItemDeclared(principal: principal, isUnattended: isUnattended, role: ownRole, isPinned: isPinned,
-                                  hasActiveGoal: hasActiveGoal, ownsUnfinishedItem: ownsUnfinishedInboxItem, sticky: sticky) {
+                                  hasActiveGoal: hasActiveGoal, ownsUnfinishedItem: ownsUnfinishedInboxItem, sticky: sticky,
+                                  isEmittingJobRun: isEmittingJobRun) {
             toolsList.append(FunctionDeclaration(
                 name: "inbox_item",
                 description: "Record a decision for Brian to answer: a durable, human-facing question that outlives this conversation. Omit thread_id for a new item; give the thread_id of an item you raised before to append a followup: it reopens the item with your new title, situation and options in place of the ones he answered (only the chain that raised it may do this — a foreign followup is refused; route_back and notify stay as first raised). It appears in Brian's inbox (sidebar row, open-items count) — you may tell him you raised it. Close it with resolve_inbox_item once the decision is consumed.",
@@ -4349,7 +4461,7 @@ actor IrisEngine {
         }
         // #920 slice 1: closing a thread is the raising chain's, once the decision is consumed. Declared
         // while that chain has an item to close, sticky once declared; the dispatcher refuses it otherwise.
-        if principal == .main, !isUnattended, ownsUnfinishedInboxItem || sticky.contains(Self.resolveInboxItemTool) {
+        if inboxReachable, ownsUnfinishedInboxItem || sticky.contains(Self.resolveInboxItemTool) {
             toolsList.append(Self.resolveInboxItemDeclaration)
         }
 
@@ -4449,7 +4561,7 @@ actor IrisEngine {
         let bindingGated = principal == .main || principal == .subagent || principal == .evaluator
         let nonOwnerTurn = guestSensitiveOffered && bindingGated ? !(await callIsOwner(conversationId)) : false
         toolsList = Self.hardStrip(toolsList, isUnattended: isUnattended, principal: principal, guestOrigin: guestOrigin,
-                                   nonOwner: nonOwnerTurn)
+                                   nonOwner: nonOwnerTurn, keepUnattended: isEmittingJobRun ? Self.jobRunInboxTools : [])
         if stickyApplies {
             let declared = toolsList.map(\.name)
             await MainActor.run { localState?.stickyTools.record(declared, for: conversationId) }
@@ -6042,11 +6154,16 @@ actor IrisEngine {
         [GuestToolset.listSessions, GuestToolset.sendToSession]
     }
 
+    /// The two inbox tools a scheduled or polled job's run keeps through the unattended strip (#920 slice 1b).
+    nonisolated static let jobRunInboxTools: Set<String> = ["inbox_item", resolveInboxItemTool]
+
     nonisolated static func hardStrip(_ tools: [FunctionDeclaration], isUnattended: Bool,
-                                      principal: Principal, guestOrigin: Bool = false, nonOwner: Bool = false) -> [FunctionDeclaration] {
+                                      principal: Principal, guestOrigin: Bool = false, nonOwner: Bool = false,
+                                      keepUnattended: Set<String> = []) -> [FunctionDeclaration] {
         var denied: Set<String> = []
         if guestOrigin { denied.formUnion(ToolExecutor.githubProxyTools) }
-        if isUnattended { denied.formUnion(unattendedNeverDeclared) }
+        // `keepUnattended` only ever names the job-run inbox tools; it cannot lift any other unattended strip.
+        if isUnattended { denied.formUnion(unattendedNeverDeclared.subtracting(keepUnattended.intersection(jobRunInboxTools))) }
         if principal != .main { denied.formUnion(mainOnlyDeclared) }
         // #974 gap A: a binding that is not the owner's is not offered the owner-only tools, or any tool
         // the table has no row for (an MCP server's or a plugin's).
@@ -7256,22 +7373,24 @@ actor IrisEngine {
                 result = "Refused — a subagent is not a session."
                 return result
             }
-            guard !isUnattended else {
-                result = Self.unattendedSessionMessageRefusal
-                return result
-            }
-            guard let (store, role, isPinned, hasGoal) = await MainActor.run(body: { () -> (ConversationStore, String?, Bool, Bool)? in
+            guard let (store, role, isPinned, hasGoal, chain, jobRun) = await MainActor.run(body: { () -> (ConversationStore, String?, Bool, Bool, String, Bool)? in
                 guard let s = localState else { return nil }
                 let c = s.conversations.first(where: { $0.id == conversationId })
-                return (s.store, c?.role, c?.isPinned == true, c?.activeGoal != nil)
+                return (s.store, c?.role, c?.isPinned == true, c?.activeGoal != nil,
+                        s.inboxOwnerChain(for: conversationId), s.isInboxEmittingJobRun(conversationId))
             }) else {
                 result = "The inbox is unavailable."
                 return result
             }
+            // #920 slice 1b: an unattended turn raises an item only as a scheduled or polled job's run.
+            guard !isUnattended || jobRun else {
+                result = Self.unattendedSessionMessageRefusal
+                return result
+            }
             // #920 slice 1: the declaration's gate, again where the call acts (a sticky declaration
             // outlives its state, and a model can name a tool it saw elsewhere).
-            let owns = (try? store.inbox.hasUnfinishedItems(ownerChain: role ?? conversationId.uuidString)) ?? false
-            guard Self.inboxItemStateOn(role: role, isPinned: isPinned, hasActiveGoal: hasGoal, ownsUnfinishedItem: owns) else {
+            let owns = (try? store.inbox.hasUnfinishedItems(ownerChain: chain)) ?? false
+            guard jobRun || Self.inboxItemStateOn(role: role, isPinned: isPinned, hasActiveGoal: hasGoal, ownsUnfinishedItem: owns) else {
                 result = Self.inboxItemOffStateRefusal
                 return result
             }
@@ -7281,12 +7400,15 @@ actor IrisEngine {
                 result = "Refused — a subagent is not a session."
                 return result
             }
-            guard !isUnattended else {
-                result = Self.unattendedSessionMessageRefusal
+            guard let (store, jobRun) = await MainActor.run(body: { () -> (ConversationStore, Bool)? in
+                guard let s = localState else { return nil }
+                return (s.store, s.isInboxEmittingJobRun(conversationId))
+            }) else {
+                result = "The inbox is unavailable."
                 return result
             }
-            guard let store = await MainActor.run(body: { localState?.store }) else {
-                result = "The inbox is unavailable."
+            guard !isUnattended || jobRun else {
+                result = Self.unattendedSessionMessageRefusal
                 return result
             }
             // No off-state branch of its own: `resolve` refuses a thread that is not this chain's or is already closed.
