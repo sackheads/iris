@@ -257,6 +257,10 @@ actor IrisEngine {
     /// 5c §0.1; false only for perf's gated arm (`IRIS_PERF_STICKY_TOOLS=0`, wired in 5c PR D).
     private let stickyToolsEnabled: Bool
     var factStore: FactStoreManager { injectedFactStore ?? .shared }
+    /// #1295 (b'): which library/artifacts contents this engine's clean conversations wrote. Injectable, like
+    /// `factStore`, so a test drives it against a file and key of its own.
+    private let injectedGuardTrust: GuardTrustStore?
+    var guardTrust: GuardTrustStore { injectedGuardTrust ?? .shared }
     /// 5a Task 7 fix round 1: same idiom as `injectedFactStore`/`factStore`. `MemoryManager` has no
     /// per-instance seam other than `init(paths:)`, so a test that needs an isolated USER.md/SOUL.md
     /// constructs its own manager and hands it here, instead of mutating the process-global
@@ -918,7 +922,7 @@ actor IrisEngine {
     /// `CacheTTLPolicy.resolve` picks (5c §0.8). Nil everywhere else.
     private let cacheTTLOverride: CacheTTLPolicy?
 
-    init(state: AppState, tier: ModelTier = .medium, principal: Principal = .main, roleLabel: String? = nil, client: any LLMClientProtocol = LLMClient(), evaluatorChecks: [String] = [], retryDelays: [TimeInterval] = [2, 4, 8], streamResponses: Bool? = nil, factStore: FactStoreManager? = nil, protectionEnabled: Bool? = nil, checkpointAutoAdvance: Bool? = nil, sessionPeerCount: Int? = nil, recentWrites: RecentWrites = .shared, requestDumpSink: (@Sendable (GeminiRequest, Int, Int) -> Void)? = nil, memory: MemoryManager? = nil, declareStateGatedTools: Bool = false, stickyTools: Bool = true, roundStartHook: (@Sendable (Int) async -> Void)? = nil, cacheTTLOverride: CacheTTLPolicy? = nil, hooks: HookManager = .shared, provider: String? = nil, replayThinking: Bool? = nil, subagentConfig: ConfigManager = .shared, repromptDelay: TimeInterval = 1.5,
+    init(state: AppState, tier: ModelTier = .medium, principal: Principal = .main, roleLabel: String? = nil, client: any LLMClientProtocol = LLMClient(), evaluatorChecks: [String] = [], retryDelays: [TimeInterval] = [2, 4, 8], streamResponses: Bool? = nil, factStore: FactStoreManager? = nil, protectionEnabled: Bool? = nil, checkpointAutoAdvance: Bool? = nil, sessionPeerCount: Int? = nil, recentWrites: RecentWrites = .shared, guardTrust: GuardTrustStore? = nil, requestDumpSink: (@Sendable (GeminiRequest, Int, Int) -> Void)? = nil, memory: MemoryManager? = nil, declareStateGatedTools: Bool = false, stickyTools: Bool = true, roundStartHook: (@Sendable (Int) async -> Void)? = nil, cacheTTLOverride: CacheTTLPolicy? = nil, hooks: HookManager = .shared, provider: String? = nil, replayThinking: Bool? = nil, subagentConfig: ConfigManager = .shared, repromptDelay: TimeInterval = 1.5,
          subagentRoute: ProviderRoute? = nil,
          primaryClient: (any LLMClientProtocol)? = nil,
          routedClient: @escaping @Sendable (ProviderRoute) -> any LLMClientProtocol = { LLMClient(route: $0) },
@@ -948,6 +952,7 @@ actor IrisEngine {
         self.recentWrites = recentWrites
         self.protectionEnabled = protectionEnabled
         self.injectedFactStore = factStore
+        self.injectedGuardTrust = guardTrust
         self.injectedMemory = memory
         self.modelTier = tier
         self.principal = principal
@@ -5477,6 +5482,18 @@ actor IrisEngine {
     /// #813: a read under ~/.iris that is Iris's own standing context: SOUL, USER, memory.md,
     /// skills, rules, config. The rest of ~/.iris holds other people's text too (cloned
     /// workspaces, plugin files, library imports, artifacts), so a read there taints (#818 review).
+    /// #1295 (b'): whether a `read_file` of `path` read library/artifacts bytes that a clean conversation
+    /// wrote (`GuardTrustStore`), and `result` is exactly those bytes as the model will see them (the line
+    /// range and the output cap applied again here). Any mismatch, a forged entry or no key reads as no.
+    private func trustedLibraryRead(_ path: String, cwd: String?, args: [String: JSONValue], result: String) -> Bool {
+        let resolved = IrisPaths.realPath(ToolExecutor.resolvePath(path, cwd: cwd))
+        guard GuardTrustStore.covers(resolved),
+              let data = FileManager.default.contents(atPath: resolved), guardTrust.isClean(data),
+              let text = String(data: data, encoding: .utf8),
+              case .success(let range) = LineRange.parse(start: args["start_line"], count: args["line_count"]) else { return false }
+        return OutputCap.cap(LineRange.apply(range, to: text), advice: Self.outputCapAdvice(name: "read_file", args: args)) == result
+    }
+
     nonisolated static func isFirstPartyRead(_ path: String, paths: IrisPaths = .default) -> Bool {
         let target = IrisPaths.realPath(path)
         for file in [paths.soulMd, paths.userMd, paths.memoryMd] where IrisPaths.samePath(target, IrisPaths.realPath(file.path)) {
@@ -8415,6 +8432,13 @@ actor IrisEngine {
             let resolved = ToolExecutor.resolvePath(path, cwd: cwd)
             let localState = state
             await MainActor.run { localState?.recordSubagentWrite(conversationId: cid, path: resolved) }
+            // #1295 (b'): the bytes asked for, not a read-back, so a shell that swaps the file in between
+            // vouches for nothing. Only an owner's conversation that has read nothing from outside.
+            if GuardTrustStore.covers(resolved), let content = execArgs["content"]?.stringValue,
+               await callIsOwner(cid),
+               let localState, await MainActor.run(body: { !localState.readUntrustedThroughDelegation(cid) }) {
+                guardTrust.recordCleanWrite(path: resolved, content: content)
+            }
         }
 
         // #187 §4, R-D4-1: the self-write filter's one feed. Here, and not in `ToolExecutor`,
@@ -8462,6 +8486,13 @@ actor IrisEngine {
            let path = execArgs["path"]?.stringValue,
            IrisPaths.default.isUnderIrisDir(path),
            Self.isFirstPartyRead(ToolExecutor.resolvePath(path, cwd: cwd)) {
+            return result
+        }
+        // #1295 (b'): a library/artifacts file whose bytes a clean conversation of Iris's wrote is Iris's
+        // own words too, and is returned raw, untainting. Only when the bytes hashed are the bytes the
+        // model is about to see: a swap mid-read, or a hook that rewrote the result, is judged.
+        if name == "read_file", let path = execArgs["path"]?.stringValue,
+           trustedLibraryRead(path, cwd: cwd, args: execArgs, result: result) {
             return result
         }
         // #813: any other read is someone else's text. Decided here, after the hooks, on the path
