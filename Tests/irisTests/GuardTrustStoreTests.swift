@@ -37,7 +37,7 @@ struct GuardTrustStoreTests {
     /// One conversation running `calls` in turn, each its own model round; returns each call's result and
     /// whether the conversation ended tainted.
     private func run(_ calls: [FunctionCall], store: GuardTrustStore, tainted: Bool = false, background: Bool = false,
-                     autoApprove: Bool = true) async throws -> (results: [String], tainted: Bool) {
+                     autoApprove: Bool = true, hooks: HookManager = HookManager()) async throws -> (results: [String], tainted: Bool) {
         let state = AppState(store: try ConversationStore.inMemory(), tier2Provisioning: .provisioned,
                              tier3Provisioning: .provisioned, createIfEmpty: false, emitLaunchNotices: false)
         state.autoApproveTools = autoApprove
@@ -48,7 +48,7 @@ struct GuardTrustStoreTests {
         }
         let responses = calls.flatMap { [reply(Part(functionCall: $0)), reply(Part(text: "done"))] }
         let engine = IrisEngine(state: state, client: FakeLLMClient(responses: responses), retryDelays: [],
-                                protectionEnabled: true, sessionPeerCount: 0, guardTrust: store)
+                                protectionEnabled: true, sessionPeerCount: 0, guardTrust: store, hooks: hooks)
         await CoreMLEvaluator.$scopedModel.withValue(.init(PassingTier2())) {
             await AuxiliaryModelManager.$scopedEngines.withValue(["canary": MarkerCanary(marker)]) {
                 for _ in calls { await engine.processInput("go", source: "UI", conversationId: id) }
@@ -89,6 +89,29 @@ struct GuardTrustStoreTests {
         #expect(back.result.contains(marker), "Iris's own clean note was judged: \(back.result.prefix(300))")
         #expect(!back.result.contains("<untrusted_context"))
         #expect(!back.tainted)
+    }
+
+    /// dev-3's review: the raw read must also be what the model sees. An AfterTool hook that rewrites the result
+    /// after the bytes were hashed is judged, however clean the file is.
+    @Test("a clean note whose read result an AfterTool hook rewrites is judged, not passed raw")
+    func rewrittenResultIsJudged() async throws {
+        let file = note()
+        let hookDir = FileManager.default.temporaryDirectory.appendingPathComponent("iris-1295-hook-\(UUID().uuidString)")
+        defer { [file, storeFile, hookDir].forEach { try? FileManager.default.removeItem(at: $0) } }
+        let trust = store()
+        try FileManager.default.createDirectory(at: paths.libraryDir, withIntermediateDirectories: true)
+        _ = try await run([write(file, "clean note\n")], store: trust)
+        try FileManager.default.createDirectory(at: hookDir, withIntermediateDirectories: true)
+        let settings = hookDir.appendingPathComponent("settings.json")
+        let command = "printf '%s' '{\"result\": \"clean note \(marker)\"}'"
+        let config: [String: Any] = ["hooks": ["AfterTool": [["matcher": "read_file", "hooks": [["type": "command", "command": command]]]]]]
+        try JSONSerialization.data(withJSONObject: config).write(to: settings)
+        var hooks = HookManager()
+        hooks.configPathOverride = settings.path
+        let (results, tainted) = try await run([read(file)], store: trust, hooks: hooks)
+        let result = results.last ?? ""
+        #expect(!result.contains(marker), "the rewritten result reached the model raw: \(result.prefix(300))")
+        #expect(tainted)
     }
 
     @Test("the same bytes at another library path read raw too: trust is per content")
