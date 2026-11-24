@@ -3006,6 +3006,30 @@ class AppState {
 
     /// Stamps the profile of the job whose run this conversation holds (#187 §4). Persisted, so a
     /// transcript reopened after a relaunch still says what the run was allowed to do.
+    /// #920 slice 1b: which job a run's hidden conversation belongs to, and whether a filesystem watch
+    /// fired it. In memory only: it matters while the run is live (the inbox tools' gate and the
+    /// `job:<id>` chain an item is raised under), and a restart ends a run anyway.
+    struct JobRunStamp: Equatable, Sendable {
+        let jobId: UUID
+        let isWatch: Bool
+    }
+    private(set) var jobRunStamps: [UUID: JobRunStamp] = [:]
+    func setJobRunStamp(for conversationId: UUID, _ stamp: JobRunStamp?) { jobRunStamps[conversationId] = stamp }
+
+    /// The chain an inbox item raised from `conversationId` belongs to: `job:<id>` for a job run (so the
+    /// job's next run, not the ended run, owns it), else the session's role, else its own id. One
+    /// derivation for emit, follow-up, resolve and the tools' gate.
+    func inboxOwnerChain(for conversationId: UUID) -> String {
+        if let stamp = jobRunStamps[conversationId] { return "job:" + stamp.jobId.uuidString }
+        return conversations.first(where: { $0.id == conversationId })?.role ?? conversationId.uuidString
+    }
+
+    /// Whether a run's conversation may use the inbox tools though nobody is watching it: a scheduled
+    /// or polled job's run (Brian, 2026-11-23: "goal/job runs"), not a filesystem watch's.
+    func isInboxEmittingJobRun(_ conversationId: UUID) -> Bool {
+        jobRunStamps[conversationId].map { !$0.isWatch } ?? false
+    }
+
     func setJobProfile(for conversationId: UUID, _ profile: JobProfile?) {
         if let idx = conversations.firstIndex(where: { $0.id == conversationId }) {
             conversations[idx].jobProfile = profile
@@ -3621,10 +3645,12 @@ class AppState {
         guard let c = conversations.first(where: { $0.id == sender }) else {
             return .refused("That conversation no longer exists.")
         }
-        if let wait = inboxEmitRateLimiter.take(for: sender) {
+        // #920 slice 1b: a job's runs share one budget, keyed by the job, so a per-minute schedule
+        // cannot raise a fresh 20 items every fire.
+        if let wait = inboxEmitRateLimiter.take(for: jobRunStamps[sender]?.jobId ?? sender) {
             return .refused("Not raised: rate limit — this session has raised \(PeerRateLimiter.capacity) inbox items in quick succession. The next is allowed in about \(Int(wait.rounded(.up)))s.")
         }
-        let ownerChain = c.role ?? sender.uuidString
+        let ownerChain = inboxOwnerChain(for: sender)
         return .allowed(ownerChain: ownerChain, emitterLabel: Self.inboxEmitterLabel(for: c), tainted: c.hasUntrustedToolOutput)
     }
 
@@ -3643,7 +3669,7 @@ class AppState {
     /// could not be recorded — it reached nobody, so it must not cost the sender its budget
     /// (dev-2's #924 "guard-block refund path" review focus, carried into Task 2).
     func refundInboxEmit(from sender: UUID) {
-        inboxEmitRateLimiter.refund(for: sender, count: 1)
+        inboxEmitRateLimiter.refund(for: jobRunStamps[sender]?.jobId ?? sender, count: 1)
     }
 
     /// #469 §7.5: removes artifacts no conversation has referenced for the grace period. At launch,
@@ -5706,6 +5732,7 @@ class AppState {
         backgroundRunDelegatedUsage.removeValue(forKey: conversationId)
         backgroundRunOtherModels.removeValue(forKey: conversationId)
         let wasActive = activeRuns.removeValue(forKey: conversationId) != nil
+        jobRunStamps[conversationId] = nil
         // And nothing it spawned goes on working (#323). Cancelling the run's turn reaches a
         // subagent it is still waiting on through structured cancellation; this is the backstop
         // for one that cancellation did not reach. Its delegates are noted first, for the close;

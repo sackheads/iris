@@ -348,6 +348,10 @@ actor JobRunner {
     /// watch job at all — a hand-started one never had paths to begin with, so retrying it minutes
     /// later would re-run the prompt without them, a different run wearing the same name. The next
     /// save is the retry a watch actually has.
+    /// Heads the answers a run is handed (#920 slice 1b), so the model reads them as Brian's replies to the
+    /// job's earlier items and the job's own prompt, after the rule, as this run's task.
+    static let jobInboxAnswersPreamble = "Brian answered inbox items this job raised on an earlier run. His answers are below; act on them where they bear on this run. The job's own prompt follows the rule."
+
     static func isPathDriven(origin: FireOrigin, job: Job) -> Bool {
         origin.isWatcher || job.trigger.kind == Trigger.fsEventKind
     }
@@ -1329,7 +1333,10 @@ actor JobRunner {
             await closeInterrupted(run: run, conversationId: conversationId, at: now())
             return
         }
-        let prompt = promptBuild.text
+        // #920 slice 1b: Brian's answers to items this job raised, ahead of the job's own prompt. Each is
+        // framed as his decision (`inboxAnswerFrame`); the run's tools stay what its profile allows.
+        let answers = await engine.takeJobInboxAnswers(jobId: job.id, for: conversationId)
+        let prompt = answers.map { Self.jobInboxAnswersPreamble + "\n\n" + $0 + "\n\n---\n\n" + promptBuild.text } ?? promptBuild.text
 
         // `deadlineClock`, not the injected `now`: this deadline bounds a turn that is happening
         // right now, so a test (or a replayed occurrence) that pins the ledger's clock to another
@@ -1942,6 +1949,9 @@ actor JobRunner {
             // for (§4). Stamped for both profiles — nil means "not a job run at all", which is
             // the unnarrowed surface.
             state.setJobProfile(for: id, job.profile)
+            // #920 slice 1b: which job this run is, so an inbox item it raises belongs to the job
+            // (`job:<id>`) and a scheduled or polled run is offered the inbox tools.
+            state.setJobRunStamp(for: id, .init(jobId: job.id, isWatch: job.trigger.kind == Trigger.fsEventKind))
             // #974 Task 12 (C8): the run keeps the binding its job was created under, so the turn
             // is confined the way the creating session was and never reset to the owner.
             if let idx = state.conversations.firstIndex(where: { $0.id == id }) {

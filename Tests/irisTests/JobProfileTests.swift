@@ -91,7 +91,9 @@ struct JobProfileTests {
             #expect(!JobProfile.readOnlyAllowed.contains(name), Comment(rawValue: name))
         }
         for name in ["read_file", "search_web", "search_memory", "reflect", IrisEngine.currentTimeTool,
-                     "list_jobs", "get_job_run", "gmail_list_unread", "google_calendar_list_events"] {
+                     "list_jobs", "get_job_run", "gmail_list_unread", "google_calendar_list_events",
+                     // #920 slice 1b: raising and resolving an item in the owner's inbox, one row each.
+                     "inbox_item", IrisEngine.resolveInboxItemTool] {
             #expect(!JobProfile.readOnlyDenies(name, sandboxedRunCommand: false, readOnlyMCPTools: []),
                     Comment(rawValue: name))
         }
@@ -141,7 +143,8 @@ struct JobProfileTests {
         try await fire(job(), client: client, store: store, state: app)
 
         let names = Set(client.requests.first?.tools?.flatMap { $0.functionDeclarations.map(\.name) } ?? [])
-        #expect(names == ["read_file", "search_web", "search_memory", "reflect", IrisEngine.currentTimeTool])
+        // `inbox_item` since #920 slice 1b (a scheduled job's run); `resolve_inbox_item` only once the job owns an open item.
+        #expect(names == ["read_file", "search_web", "search_memory", "reflect", IrisEngine.currentTimeTool, "inbox_item"])
         // The property behind the equality: whatever a future config change adds to the surface,
         // every name on it has to be one the gate itself allows.
         #expect(names.allSatisfy { !JobProfile.readOnlyDenies($0, sandboxedRunCommand: true,

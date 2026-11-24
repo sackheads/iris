@@ -97,7 +97,10 @@ item (Brian, 2026-11-23: "accept", since forwarding to Iris is like the Overseer
 working a `/goal` is offered it too. A job run is offered it by #920 slice 1b: a scheduled or polled
 job, not a filesystem watch, with its owner chain `job:<jobId>`, its answer handed to the job's next
 run (or to the pinned Iris when the job is deleted, paused or not due within 24 h), and its emit
-limit keyed by the job, not the run. Within those sessions, curation is **not** enforced at the inbox — it is a convention of the
+limit keyed by the job, not the run. A read-only job (the default profile) is offered both inbox tools: `JobProfile.readOnlyAllowed` names them,
+the one write such a run makes (planner ruling, 2026-11-23, for Brian's morning batch; reversible in
+one line). The answer reaches the next run as its input, framed as Brian's decision, and the run's
+tools stay its profile's. Within those sessions, curation is **not** enforced at the inbox — it is a convention of the
 team's roles: devs feed the chain, the Overseer/planner emit the curated item, Iris raises her own
 with route-back set to herself.
 
