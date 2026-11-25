@@ -499,16 +499,19 @@ public struct InjectionGuard {
     /// `strippedMarkerLines` when #969 recorded it: the two notices are separate sentences about
     /// different causes, and between them every difference is reported (a bare `---`/`###` line is
     /// stripped but never recorded by #969, so only this count sees it). The `read_file` call site
-    /// uses this entry point.
+    /// uses this entry point. `verdicts` keeps a SAFE verdict across launches (#1370): only that call
+    /// site passes it, and only for a library/ or artifacts/ read.
     static func sanitizeUntrustedDisplay(_ rawInput: String, contextTag: String = "",
                                          maxTier: SanitizationTier = .tier1_structural,
                                          protectionEnabled: Bool? = nil,
-                                         fidelity: FidelityMode = .off) async -> (text: String, cacheable: Bool, unjudged: [String], strippedMarkerLines: Int, divergedLines: Int) {
+                                         fidelity: FidelityMode = .off,
+                                         verdicts: GuardVerdictStore? = nil) async -> (text: String, cacheable: Bool, unjudged: [String], strippedMarkerLines: Int, divergedLines: Int) {
         let stripped = PromptInjectionGuard.stripRecordingDelimiters(rawInput)
         let verdict = await classifyDetailed(stripped.text, contextTag: contextTag, maxTier: maxTier,
                                              protectionEnabled: protectionEnabled,
                                              delimiterLines: stripped.delimiterLines, fidelity: fidelity,
-                                             preserveCandidate: preserveFidelityCandidate(rawInput, fidelity: fidelity))
+                                             preserveCandidate: preserveFidelityCandidate(rawInput, fidelity: fidelity),
+                                             verdicts: verdicts)
         let stillStripped = Self.countStillStrippedLines(stripped.delimiterLines, in: verdict.outcome)
         return (wrapped(verdict.outcome, contextTag: contextTag), verdict.cacheable, verdict.unjudged, stillStripped, verdict.divergedLines)
     }
@@ -601,7 +604,8 @@ public struct InjectionGuard {
                          delimiterLines: [Int: String] = [:],
                          config: GuardConfigFingerprint? = nil,
                          fidelity: FidelityMode = .off,
-                         preserveCandidate: String? = nil) async -> Verdict {
+                         preserveCandidate: String? = nil,
+                         verdicts: GuardVerdictStore? = nil) async -> Verdict {
         recordFidelityCall(contextTag: contextTag, fidelity: fidelity)
         let __turnID = PerformanceProfiler.currentTurnID
         let __start = MonotonicClock.nowMs()
@@ -672,6 +676,23 @@ public struct InjectionGuard {
                            delimiterLines: delimiterLines, fidelity: fidelity, preserveCandidate: preserveCandidate)
         if let cached = cache?.get(key) {
             return cached
+        }
+        // #1370: a library/artifacts read's SAFE verdict kept from an earlier launch. Under a test's scope only a
+        // store the test handed in, as for `cache` above.
+        let kept = Self.guardTierScopeActive && verdicts === GuardVerdictStore.shared ? nil : verdicts
+        var keptKey: String?
+        if let kept, maxTier == .tier3_canary, fingerprint.protectionEnabled, let version = await kept.version(fingerprint) {
+            let k = GuardVerdictStore.key(key, version: version)
+            keptKey = k
+            if let entry = kept.safeVerdict(k) {
+                // As the judged path below: tier 3 judged the capped text when tier 2 skipped, and a model tier
+                // judged `clean`, so the markers may carry.
+                if entry.tier2Skipped { clean = OutputCap.cap(clean) }
+                let shown = display(clean, markersMayCarry: attemptingFidelity)
+                let passed = GuardOutcome.passed(clean: shown.text)
+                cache?.set(key, passed, divergedLines: shown.diverged)
+                return Verdict(outcome: passed, cacheable: true, divergedLines: shown.diverged)
+            }
         }
 
         // Tier 2: Local Token-Classification (CoreML/ONNX) — evaluates the unwrapped content.
@@ -747,6 +768,10 @@ public struct InjectionGuard {
             let shown = display(clean, markersMayCarry: attemptingFidelity && modelTierRan)
             let passed = GuardOutcome.passed(clean: shown.text)
             cache?.set(key, passed, unjudged: unjudged, divergedLines: shown.diverged)
+            // #1370: kept only when tier 3 judged the whole text safe and tier 2 withheld nothing.
+            if let kept, let keptKey, tier3 == .safe, tier2 == .safe || tier2 == .skipped {
+                kept.recordSafe(keptKey, tier2Skipped: tier2 == .skipped)
+            }
             return Verdict(outcome: passed, cacheable: true, unjudged: unjudged, tier2: tier2.logName, divergedLines: shown.diverged)
         }
     }

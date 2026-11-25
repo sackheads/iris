@@ -209,7 +209,32 @@ actor OllamaEngine: AuxiliaryInferenceEngine {
             return []
         }
     }
-    
+
+    /// GET /api/tags's body, nil when the daemon doesn't answer 200 (#1370).
+    static func tagsBody() async -> Data? {
+        guard let url = URL(string: "\(baseURL)/api/tags") else { return nil }
+        var req = URLRequest(url: url)
+        req.httpMethod = "GET"
+        req.timeoutInterval = 3
+        guard let (data, response) = try? await URLSession.shared.data(for: req),
+              (response as? HTTPURLResponse)?.statusCode == 200 else { return nil }
+        return data
+    }
+
+    /// The digest /api/tags gives for `name` as Ollama resolves it: the exact name, else `name:latest` for a bare one.
+    static func digest(of name: String, inTags data: Data) -> String? {
+        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let models = json["models"] as? [[String: Any]] else { return nil }
+        let wanted = name.contains(":") ? [name] : [name, name + ":latest"]
+        for candidate in wanted {
+            if let model = models.first(where: { $0["name"] as? String == candidate }),
+               let digest = model["digest"] as? String, !digest.isEmpty {
+                return digest
+            }
+        }
+        return nil
+    }
+
     /// Pulls a model from Ollama's registry. Reports progress via the callback
     /// with real incremental status (uses stream:true and parses NDJSON lines).
     static func pullModel(name: String, onProgress: @escaping @Sendable (String) -> Void) async throws {
