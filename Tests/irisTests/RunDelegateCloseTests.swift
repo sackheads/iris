@@ -24,6 +24,8 @@ struct RunDelegateCloseTests {
         func parked(_ role: String) -> Int { lock.withLock { entered[role] ?? 0 } }
         func cancellations(_ role: String) -> Int { lock.withLock { cancelled[role] ?? 0 } }
         func release() { gate.open() }
+        /// Calls parked at the gate right now.
+        var parkedNow: Int { gate.waiting }
 
         private func role(of request: GeminiRequest) -> String {
             let prompt = request.systemInstruction?.parts.compactMap(\.text).joined() ?? ""
@@ -163,7 +165,9 @@ struct RunDelegateCloseTests {
         }
         #expect(rt.createdCount == 3, "no container after the close")
 
+        #expect(client.parkedNow >= 1, "the deaf calls parked, so the release below has something to free")
         client.release()
+        #expect(client.parkedNow == 0, "the parked calls were released")
         #expect(try await value(of: child).status == .cancelled)
         #expect(try await value(of: grandchild).status == .cancelled)
     }
@@ -245,7 +249,9 @@ struct RunDelegateCloseTests {
         #expect(await eventually { Set(closes.all) == [parent, childId, grandId] }, "closed: \(closes.all)")
         #expect(await eventually { client.cancellations("WORKER") == 1 }, "the background subagent's turn was stopped")
 
+        #expect(client.parkedNow >= 1, "the deaf calls parked, so the release below has something to free")
         client.release()
+        #expect(client.parkedNow == 0, "the parked calls were released")
         let outcome = try await value(of: child)
         #expect(outcome.status == .cancelled)
         #expect(outcome.rendered.contains(SubagentManager.parentDeletedReason))

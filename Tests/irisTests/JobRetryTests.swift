@@ -649,7 +649,11 @@ struct JobRetryTests {
         let clock = ManualClock()
         let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, endSandboxSession: { _ in }, config: config,
                                activity: activity, watchdogSlice: 0.01, deadlineClock: clock.uptime)
-        defer { client.releaseAll() }
+        defer {
+            #expect(client.parkedCount >= 1, "the stream parked, so the release below has something to free")
+            client.releaseAll()
+            #expect(client.parkedCount == 0, "the parked stream was released")
+        }
 
         let fire = Task { await runner.fire(job: j, origin: .schedule) }
         try await client.gate.waitForArrivals(1)   // the turn parked in the model call
@@ -724,7 +728,11 @@ struct JobRetryTests {
         let clock = ManualClock()
         let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, endSandboxSession: { _ in }, config: config,
                                activity: activity, watchdogSlice: 0.02, deadlineClock: clock.uptime)
-        defer { client.releaseAll() }
+        defer {
+            #expect(client.parkedCount >= 1, "the stream parked, so the release below has something to free")
+            client.releaseAll()
+            #expect(client.parkedCount == 0, "the parked stream was released")
+        }
 
         let fire = Task { await runner.fire(job: j, origin: .schedule) }
         try await client.gate.waitForArrivals(1)   // the turn parked in the model call
@@ -924,7 +932,11 @@ struct JobRetryTests {
         let runner = JobRunner(state: state, engine: engine, ledger: store.ledger, endSandboxSession: { _ in }, config: config,
                                activity: RecordingActivity(), stop: stop)
         let fire = Task { await runner.fire(job: j, origin: .manual) }
-        defer { client.releaseAll() }
+        defer {
+            #expect(client.parkedCount >= 1, "the stream parked, so the release below has something to free")
+            client.releaseAll()
+            #expect(client.parkedCount == 0, "the parked stream was released")
+        }
         try await client.gate.waitForArrivals(1)   // the turn is parked in the stream
         let asked = TestClock.now()
         _ = stop.request(reason: RunStop.reason(for: SIGTERM))
