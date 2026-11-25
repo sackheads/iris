@@ -63,13 +63,13 @@ struct GuardVerdictStoreTests {
         let dir = folder ?? paths.libraryDir
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         let file = dir.appendingPathComponent("note-\(UUID().uuidString).md")
-        try (text + Self.token + "\n").write(to: file, atomically: true, encoding: .utf8)
+        try (Self.token + "\n" + text).write(to: file, atomically: true, encoding: .utf8)
         return file
     }
 
-    /// One launch's first `read_file` of `file`: a fresh engine, a fresh store over the same file. Returns what the
+    /// One launch's first `read_file` of `file` (`tier2` nil: tier 2 skips): a fresh engine, a fresh store over the same file. Returns what the
     /// model was handed, whether it tainted, and how many times the canary was asked.
-    private func launchAndRead(_ file: URL, canary: CountingCanary = CountingCanary(), tier2: Tier2 = Tier2()) async throws
+    private func launchAndRead(_ file: URL, canary: CountingCanary = CountingCanary(), tier2: Tier2? = Tier2()) async throws
         -> (result: String, tainted: Bool, canaryCalls: Int) {
         let state = AppState(store: try ConversationStore.inMemory(), tier2Provisioning: .provisioned,
                              tier3Provisioning: .provisioned, createIfEmpty: false, emitLaunchNotices: false)
@@ -115,12 +115,26 @@ struct GuardVerdictStoreTests {
         #expect(second.tainted, "a kept verdict is still someone else's text")
     }
 
+    /// dev-1's #1390 review: with tier 2 skipped, tier 3 judges `clean` cut to the cap, and a hit must show that cut
+    /// too. Only reachable when tier 1 grows a read that was already capped: NFKC turns U+FDFA (3 bytes) into 33.
+    @Test("with tier 2 skipped, a hit shows the same capped text tier 3 judged")
+    func skippedTier2HitIsCapped() async throws {
+        let file = try note(String(repeating: "\u{FDFA}", count: 10_000) + "\n")
+        defer { cleanup(file) }
+        let first = try await launchAndRead(file, tier2: nil)
+        #expect(first.canaryCalls == 1)
+        #expect(first.result.contains("[output truncated:"), "the fixture never reached the cut: \(first.result.suffix(200))")
+        let second = try await launchAndRead(file, tier2: nil)
+        #expect(second.canaryCalls == 0)
+        #expect(second.result == first.result, "a hit showed \(second.result.utf8.count) bytes, the judgement \(first.result.utf8.count)")
+    }
+
     @Test("an edit to the note is a new version: judged again")
     func editMisses() async throws {
         let file = try note("first\n")
         defer { cleanup(file) }
         _ = try await launchAndRead(file)
-        try "first\nsecond\n\(Self.token)\n".write(to: file, atomically: true, encoding: .utf8)
+        try "\(Self.token)\nfirst\nsecond\n".write(to: file, atomically: true, encoding: .utf8)
         #expect(try await launchAndRead(file).canaryCalls == 1)
     }
 
@@ -268,5 +282,39 @@ struct GuardVersionTests {
         let after = await GuardVersion.modelIdentity(ollama, ollamaTags: { pulled })
         #expect(before != nil && after != nil && before != after, "an ollama pull misses")
         #expect(await GuardVersion.modelIdentity(ollama, ollamaTags: { nil }) == nil, "an Ollama that doesn't answer")
+    }
+
+    private func fingerprint(engine: String, model: String, tier2Model: String = "", dir: URL) -> InjectionGuard.GuardConfigFingerprint {
+        InjectionGuard.GuardConfigFingerprint(
+            protectionEnabled: true, promptGuardEngine: engine, promptGuardModel: model, promptGuardCoreMLModel: tier2Model,
+            tier3CloudModel: "", tier3ThinkingLevel: "", tier2ModelsDir: dir.path, tier3ModelsDir: dir.path,
+            tier2Provisioning: .provisioned, tier3Provisioning: .provisioned)
+    }
+
+    @Test("a re-downloaded tier-2 model or llama.cpp file under the same name changes the identity (dev-3's #1390 review)")
+    func localModelsChange() async throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("iris-1370-models-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let tier2Dir = dir.appendingPathComponent(ModelDownloader.resolvedCoreMLDirectoryName(for: "guard.mlmodelc"))
+        try FileManager.default.createDirectory(at: tier2Dir, withIntermediateDirectories: true)
+        let weights = tier2Dir.appendingPathComponent("weights.bin")
+        try Data("a".utf8).write(to: weights)
+        let gguf = dir.appendingPathComponent(ModelDownloader.resolvedFilename(for: "https://example.com/m/canary.gguf"))
+        try Data("x".utf8).write(to: gguf)
+        let fp = fingerprint(engine: "llama_cpp", model: "https://example.com/m/canary.gguf", tier2Model: "guard.mlmodelc", dir: dir)
+        let before = await GuardVersion.modelIdentity(fp, ollamaTags: { nil })
+        #expect(before?.contains("file|1|") == true, "the llama.cpp file is found where tier3Provisioning looks: \(before ?? "nil")")
+        #expect(before?.contains("dir|1|1|") == true, "the tier-2 model is found where tier2Provisioning looks: \(before ?? "nil")")
+        try Data("bb".utf8).write(to: weights)
+        let retrained = await GuardVersion.modelIdentity(fp, ollamaTags: { nil })
+        #expect(retrained != before, "a retrained tier-2 model under the same name")
+        try Data("yy".utf8).write(to: gguf)
+        #expect(await GuardVersion.modelIdentity(fp, ollamaTags: { nil }) != retrained, "a re-downloaded canary file")
+    }
+
+    @Test("an MLX canary has no identity Iris can see, so nothing is kept for it (dev-3's #1390 review)")
+    func mlxIsNoVersion() async {
+        let fp = fingerprint(engine: "mlx", model: "mlx-community/some-model", dir: FileManager.default.temporaryDirectory)
+        #expect(await GuardVersion.modelIdentity(fp, ollamaTags: { nil }) == nil)
     }
 }

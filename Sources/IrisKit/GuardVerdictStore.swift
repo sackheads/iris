@@ -120,21 +120,58 @@ enum GuardVersion {
                 "\((exe?[.modificationDate] as? Date)?.timeIntervalSince1970 ?? -1)"].joined(separator: "|")
     }
 
-    /// Who judges for tier 3: Ollama's digest for the model (an `ollama pull` changes the weights under the same
-    /// name), a cloud tier's resolved model, or a local file's size and date. Nil when Ollama doesn't say.
+    /// Who judges: tier 3's model, then tier 2's, since either can be replaced under the same name (dev-3's #1390
+    /// review). Nil when tier 3's identity is unknown.
     static func modelIdentity(_ fingerprint: InjectionGuard.GuardConfigFingerprint,
                               ollamaTags: () async -> Data? = { await OllamaEngine.tagsBody() }) async -> String? {
+        guard let tier3 = await tier3Identity(fingerprint, ollamaTags: ollamaTags) else { return nil }
+        return tier3 + "\u{0}" + tier2Identity(fingerprint)
+    }
+
+    /// Ollama's digest for the model (an `ollama pull` changes the weights under the same name), a cloud tier's
+    /// resolved model, or a llama.cpp file's size and date, at the path `tier3Provisioning` checks. Nil when Ollama
+    /// doesn't say, and for MLX, which loads a Hugging Face id from the Hub's cache, where nothing here can see a
+    /// re-download (dev-3's #1390 review): no version, so no kept verdict.
+    static func tier3Identity(_ fingerprint: InjectionGuard.GuardConfigFingerprint,
+                              ollamaTags: () async -> Data?) async -> String? {
         switch fingerprint.promptGuardEngine {
         case "ollama":
             guard let body = await ollamaTags() else { return nil }
             return OllamaEngine.digest(of: fingerprint.promptGuardModel, inTags: body).map { "ollama|\($0)" }
         case "cloud":
             return "cloud|\(fingerprint.tier3CloudModel)|\(fingerprint.tier3ThinkingLevel)"
+        case "mlx":
+            return nil
         default:
-            let path = URL(fileURLWithPath: fingerprint.tier3ModelsDir).appendingPathComponent(fingerprint.promptGuardModel).path
-            let attrs = try? FileManager.default.attributesOfItem(atPath: path)
-            return "\(fingerprint.promptGuardEngine)|\(fingerprint.promptGuardModel)|"
-                + "\((attrs?[.size] as? NSNumber)?.int64Value ?? -1)|\((attrs?[.modificationDate] as? Date)?.timeIntervalSince1970 ?? -1)"
+            let file = URL(fileURLWithPath: fingerprint.tier3ModelsDir)
+                .appendingPathComponent(ModelDownloader.resolvedFilename(for: fingerprint.promptGuardModel))
+            return "\(fingerprint.promptGuardEngine)|\(fingerprint.promptGuardModel)|\(contentStamp(file))"
         }
+    }
+
+    /// The tier-2 model directory's contents, at the path `tier2Provisioning` checks; none when no model is set.
+    static func tier2Identity(_ fingerprint: InjectionGuard.GuardConfigFingerprint) -> String {
+        guard !fingerprint.promptGuardCoreMLModel.isEmpty else { return "tier2|none" }
+        let dir = URL(fileURLWithPath: fingerprint.tier2ModelsDir)
+            .appendingPathComponent(ModelDownloader.resolvedCoreMLDirectoryName(for: fingerprint.promptGuardCoreMLModel))
+        return "tier2|\(fingerprint.promptGuardCoreMLModel)|\(contentStamp(dir))"
+    }
+
+    /// A file's size and date, or a directory's file count, total size and newest date: a replaced or re-downloaded
+    /// model changes it. "missing" for nothing there.
+    static func contentStamp(_ url: URL) -> String {
+        let keys: [URLResourceKey] = [.fileSizeKey, .contentModificationDateKey, .isRegularFileKey]
+        func stamp(_ u: URL) -> (size: Int, date: Double)? {
+            guard let v = try? u.resourceValues(forKeys: Set(keys)), v.isRegularFile == true else { return nil }
+            return (v.fileSize ?? 0, v.contentModificationDate?.timeIntervalSince1970 ?? 0)
+        }
+        if let one = stamp(url) { return "file|\(one.size)|\(one.date)" }
+        guard let walk = FileManager.default.enumerator(at: url, includingPropertiesForKeys: keys) else { return "missing" }
+        var count = 0, total = 0, newest = 0.0
+        for case let file as URL in walk {
+            guard let s = stamp(file) else { continue }
+            count += 1; total += s.size; newest = max(newest, s.date)
+        }
+        return count == 0 ? "missing" : "dir|\(count)|\(total)|\(newest)"
     }
 }
