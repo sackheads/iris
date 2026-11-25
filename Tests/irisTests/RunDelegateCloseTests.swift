@@ -19,17 +19,11 @@ struct RunDelegateCloseTests {
         private let lock = NSLock()
         private var entered: [String: Int] = [:]
         private var cancelled: [String: Int] = [:]
-        private var released = false
-        private var waiters: [CheckedContinuation<Void, Never>] = []
+        private let gate = TestGate()
 
         func parked(_ role: String) -> Int { lock.withLock { entered[role] ?? 0 } }
         func cancellations(_ role: String) -> Int { lock.withLock { cancelled[role] ?? 0 } }
-        func release() {
-            let parked = lock.withLock { () -> [CheckedContinuation<Void, Never>] in
-                released = true; defer { waiters = [] }; return waiters
-            }
-            for c in parked { c.resume() }
-        }
+        func release() { gate.open() }
 
         private func role(of request: GeminiRequest) -> String {
             let prompt = request.systemInstruction?.parts.compactMap(\.text).joined() ?? ""
@@ -44,14 +38,8 @@ struct RunDelegateCloseTests {
                 try await Task.sleep(nanoseconds: 600 * 1_000_000_000)
             } else {
                 await withTaskCancellationHandler {
-                    // A bare continuation: deaf to cancellation, as a turn that ignores it is.
-                    await withCheckedContinuation { (c: CheckedContinuation<Void, Never>) in
-                        let now = lock.withLock { () -> Bool in
-                            if released { return true }
-                            waiters.append(c); return false
-                        }
-                        if now { c.resume() }
-                    }
+                    // Deaf to cancellation, as a turn that ignores it is.
+                    await gate.waitIgnoringCancellation()
                 } onCancel: {
                     lock.withLock { cancelled[role, default: 0] += 1 }
                 }
@@ -104,6 +92,7 @@ struct RunDelegateCloseTests {
           arguments: [false, true])
     func runCloseClosesDescendants(delegatesExitFirst: Bool) async throws {
         let client = StubbornClient()
+        defer { client.release() }
         let store = try ConversationStore.inMemory()
         let state = AppState(store: store, tier2Provisioning: .provisioned, tier3Provisioning: .provisioned)
         state.conversations.removeAll()
@@ -209,6 +198,7 @@ struct RunDelegateCloseTests {
     @Test("deleting a conversation stops its delegates, denies their queued asks and closes their sessions")
     func deleteReachesDescendants() async throws {
         let client = StubbornClient()
+        defer { client.release() }
         let store = try ConversationStore.inMemory()
         let state = AppState(store: store, tier2Provisioning: .provisioned, tier3Provisioning: .provisioned)
         state.conversations.removeAll()
