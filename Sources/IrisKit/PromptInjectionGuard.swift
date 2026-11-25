@@ -134,6 +134,11 @@ struct PromptInjectionGuard {
         return clean
     }
 
+    /// The strip's rules as text, for `GuardVersion` (#1370): a rule change misses every kept verdict.
+    static var ruleSource: String {
+        (malRolePatterns + [bareRoleLine.pattern, bareRoleLineForms.pattern]).joined(separator: "\u{0}")
+    }
+
     // 2. Strip common LLM role delimiters that attempt to hijack the conversation
     static let malRolePatterns = [
         "system:",
