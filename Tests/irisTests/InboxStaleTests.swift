@@ -108,7 +108,7 @@ struct InboxStaleTests {
                                                         pendingTargets: [])
         guard case .success = answered else { Issue.record("a stale item refused an answer: \(answered)"); return }
         #expect(try app.store.inbox.appendFollowup(threadId: "t-b", fromChain: "gone-b", author: "b", body: "back", at: now)
-                == .success(InboxFollowupResult(itemId: reopenable.id)))
+                == .success(InboxFollowupResult(itemId: reopenable.id, reopened: true)))
         #expect(try state(app, reopenable) == .open)
     }
 
