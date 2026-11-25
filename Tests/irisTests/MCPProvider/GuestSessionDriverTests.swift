@@ -23,26 +23,13 @@ struct GuestSessionDriverTests {
         func advance(_ seconds: TimeInterval) { lock.withLock { date = date.addingTimeInterval(seconds) } }
     }
 
-    private actor Latch {
-        private var opened = false
-        private var waiters: [CheckedContinuation<Void, Never>] = []
-        func wait() async {
-            if opened { return }
-            await withCheckedContinuation { waiters.append($0) }
-        }
-        func open() {
-            opened = true
-            for w in waiters { w.resume() }
-            waiters = []
-        }
-    }
 
     /// What the fake runner does, and what it saw.
     private final class Script: @unchecked Sendable {
         private let lock = NSLock()
         private var _texts: [String] = []
         private var _reply: String? = "an answer"
-        var latch: Latch?
+        var latch: TestGate?
         var reply: String? {
             get { lock.withLock { _reply } }
             set { lock.withLock { _reply = newValue } }
@@ -104,7 +91,7 @@ struct GuestSessionDriverTests {
         { [script] conversationId, text, _, sink in
             script.saw(text)
             await MainActor.run { app.beginEngineTurn(for: conversationId) }
-            await script.latch?.wait()
+            await script.latch?.waitIgnoringCancellation()
             if let reply = script.reply {
                 await MainActor.run { app.appendMessage(role: .agent, content: reply, to: conversationId) }
             }
@@ -376,11 +363,11 @@ struct GuestSessionDriverTests {
     @Test("a second message from a client whose turn is still running is busy, not a second turn")
     func secondWhileRunningIsBusy() async throws {
         let r = try rig()
-        let latch = Latch()
+        let latch = TestGate()
         r.script.latch = latch
         guard case .accepted = await r.driver.submit(text: "first", from: "dev-1") else { Issue.record("first refused"); return }
         #expect(await r.driver.submit(text: "second", from: "dev-1") == .busy)
-        await latch.open()
+        latch.open()
         try await finish(r, "dev-1")
         #expect(r.script.texts == ["first"])
         // The refused attempt spent no turn: the answer to the first is the only reply.
@@ -403,7 +390,9 @@ struct GuestSessionDriverTests {
     @Test("a turn past its bound files the failure reply and closes the session")
     func timeoutIsAFailureReply() async throws {
         let r = try rig(turnTimeout: 0.2)
-        r.script.latch = Latch()   // never opened: the turn hangs
+        let latch = TestGate()
+        r.script.latch = latch   // not opened before the end: the turn hangs
+        defer { latch.open() }
         _ = await r.driver.submit(text: "hello", from: "dev-1")
         try await finish(r, "dev-1")
         #expect(await replies(r, "dev-1").map(\.text) == [GuestSessionDriver.failureReply])
@@ -426,13 +415,13 @@ struct GuestSessionDriverTests {
     @Test("a client revoked while its turn runs is never sent the reply; a client that is not revoked is")
     func revokedMidTurnGetsNothing() async throws {
         let r = try rig(clients: ["dev-1", "dev-2"])
-        let latch = Latch()
+        let latch = TestGate()
         r.script.latch = latch
         _ = await r.driver.submit(text: "one", from: "dev-1")
         _ = await r.driver.submit(text: "two", from: "dev-2")
         try r.tokens.revokeToken(forClientId: "dev-1")
         r.sessions.close(clientId: "dev-1")
-        await latch.open()
+        latch.open()
         try await finish(r, "dev-1")
         try await finish(r, "dev-2")
         #expect(await replies(r, "dev-1").isEmpty, "a revoked id gets no reply, not even a failure one")
@@ -444,7 +433,7 @@ struct GuestSessionDriverTests {
     @Test("a session is not reaped mid-turn however long the turn runs, and its TTL restarts when the turn ends")
     func touchAtTurnEnd() async throws {
         let r = try rig(ttl: .seconds(900))
-        let latch = Latch()
+        let latch = TestGate()
         r.script.latch = latch
         _ = await r.driver.submit(text: "long", from: "dev-1")
         let script = r.script
@@ -452,7 +441,7 @@ struct GuestSessionDriverTests {
         r.clock.advance(.seconds(1000))
         r.sessions.reapIdle()
         #expect(r.sessions.liveCount == 1, "a turn is running")
-        await latch.open()
+        latch.open()
         try await finish(r, "dev-1")
         r.sessions.reapIdle()
         #expect(r.sessions.liveCount == 1, "the turn just ended: its idle time starts now, not when it began")

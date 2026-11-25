@@ -470,25 +470,24 @@ struct JobRetryTests {
     /// with the runner-side fix reverted — it guards the engine's unwind, not `run()`'s wait.
     /// (`deadlineEndsTheRun`, on `GatedClient`, is that cooperative case and keeps covering it.)
     ///
-    /// This parks in the stream's own iterator, in a bare `withCheckedContinuation` with no
-    /// cancellation handler, so nothing interrupts the suspension: `for try await event in stream`
+    /// This parks in the stream's own iterator, on `TestGate.waitIgnoringCancellation()`, so a
+    /// cancel does not interrupt the suspension: `for try await event in stream`
     /// never comes back, `processInput` never returns, and only `run()` giving up on the wait can
     /// end the run. No thread is blocked — the cooperative pool is free the whole time.
     private final class WedgedClient: LLMClientProtocol, @unchecked Sendable {
         private let lock = NSLock()
-        private var parked: [CheckedContinuation<LLMStreamEvent?, Never>] = []
+        /// Every park, ever, is an arrival: what a test waits on before it lets the deadline arrive.
+        let gate = TestGate()
         private var streamCalls = 0
         private var replayCalls = 0
         private let response: GeminiResponse
-        /// Every park, ever: what a test waits on before it lets the deadline arrive.
-        let parks = Signal()
 
         init(response: GeminiResponse) { self.response = response }
 
         /// How many times the turn asked the model, i.e. how many runs reached their model call.
         var callCount: Int { lock.withLock { streamCalls } }
         /// Continuations still parked: the proof the turn is *inside* the call right now.
-        var parkedCount: Int { lock.withLock { parked.count } }
+        var parkedCount: Int { gate.waiting }
         /// Must stay zero. If it ever moves, the engine resolved streaming off and the park went
         /// back to the cancellable `LLMStreamEvent.replay` path, which is the bug in the first
         /// version of this test.
@@ -502,10 +501,8 @@ struct JobRetryTests {
             // cancellation handler that finishes the stream, which is exactly the unwind this
             // test must not have. The unfolding form awaits this closure directly.
             return AsyncThrowingStream<LLMStreamEvent, Error>(unfolding: { [self] in
-                await withCheckedContinuation { continuation in
-                    lock.withLock { parked.append(continuation) }
-                    parks.bump()
-                }
+                await gate.waitIgnoringCancellation()
+                return nil
             })
         }
 
@@ -517,13 +514,7 @@ struct JobRetryTests {
         /// Ends every parked stream at teardown. Not needed for the assertions — the point of the
         /// test is that the run ends without it — but a continuation that is never resumed keeps
         /// its task, and the engine, state and store behind it, alive for the rest of the process.
-        func releaseAll() {
-            let waiting = lock.withLock { () -> [CheckedContinuation<LLMStreamEvent?, Never>] in
-                defer { parked = [] }
-                return parked
-            }
-            for continuation in waiting { continuation.resume(returning: nil) }
-        }
+        func releaseAll() { gate.open() }
     }
 
     private func waitFor(_ description: String, timeout: TimeInterval = 10,
@@ -661,7 +652,7 @@ struct JobRetryTests {
         defer { client.releaseAll() }
 
         let fire = Task { await runner.fire(job: j, origin: .schedule) }
-        try #require(await client.parks.reach(1), "the turn parked in the model call")
+        try await client.gate.waitForArrivals(1)   // the turn parked in the model call
         clock.advance(by: TimeInterval(Self.heldTimeout + 1))
         // Bounded, where the shipped bug hung forever: a wait the deadline cannot end fails here.
         try #require(await finished(fire) != nil, "the deadline ended the wait on a turn that never returns")
@@ -682,7 +673,7 @@ struct JobRetryTests {
         // The other half of the wedge: the job has to be firable again. A second fire admitted is
         // proof `inFlight` was given back.
         let secondFire = Task { await runner.fire(job: j, origin: .manual) }
-        try #require(await client.parks.reach(2), "the second fire reached the model rather than being skipped")
+        try await client.gate.waitForArrivals(2)   // the second fire reached the model rather than being skipped
         clock.advance(by: TimeInterval(Self.heldTimeout + 1))
         let second = try #require(await finished(secondFire), "the second run ended at its deadline too")
         #expect(second == .run, "got: \(String(describing: second))")
@@ -736,7 +727,7 @@ struct JobRetryTests {
         defer { client.releaseAll() }
 
         let fire = Task { await runner.fire(job: j, origin: .schedule) }
-        try #require(await client.parks.reach(1), "the turn parked in the model call")
+        try await client.gate.waitForArrivals(1)   // the turn parked in the model call
         let looked = clock.reads.value
         try #require(await clock.reads.reach(looked + 3), "the watchdog kept re-reading the clock")
         #expect(activity.events == [.begin("Iris job pr-sweep")], "and left the run alone while short of the deadline")
@@ -917,7 +908,7 @@ struct JobRetryTests {
         #expect(run.failureReason == "stopped by a signal (SIGINT)")
     }
 
-    /// The turn parks in `WedgedClient`'s stream (this file, `:459-524`), where cancellation cannot
+    /// The turn parks in `WedgedClient`'s stream, where cancellation cannot
     /// reach it. A client parked in `generateContent` would not do: the engine reads it through
     /// `LLMStreamEvent.replay`, whose `next()` is cancellable, so the turn would come straight back
     /// and the grace would never be exercised (the trap `WedgedClient`'s own comment records).
@@ -934,7 +925,7 @@ struct JobRetryTests {
                                activity: RecordingActivity(), stop: stop)
         let fire = Task { await runner.fire(job: j, origin: .manual) }
         defer { client.releaseAll() }
-        try #require(await client.parks.reach(1), "the turn is parked in the stream")
+        try await client.gate.waitForArrivals(1)   // the turn is parked in the stream
         let asked = TestClock.now()
         _ = stop.request(reason: RunStop.reason(for: SIGTERM))
         try #require(await finished(fire, within: 10) != nil, "the grace bounded the wait")
