@@ -70,12 +70,27 @@ struct InboxStaleTests {
         #expect(try state(app, orphaned) == .stale)
     }
 
-    @Test("a job chain is never marked here; slice 1b decides when a job is gone")
-    func jobChainIsLeftAlone() async throws {
+    @Test("a job chain is gone only once the job is deleted: a live or paused job's item stays open")
+    func jobChainGoneWhenDeleted() async throws {
         let app = AppState(); app.conversations.removeAll()
-        let item = try raise(app, chain: "job:\(UUID().uuidString)", quietFor: 30)
-        #expect(await engine(app).evaluateInboxStaleness(now: now) == 0)
-        #expect(try state(app, item) == .open)
+        let live = Job(name: "live", prompt: "p", trigger: .schedule(.interval(seconds: 3_600)), profile: .readOnly)
+        var paused = Job(name: "paused", prompt: "p", trigger: .schedule(.interval(seconds: 3_600)), profile: .readOnly)
+        paused.pausedReason = "paused by you"
+        let deleted = Job(name: "deleted", prompt: "p", trigger: .schedule(.interval(seconds: 3_600)), profile: .readOnly)
+        for j in [live, paused, deleted] { try app.store.ledger.upsert(j) }
+        try app.store.ledger.delete(jobId: deleted.id)
+        let ofLive = try raise(app, chain: "job:\(live.id.uuidString)", quietFor: 30)
+        let ofPaused = try raise(app, chain: "job:\(paused.id.uuidString)", quietFor: 30)
+        let ofDeleted = try raise(app, chain: "job:\(deleted.id.uuidString)", quietFor: 30)
+        let ofNever = try raise(app, chain: "job:\(UUID().uuidString)", quietFor: 30)
+        let recent = try raise(app, chain: "job:\(deleted.id.uuidString)", quietFor: 6)
+
+        #expect(await engine(app).evaluateInboxStaleness(now: now) == 2)
+        #expect(try state(app, ofLive) == .open)
+        #expect(try state(app, ofPaused) == .open, "a paused job can be unpaused to take its answer")
+        #expect(try state(app, ofDeleted) == .stale)
+        #expect(try state(app, ofNever) == .stale, "a job id the ledger has no row for is gone")
+        #expect(try state(app, recent) == .open, "the 7-day quiet wait still applies")
     }
 
     @Test("a followup that lands after the sweep read the item wins: it is not marked")
@@ -134,6 +149,9 @@ struct InboxStaleTests {
         #expect(IrisEngine.inboxChainGone(UUID().uuidString, in: all))
         #expect(!IrisEngine.inboxChainGone("planner", in: all))
         #expect(IrisEngine.inboxChainGone("reviewer", in: all))
-        #expect(!IrisEngine.inboxChainGone("job:\(UUID().uuidString)", in: all))
+        let deletedJob = UUID()
+        #expect(!IrisEngine.inboxChainGone("job:\(UUID().uuidString)", in: all), "a job not known to be deleted")
+        #expect(IrisEngine.inboxChainGone("job:\(deletedJob.uuidString)", in: all, deletedJobs: [deletedJob]))
+        #expect(!IrisEngine.inboxChainGone("job:not-a-uuid", in: all, deletedJobs: [deletedJob]))
     }
 }
