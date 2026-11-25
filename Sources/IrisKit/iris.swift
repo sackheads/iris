@@ -2329,9 +2329,9 @@ actor IrisEngine {
         let gone = await MainActor.run { () -> Set<String> in
             guard let s = localState else { return [] }
             // A job the ledger could not read is not deleted, only unreadable this tick.
-            let deletedJobs = Set(quiet.compactMap { Self.jobChainId($0.ownerChain) }.filter { id in
+            let deletedJobs = Set(quiet.compactMap { Self.jobChainId($0.ownerChain) }).filter { id in
                 do { return try s.store.ledger.job(id: id) == nil } catch { return false }
-            })
+            }
             return Self.goneInboxChains(quiet.map(\.ownerChain), in: s.conversations,
                                         loadFailed: s.conversationLoadFailed, unloaded: s.unloadedConversationIds,
                                         deletedJobs: deletedJobs)
