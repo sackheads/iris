@@ -2289,9 +2289,11 @@ actor IrisEngine {
     /// Whether the chain that raised an item is gone. A session chain (its conversation id) is gone
     /// once that conversation is deleted or archived. A role chain is gone when nobody holds the role:
     /// the session that raised it may have ended while the role moved on. A `job:` chain (#920 slice 1b)
-    /// is not judged here: one run's conversation ending is not the job ending.
-    nonisolated static func inboxChainGone(_ ownerChain: String, in conversations: [Conversation]) -> Bool {
-        if ownerChain.hasPrefix("job:") { return false }
+    /// is gone only once the job is deleted (`deletedJobs`): one run's conversation ending is not the job
+    /// ending, and a paused job can still be unpaused to take its answer.
+    nonisolated static func inboxChainGone(_ ownerChain: String, in conversations: [Conversation],
+                                           deletedJobs: Set<UUID> = []) -> Bool {
+        if ownerChain.hasPrefix("job:") { return jobChainId(ownerChain).map(deletedJobs.contains) ?? false }
         if let id = UUID(uuidString: ownerChain) {
             guard let c = conversations.first(where: { $0.id == id }) else { return true }
             return c.isArchived
@@ -2304,11 +2306,11 @@ actor IrisEngine {
     /// empty list would make every sender look gone; and a conversation launch could not read (#163) is
     /// not gone either, only unreadable this launch (dev-2's #1375 review).
     nonisolated static func goneInboxChains(_ chains: [String], in conversations: [Conversation], loadFailed: Bool,
-                                            unloaded: Set<UUID>) -> Set<String> {
+                                            unloaded: Set<UUID>, deletedJobs: Set<UUID> = []) -> Set<String> {
         guard !loadFailed else { return [] }
         return Set(chains.filter { chain in
             if let id = UUID(uuidString: chain), unloaded.contains(id) { return false }
-            return inboxChainGone(chain, in: conversations)
+            return inboxChainGone(chain, in: conversations, deletedJobs: deletedJobs)
         })
     }
 
@@ -2322,8 +2324,13 @@ actor IrisEngine {
               let quiet = try? store.inbox.quietOpenItems(since: cutoff), !quiet.isEmpty else { return 0 }
         let gone = await MainActor.run { () -> Set<String> in
             guard let s = localState else { return [] }
+            // A job the ledger could not read is not deleted, only unreadable this tick.
+            let deletedJobs = Set(quiet.compactMap { Self.jobChainId($0.ownerChain) }.filter { id in
+                do { return try s.store.ledger.job(id: id) == nil } catch { return false }
+            })
             return Self.goneInboxChains(quiet.map(\.ownerChain), in: s.conversations,
-                                        loadFailed: s.conversationLoadFailed, unloaded: s.unloadedConversationIds)
+                                        loadFailed: s.conversationLoadFailed, unloaded: s.unloadedConversationIds,
+                                        deletedJobs: deletedJobs)
         }
         var marked = 0
         for item in quiet where gone.contains(item.ownerChain) {

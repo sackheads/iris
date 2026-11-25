@@ -208,7 +208,7 @@ given the async premise and the trust model; I've settled those as planner calls
   (`IrisEngine.inboxStaleAfter`, planner ruling F5, 2026-11-23); both conditions must hold, so a live
   emitter's unanswered item is pending, not stale. "Gone" is the raising chain's: a session that is
   deleted or archived, or a role nobody holds (the 7 days let a role regain one); a job's chain is gone
-  only when the job is. The sweep runs on the veto watcher's tick (#920 slice 3). A stale item stays in
+  only when the job is deleted, not paused, and not when one run ends. The sweep runs on the veto watcher's tick (#920 slice 3). A stale item stays in
   the list, not the open-items badge, is still answerable, and its owner's follow-up reopens it.
 - **The firehose, precisely.** The inbox-side defenses (per-emitter rate limit, dedup-by-thread,
   source label) stop **one** agent flooding — not three independent agents raising overlapping
