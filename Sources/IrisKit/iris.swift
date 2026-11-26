@@ -8982,6 +8982,8 @@ actor IrisEngine {
             if let cause = judged.onDeviceUnavailable, let conversationId,
                let bypassed = await onDeviceBypass(path: readPath, cause: cause, unreadableFile: libraryFileUnreadable,
                                                    conversationId: conversationId) {
+                // `uncached`: a skipped check is never served to anyone later. Today the tier-2 global key would only
+                // recompute the same verdict, so it's defence in depth, not a behaviour a test can see (dev-3's review).
                 judged = await InjectionGuard.sanitizeLibraryDisplay(result, contextTag: "tool_output_\(name)", maxTier: bypassed,
                                                                      protectionEnabled: protectionEnabled, fidelity: fidelity,
                                                                      uncached: true)

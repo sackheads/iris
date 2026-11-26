@@ -180,7 +180,7 @@ public struct InjectionGuard {
         /// invisible/control character removed, a tag or delimiter neutralized, a marker deleted).
         /// Zero for every other caller. Cached with the verdict, so a cache hit still says so.
         var divergedLines: Int = 0
-        /// #1397 part 2: set when a library on `local` was blocked because no on-device canary could run, with
+        /// #1397 part 2: set when a library on `local` was blocked because the on-device check couldn't judge it (none could run, or it failed on this text), with
         /// the cause if one was recorded (empty when none). The read site may offer the person a bypass.
         var onDeviceUnavailable: String? = nil
     }
@@ -341,7 +341,7 @@ public struct InjectionGuard {
         let why = fingerprint.onDeviceForUnreadableFile
             ? "Iris's library list (config/library-guard.json) can't be read, so every tool result is checked on this Mac only"
             : "this library is set to on-device checks only"
-        return "[CONTENT BLOCKED: \(why), and no on-device canary could run"
+        return "[CONTENT BLOCKED: \(why), and the on-device check couldn't judge it"
             + (cause.map { " (\(IrisEngine.flattenToolEcho($0, cap: 200)))" } ?? "") + ". Settings → Security shows the canary's state.]"
     }
 
@@ -602,7 +602,7 @@ public struct InjectionGuard {
     }
 
     /// `sanitizeUntrustedDisplay`, plus what the read site needs for #1397 part 2: whether a library on `local` was
-    /// blocked because no on-device canary could run (`onDeviceUnavailable`, the cause or empty), and `uncached`,
+    /// blocked because the on-device check couldn't judge it (`onDeviceUnavailable`, the cause or empty), and `uncached`,
     /// for the bypassed re-read, which must not leave a verdict in the process cache.
     static func sanitizeLibraryDisplay(_ rawInput: String, contextTag: String = "",
                                        maxTier: SanitizationTier = .tier1_structural,

@@ -2109,11 +2109,14 @@ struct ApprovalBannerView: View {
                 }
                 .keyboardShortcut(.cancelAction)
                 
-                Button(action: { onResolve(.approve, .proposed) }) {
-                    Text(request.guardBypass == nil ? "Approve Once" : "Read Once Unchecked")
+                // A bypass card's Read Once is never the Return key: skipping a security check takes a click (dev-2's #1413 review).
+                if request.guardBypass == nil {
+                    Button(action: { onResolve(.approve, .proposed) }) { Text("Approve Once") }
+                        .buttonStyle(.borderedProminent)
+                        .keyboardShortcut(.defaultAction)
+                } else {
+                    Button(action: { onResolve(.approve, .proposed) }) { Text("Read Once Unchecked") }
                 }
-                .buttonStyle(.borderedProminent)
-                .keyboardShortcut(.defaultAction)
             }
         }
         .padding()
