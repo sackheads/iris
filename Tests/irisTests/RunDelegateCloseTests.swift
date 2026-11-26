@@ -26,6 +26,8 @@ struct RunDelegateCloseTests {
         func release() { gate.open() }
         /// Calls parked at the gate right now.
         var parkedNow: Int { gate.waiting }
+        /// Returns once `n` subagent calls have parked: `parked(role)` counts before the gate, so it can't say that.
+        func waitForParks(_ n: Int) async throws { try await gate.waitForArrivals(n) }
 
         private func role(of request: GeminiRequest) -> String {
             let prompt = request.systemInstruction?.parts.compactMap(\.text).joined() ?? ""
@@ -165,6 +167,7 @@ struct RunDelegateCloseTests {
         }
         #expect(rt.createdCount == 3, "no container after the close")
 
+        try await client.waitForParks(2)   // WORKER and INNER
         #expect(client.parkedNow >= 1, "the deaf calls parked, so the release below has something to free")
         client.release()
         #expect(client.parkedNow == 0, "the parked calls were released")
@@ -249,6 +252,7 @@ struct RunDelegateCloseTests {
         #expect(await eventually { Set(closes.all) == [parent, childId, grandId] }, "closed: \(closes.all)")
         #expect(await eventually { client.cancellations("WORKER") == 1 }, "the background subagent's turn was stopped")
 
+        try await client.waitForParks(1)   // WORKER
         #expect(client.parkedNow >= 1, "the deaf calls parked, so the release below has something to free")
         client.release()
         #expect(client.parkedNow == 0, "the parked calls were released")
