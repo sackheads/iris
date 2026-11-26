@@ -125,6 +125,14 @@ It may also be useful to point Iris at other libraries that are not meant to be 
 but are just sources of information.  This might not even be OKF, but could house a
 variety of document types - even images, slides, etc.
 
+### How a library's notes are checked
+
+A folder of your own notes, such as an Obsidian vault, can be added under Settings → Security → Libraries.
+Its notes are still outside text for the guard, and reading one still marks the conversation. The setting
+only chooses who runs tier 3: "On this Mac" (the default, never the cloud), "Cloud" (each note goes to your
+cloud provider, for a vault that is scanned there anyway), or "No check". Only Settings changes it; the
+registry below does not. See the guard's [per-library bullet](prompt_injection_guard_design.md#tier-3-auxiliary-model-classifier-probe-implemented).
+
 ## Indexing
 
 To keep track of the external libraries that Iris knows about, Iris should maintain an
