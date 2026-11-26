@@ -6107,6 +6107,7 @@ class AppState {
     /// and a headless run all get false at once, so the read stays blocked. It's a person's call: YOLO, the
     /// allowlist and Vibecop never answer it. True to read this once (a "until restart" click also records the scope).
     func requestGuardBypass(conversationId: UUID, path: String, cause: String, scope: GuardBypassScope) async -> Bool {
+        // `autoApproveTools` is a headless driver's switch (ScenarioRunner), not YOLO: nobody is there to answer.
         guard isOwnerAttended(conversationId), !autoApproveTools else { return false }
         let what: String
         switch scope {
