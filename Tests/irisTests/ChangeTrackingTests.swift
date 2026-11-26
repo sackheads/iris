@@ -38,6 +38,7 @@ final class WriteSettlements {
     func wait(for n: Int) async {
         while count < n && !Task.isCancelled {
             await withTaskCancellationHandler {
+                // hang-ok: [bounded] inside withTaskCancellationHandler whose onCancel resumes (via MainActor hop)
                 await withCheckedContinuation { waiters.append($0) }
             } onCancel: {
                 Task { @MainActor in self.release() }

@@ -411,6 +411,7 @@ private final class SanitizerOracleNavigationWaiter: NSObject, WKNavigationDeleg
     /// #904's own waiters document hanging on for real).
     func waitForFinish() async {
         if finished { return }
+        // hang-ok: [bounded] inside a Task awaited with value(of:within: 10)
         let task = Task<Void, Never> { await withCheckedContinuation { self.continuation = $0 } }
         _ = try? await irisTests.value(of: task, within: 10)
     }

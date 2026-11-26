@@ -87,6 +87,7 @@ final class StoreLockTests {
             FileManager.default.createFile(atPath: fresh.path, contents: nil)
             #expect(rename(fresh.path, url.path) == 0)
 
+            // hang-ok: [bounded] resumed unconditionally after done.wait(timeout: 5) on a dispatch thread
             let reclaimed = await withCheckedContinuation { (c: CheckedContinuation<StoreLock.Claim?, Never>) in
                 DispatchQueue.global().async {
                     let done = DispatchSemaphore(value: 0)

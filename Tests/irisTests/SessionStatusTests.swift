@@ -219,6 +219,7 @@ struct SessionStatusTests {
         let bystander = await raiseApproval(app, tool: "write_file", for: other)
 
         let resumed = ResumeFlag()
+        // hang-ok: [bounded] the watcher is awaited through `value(of:)`, and the deny resumes `ask`
         let watcher = Task { @MainActor in resumed.value = await ask.value }
 
         app.deleteConversation(eval)   // what `submit_evaluation` does beside a parallel ask

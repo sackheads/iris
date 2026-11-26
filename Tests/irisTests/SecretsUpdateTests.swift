@@ -82,6 +82,7 @@ struct SecretsUpdateTests {
                 _ = GuardedRoots(keychain: keychain).add(["/iris750/\(i)"], migrating: { [] })
             }
         }
+        // hang-ok: [bounded] group members are finite loops of local writes; no external event
         group.wait()
         let after = keychain.loadSecrets()
         #expect(after[GuardedSettings.markerKey] == "1")

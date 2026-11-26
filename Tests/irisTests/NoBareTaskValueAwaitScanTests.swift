@@ -7,62 +7,20 @@ import Foundation
 ///   `}.value` on the line after the closure. Await it through `value(of:within:)` (`BoundedWait.swift`).
 /// - a bare `withChecked`/`withUnsafe` (`Throwing`) `Continuation` waits for whatever resumes it, and nothing else.
 /// - a blocking `.wait()` with no timeout, or one of `.distantFuture` (a semaphore, a group, a condition), parks a thread for good.
-/// This scan reads every test source, subfolders included (`MCPProvider/`), and fails on any such line that
-/// is not on the list below. The list is keyed by file and the line itself, with how many such lines that
-/// file may hold, so a new wait is caught even in a listed file, and a copy of a listed line is too. A line
-/// is allowed because it is bounded (named how), or because it is a gate the test releases itself, which
-/// hangs only a test that already failed (#1343 tracks a cancel-aware gate for those). Not `@MainActor`: a
-/// scan of every test file is heavy synchronous work (#642).
+/// This scan reads every test source, subfolders included (`MCPProvider/`), and fails on any such line that has no
+/// `// hang-ok: [<tag>] <reason>` marker, either trailing the line or on a comment-only line directly above it (#1388).
+/// A line is exempt because it is bounded (named how), or because no wait happens there. A marker whose line waits on nothing fails too, so none outlives its wait. Not
+/// `@MainActor`: a scan of every test file is heavy synchronous work (#642).
 @Suite("Tests never wait where .timeLimit can't end them (#1162, #1340)", .timeLimit(.minutes(1)))
 struct NoBareTaskValueAwaitScanTests {
-    /// `"<path under irisTests>: <trimmed line>"`: how many such lines the file may hold, and why each is safe.
-    static let allowed: [String: (count: Int, why: String)] = [
-        #"BlockingSpawnTests.swift: await withCheckedContinuation { (c: CheckedContinuation<Void, Never>) in"#: (1, #"[bounded] resumed after done.wait(), which BlockingSpawn.detached(timeoutSeconds: 10) signals"#),
-        #"BlockingSpawnTests.swift: DispatchQueue(label: "iris.test.wait").async { done.wait(); c.resume() }"#: (1, #"[bounded] done is signalled by BlockingSpawn.detached(timeoutSeconds: 10) completion"#),
-        #"BoundedWait.swift: let outcome = await firstOf(seconds) { await task.value }"#: (1, #"[bounded] inside firstOf's race"#),
-        #"BoundedWait.swift: let outcome = await firstOf(seconds) { await task.result }"#: (1, #"[bounded] inside firstOf's race (the throwing form)"#),
-        #"BoundedWait.swift: await withCheckedContinuation { first.install($0) }"#: (1, #"[bounded] firstOf: onCancel and the SuspendingClock timer both resolve"#),
-        #"BoundedWait.swift: await withCheckedContinuation { c in"#: (1, #"[bounded] MainActorSignal.wait: inside a Task raced by firstOf, and resumed with nil once the race ends"#),
-        #"BoundedWait.swift: let result = await firstOf(seconds) { await task.value }"#: (1, #"[bounded] MainActorSignal.wait: inside firstOf's race"#),
-        #"BoundedWait.swift: await withCheckedContinuation { (c: CheckedContinuation<Outcome, Never>) in"#: (1, #"[bounded] TestGate.park: a release, the cancel handler or the uptime deadline (DispatchQueue asyncAfter) resumes it (#1343)"#),
-        #"BoundedWait.swift: await withCheckedContinuation { (c: CheckedContinuation<Void, Never>) in"#: (1, #"[bounded] TestGate.arrivalsReached: only reached inside waitForArrivals' firstOf race, whose end cancels it (#1343)"#),
-        #"BoundedWait.swift: await withCheckedContinuation { continuation in"#: (1, #"[bounded] offPool: resumed after `blocking`, which its contract requires be bounded"#),
-        #"CLISignalTests.swift: static func park(_ gate: DispatchSemaphore) { gate.wait() }"#: (1, #"[exit-test child] never signalled by design; used only inside a `processExitsWith` child, which `_exit()`s"#),
-        #"ChangeTrackingTests.swift: await withCheckedContinuation { waiters.append($0) }"#: (1, #"[bounded] inside withTaskCancellationHandler whose onCancel resumes (via MainActor hop)"#),
-        #"ContainerExecGroupKillTests.swift: await withCheckedContinuation { done in"#: (1, #"[bounded] resumed after BlockingSpawn.run(timeoutSeconds:) on its own queue"#),
-        #"ConversationRotationTests.swift: try await bounded("rotation to finish") { await task.value }"#: (1, #"[bounded] inside bounded(), raced against a timer"#),
-        #"DirectoryReadRuleTests.swift: _ = await withCheckedContinuation { (continuation: CheckedContinuation<Bool, Never>) in"#: (1, #"[synchronous] resumed synchronously in the same closure"#),
-        #"ExitNowRealVMTests.swift: let outcome = await driver.value"#: (1, #"[bounded] drive() is bounded polling loops (600/600/300 iterations)"#),
-        #"GitHubIdentityMonitorTests.swift: await Task.detached { held.awaitStarted() }.value"#: (1, #"[bounded] `awaitStarted()` is bounded by `started.wait(timeout: 20)` (#1340)"#),
-        #"HeadlessModeTests.swift: sawInsideDetached = await Task.detached { HeadlessMode.isEnabled }.value"#: (1, #"[synchronous] detached body is a synchronous property read"#),
-        #"JobRetryTests.swift: return await withCheckedContinuation { continuation in"#: (1, #"[bounded] Signal.reach: detached timer resumes with false after `seconds`"#),
-        #"JobRetryTests.swift: await withCheckedContinuation { continuation in"#: (1, #"[bounded] `finished()`'s `FirstAnswer`, raced against a detached sleep timer"#),
-        #"JobRetryTests.swift: Task { answer.resolve(await task.value) }"#: (1, #"[bounded] inside finished()'s race; the timer resolves the outer wait"#),
-        #"KillEscalationPoolStarvationTests.swift: gate.wait()"#: (1, #"[bounded] PoolHold: `release()` signals on every exit of its time-bounded body"#),
-        #"LLMRetryTests.swift: #expect(await counter.value == 1)"#: (1, #"[not a task] actor Int property, not a Task"#),
-        #"RawHTMLSanitizerTests.swift: let task = Task<Void, Never> { await withCheckedContinuation { self.continuation = $0 } }"#: (1, #"[bounded] inside a Task awaited with value(of:within: 10)"#),
-        #"SandboxTimeoutTests.swift: await withCheckedContinuation { (done: CheckedContinuation<Void, Never>) in"#: (1, #"[bounded] resumed after CLIProcessRunner.enforce (fixed-grace synchronous ladder) on a dispatch thread"#),
-        #"SecretsUpdateTests.swift: group.wait()"#: (1, #"[bounded] group members are finite loops of local writes; no external event"#),
-        #"SessionStatusTests.swift: let watcher = Task { @MainActor in resumed.value = await ask.value }"#: (1, #"[bounded] the watcher is awaited through `value(of:)`, and the deny resumes `ask`"#),
-        #"StoreLockTests.swift: let reclaimed = await withCheckedContinuation { (c: CheckedContinuation<StoreLock.Claim?, Never>) in"#: (1, #"[bounded] resumed unconditionally after done.wait(timeout: 5) on a dispatch thread"#),
-        #"TimeoutTests.swift: let result = await caller.result"#: (4, #"[bounded] withTimeout returns on the caller's cancel, which each test sends (two before the body starts); the body is at most a 30 s sleep"#),
-        #"TimeoutTests.swift: await withCheckedContinuation { (c: CheckedContinuation<Void, Never>) in"#: (1, #"[bounded] resumed by DispatchQueue.asyncAfter(seconds) timer"#),
-        #"ViewerContentRulesTests.swift: try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<WKContentRuleList, Error>) in"#: (1, #"[completion] resumed by compileContentRuleList's completion, which WebKit calls with the list or an error"#),
-        #"ViewerZeroLookupTests.swift: let task = Task<Void, Never> { await withCheckedContinuation { self.continuation = $0 } }"#: (2, #"[bounded] inside a Task awaited with value(of:within: 10)"#),
-        #"MCPProvider/IrisMCPProviderServerTests.swift: try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in"#: (2, #"[completion] rawConnect's is inside a Task awaited with value(of:within: 10); send's is resumed by .contentProcessed, which Network calls once the bytes are taken or the connection fails"#),
-        #"MCPProvider/IrisMCPProviderServerTests.swift: await withCheckedContinuation { (continuation: CheckedContinuation<String?, Never>) in"#: (1, #"[bounded] OneShotResumer raced against asyncAfter(timeout)"#),
-        #"MCPProvider/LoopbackHTTPListenerTests.swift: let connected = await withCheckedContinuation { (continuation: CheckedContinuation<Bool, Never>) in"#: (1, #"[bounded] OneShotResumer raced against asyncAfter(3)"#),
-        #"MCPProvider/LoopbackHTTPListenerTests.swift: let outcome = await withCheckedContinuation { (continuation: CheckedContinuation<Bool, Never>) in"#: (1, #"[bounded] OneShotResumer raced against asyncAfter(3)"#),
-        #"MCPProvider/LoopbackHTTPListenerTests.swift: try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in"#: (2, #"[completion] rawConnect's is inside a Task awaited with value(of:within: 10); send's is resumed by .contentProcessed, which Network calls once the bytes are taken or the connection fails"#),
-        #"MCPProvider/LoopbackHTTPListenerTests.swift: await withCheckedContinuation { (continuation: CheckedContinuation<String?, Never>) in"#: (1, #"[bounded] OneShotResumer raced against asyncAfter(timeout)"#),
-        #"MCPProvider/LoopbackHTTPListenerTests.swift: await withCheckedContinuation { (continuation: CheckedContinuation<Bool, Never>) in"#: (1, #"[bounded] OneShotResumer raced against asyncAfter(timeout)"#),
-    ]
+    /// Every marker says which kind of safe its line is, so a reviewer can check each against its tag: `bounded`
+    /// names the timer, race or bounded wait that ends it; `completion` is a system completion handler that is
+    /// called with a result or an error; `not a task`, `synchronous` and `exit-test child` say why no wait exists.
+    /// (`gate #1343`, a test-released gate, went with #1343's last gate: a test-held stub is a `TestGate` now.)
+    static let reasonTags: Set<String> = ["bounded", "completion", "not a task", "synchronous", "exit-test child"]
 
-    /// Every allowlisted row says which kind of safe it is, so a reviewer can check each against its tag: `[bounded]`
-    /// names the timer, race or bounded wait that ends it; `[gate #1343]` is a test-released gate tracked by #1343;
-    /// `[completion]` is a system completion handler that is called with a result or an error; `[not a task]`, `[synchronous]`
-    /// and `[exit-test child]` say why no wait exists. A row covering same-text lines of different kinds carries the weaker tag.
-    static let reasonTags = ["[bounded] ", "[gate #1343] ", "[completion] ", "[not a task] ", "[synchronous] ", "[exit-test child] "]
+    /// `// hang-ok: [<tag>] <reason>`: the tag, and the reason with surrounding space trimmed.
+    private static let marker = try! NSRegularExpression(pattern: #"//\s*hang-ok:\s*\[([^\]]*)\]\s*(.*)$"#)
 
     private static let continuation = try! NSRegularExpression(pattern: #"\bwith(Checked|Unsafe)(Throwing)?Continuation\b"#)
     private static let blockingWait = try! NSRegularExpression(pattern: #"\.wait\(\s*\)|\.wait\([^)]*\bdistantFuture\b"#)
@@ -93,29 +51,50 @@ struct NoBareTaskValueAwaitScanTests {
         return out
     }
 
-    /// Every flagged line in `text`, as `(key, report)`; `file` is the path under `irisTests`.
-    static func flagged(in text: String, file: String) -> [(key: String, report: String)] {
-        text.split(separator: "\n", omittingEmptySubsequences: false).enumerated().compactMap { n, raw in
-            let line = String(raw)
-            let kinds = kinds(of: line)
-            guard !kinds.isEmpty else { return nil }
-            let trimmed = line.trimmingCharacters(in: .whitespaces)
-            return ("\(file): \(trimmed)", "\(file):\(n + 1): \(kinds.joined(separator: ", ")): \(trimmed)")
-        }
+    /// The marker on `line`, if it has one: where it starts, its tag, and its reason.
+    static func marker(in line: String) -> (at: String.Index, tag: String, reason: String)? {
+        guard let m = marker.firstMatch(in: line, range: NSRange(line.startIndex..., in: line)),
+              let whole = Range(m.range, in: line), let tag = Range(m.range(at: 1), in: line),
+              let reason = Range(m.range(at: 2), in: line) else { return nil }
+        return (whole.lowerBound, String(line[tag]), line[reason].trimmingCharacters(in: .whitespaces))
     }
 
-    /// The offences across `files` (path under `irisTests` → contents): any line not on `allowed`, and any
-    /// listed line that occurs more often than its count.
-    static func offences(_ files: [(path: String, text: String)], allowed: [String: (count: Int, why: String)] = allowed) -> [String] {
-        var seen: [String: [String]] = [:]
+    /// The offences in one file's `text` (`file` is the path under `irisTests`): a flagged line with no marker, a
+    /// marker with an unknown tag or no reason, and a marker that exempts no flagged line.
+    static func offences(in text: String, file: String) -> [String] {
+        let lines = text.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+        let markers = lines.map { marker(in: $0) }
+        // A trailing marker's own text isn't code: its reason may well name a wait.
+        let code = zip(lines, markers).map { line, mark in mark.map { String(line[..<$0.at]) } ?? line }
+        let commentOnly = code.map { $0.trimmingCharacters(in: .whitespaces).isEmpty }
+        var out: [String] = []
+        for (n, line) in lines.enumerated() {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if let mark = markers[n] {
+                if !reasonTags.contains(mark.tag) { out.append("\(file):\(n + 1): unknown hang-ok tag [\(mark.tag)]: \(trimmed)") }
+                if mark.reason.isEmpty { out.append("\(file):\(n + 1): hang-ok marker with no reason: \(trimmed)") }
+                let exempts = commentOnly[n] ? n + 1 < lines.count && !kinds(of: code[n + 1]).isEmpty : !kinds(of: code[n]).isEmpty
+                if !exempts { out.append("\(file):\(n + 1): hang-ok marker on no wait: \(trimmed)") }
+            }
+            let kinds = kinds(of: code[n])
+            guard !kinds.isEmpty else { continue }
+            let marked = markers[n] != nil || (n > 0 && markers[n - 1] != nil && commentOnly[n - 1])
+            if !marked { out.append("\(file):\(n + 1): \(kinds.joined(separator: ", ")): \(trimmed)") }
+        }
+        return out
+    }
+
+    /// The offences across `files` (path under `irisTests` → contents), and how many flagged lines they hold.
+    static func scan(_ files: [(path: String, text: String)]) -> (offences: [String], flagged: Int) {
+        var offences: [String] = [], flagged = 0
         for file in files {
-            for f in flagged(in: file.text, file: file.path) { seen[f.key, default: []].append(f.report) }
+            offences += Self.offences(in: file.text, file: file.path)
+            flagged += file.text.split(separator: "\n", omittingEmptySubsequences: false).filter { line in
+                let line = String(line)
+                return !kinds(of: marker(in: line).map { String(line[..<$0.at]) } ?? line).isEmpty
+            }.count
         }
-        return seen.keys.sorted().flatMap { key -> [String] in
-            let reports = seen[key]!
-            guard let entry = allowed[key] else { return reports }
-            return reports.count > entry.count ? ["\(reports.count) such lines, \(entry.count) allowed: \(reports[0])"] : []
-        }
+        return (offences, flagged)
     }
 
     static let dir = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
@@ -131,31 +110,14 @@ struct NoBareTaskValueAwaitScanTests {
         return out
     }
 
-    @Test("no test waits where .timeLimit can't end it, outside the listed lines")
+    @Test("no test waits where .timeLimit can't end it, outside the lines marked hang-ok")
     func noUnboundedWait() throws {
         let files = try Self.testSources()
         #expect(files.count > 100, "the scan found the test sources")
         #expect(files.contains { $0.path.hasPrefix("MCPProvider/") }, "the scan reached a subfolder")
-        let found = Self.offences(files)
-        #expect(found.isEmpty, "a wait .timeLimit can't end (bound it, e.g. `value(of:within:)`, or list it with why, #428): \(found)")
-    }
-
-    @Test("every listed line still exists, so the list can't quietly grow stale")
-    func noStaleEntries() throws {
-        var seen: [String: Int] = [:]
-        for file in try Self.testSources() {
-            for f in Self.flagged(in: file.text, file: file.path) { seen[f.key, default: 0] += 1 }
-        }
-        let stale = Self.allowed.filter { seen[$0.key] != $0.value.count }.map { "\($0.key) (listed \($0.value.count), found \(seen[$0.key] ?? 0))" }
-        #expect(stale.isEmpty, "allowlist rows whose line count no longer matches: \(stale.sorted())")
-    }
-
-    /// Planner's review: an exemption says which kind of safe it is, never only that it was already there.
-    @Test("every listed line carries a reason tag")
-    func everyRowIsTagged() {
-        for (key, entry) in Self.allowed {
-            #expect(Self.reasonTags.contains { entry.why.hasPrefix($0) }, "\(key) has no reason tag: \(entry.why)")
-        }
+        let (found, flagged) = Self.scan(files)
+        #expect(flagged > 0, "the scan flagged the marked lines")
+        #expect(found.isEmpty, "a wait .timeLimit can't end (bound it, e.g. `value(of:within:)`, or mark it `// hang-ok: [<tag>] <reason>`, #428): \(found)")
     }
 
     @Test("the scan sees each shape, and ignores a bounded wait, an argument's .value and a comment")
@@ -173,12 +135,22 @@ struct NoBareTaskValueAwaitScanTests {
         }
     }
 
-    @Test("a listed line is counted: one more copy of it fails, and so does an unlisted one")
-    func countsAndKeys() {
-        let allowed: [String: (count: Int, why: String)] = ["A.swift: sema.wait()": (1, "x")]
-        #expect(Self.offences([("A.swift", "sema.wait()\n")], allowed: allowed).isEmpty)
-        #expect(Self.offences([("A.swift", "sema.wait()\nsema.wait()\n")], allowed: allowed).count == 1)
-        #expect(Self.offences([("B.swift", "sema.wait()\n")], allowed: allowed).count == 1, "keyed by file too")
-        #expect(Self.offences([("A.swift", "other.wait()\n")], allowed: allowed).count == 1, "and by the line")
+    @Test("a hang-ok marker exempts its own line or the one below it, nothing further, and only with a known tag and a reason")
+    func markers() {
+        func offences(_ text: String) -> [String] { Self.offences(in: text, file: "A.swift") }
+        #expect(offences("sema.wait() // hang-ok: [bounded] signalled by the timer\n").isEmpty, "trailing")
+        #expect(offences("// hang-ok: [bounded] signalled by the timer\nsema.wait()\n").isEmpty, "directly above")
+        #expect(offences("sema.wait()\n").count == 1, "an unmarked flagged line fails")
+        #expect(offences("// hang-ok: [bounded] signalled by the timer\n\nsema.wait()\n").count == 2,
+                "a marker two lines up exempts nothing, and is itself on no wait")
+        #expect(offences("sema.wait() // hang-ok: [fine] trust me\n") == ["A.swift:1: unknown hang-ok tag [fine]: sema.wait() // hang-ok: [fine] trust me"])
+        #expect(offences("sema.wait() // hang-ok: [bounded]   \n").count == 1, "a marker needs a reason")
+        #expect(offences("let x = 1 // hang-ok: [bounded] it was a wait once\n").count == 1, "an orphan trailing marker fails")
+        #expect(offences("// hang-ok: [bounded] it was a wait once\nlet x = 1\n").count == 1, "an orphan marker above fails")
+        #expect(offences("ok() // hang-ok: [bounded] races `await task.value` against a timer\n").count == 1,
+                "a trailing marker's reason isn't scanned as code, so naming a wait doesn't make it one")
+        for tag in Self.reasonTags {
+            #expect(offences("sema.wait() // hang-ok: [\(tag)] a reason\n").isEmpty, "\(tag)")
+        }
     }
 }

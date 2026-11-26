@@ -113,6 +113,7 @@ struct ExitNowRealVMTests {
             stop.exit(code: code)
             while true { pause() }
         }
+        // hang-ok: [bounded] drive() is bounded polling loops (600/600/300 iterations)
         let outcome = await driver.value
         var deleted = false
         if let name = outcome.name {

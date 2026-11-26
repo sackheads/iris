@@ -18,6 +18,7 @@ struct BoundedWaitTimeout: Error, CustomStringConvertible {
 /// behind, which is fine for a test that has already failed.
 func value<T: Sendable>(of task: Task<T, Never>, within seconds: Double = 30,
                         sourceLocation: SourceLocation = #_sourceLocation) async throws -> T {
+    // hang-ok: [bounded] inside firstOf's race
     let outcome = await firstOf(seconds) { await task.value }
     guard let outcome else {
         task.cancel()
@@ -30,6 +31,7 @@ func value<T: Sendable>(of task: Task<T, Never>, within seconds: Double = 30,
 /// The throwing-task form: rethrows what the task threw, and times out as above.
 func value<T: Sendable>(of task: Task<T, any Error>, within seconds: Double = 30,
                         sourceLocation: SourceLocation = #_sourceLocation) async throws -> T {
+    // hang-ok: [bounded] inside firstOf's race (the throwing form)
     let outcome = await firstOf(seconds) { await task.result }
     guard let outcome else {
         task.cancel()
@@ -53,6 +55,7 @@ private func firstOf<T: Sendable>(_ seconds: Double, _ operation: @escaping @Sen
     }
     defer { work.cancel(); timer.cancel() }
     return await withTaskCancellationHandler {
+        // hang-ok: [bounded] firstOf: onCancel and the SuspendingClock timer both resolve
         await withCheckedContinuation { first.install($0) }
     } onCancel: {
         first.resolve(nil)
@@ -109,10 +112,12 @@ final class MainActorSignal<Value: Sendable> {
               sourceLocation: SourceLocation = #_sourceLocation) async -> Value? {
         if let answer { return answer }
         let task = Task { @MainActor [self] () -> Value? in
+            // hang-ok: [bounded] MainActorSignal.wait: inside a Task raced by firstOf, and resumed with nil once the race ends
             await withCheckedContinuation { c in
                 if let answer { c.resume(returning: answer) } else { continuation = c }
             }
         }
+        // hang-ok: [bounded] MainActorSignal.wait: inside firstOf's race
         let result = await firstOf(seconds) { await task.value }
         if result == nil, recordsTimeout {
             Issue.record("the signal was not settled within \(seconds)s", sourceLocation: sourceLocation)
@@ -127,6 +132,7 @@ final class MainActorSignal<Value: Sendable> {
 /// `usleep` poll, `LiveProcessGroups.waitUntilEmpty`) never parks a cooperative thread: CI's pool
 /// is 3 threads. `blocking` must be bounded itself, since the continuation waits for it.
 func offPool<T: Sendable>(_ blocking: @escaping @Sendable () -> T) async -> T {
+    // hang-ok: [bounded] offPool: resumed after `blocking`, which its contract requires be bounded
     await withCheckedContinuation { continuation in
         DispatchQueue(label: "iris.tests.offpool").async { continuation.resume(returning: blocking()) }
     }
@@ -256,6 +262,7 @@ final class TestGate: @unchecked Sendable {
     private func arrivalsReached(_ count: Int) async {
         let id = lock.withLock { nextID += 1; return nextID }
         await withTaskCancellationHandler {
+            // hang-ok: [bounded] TestGate.arrivalsReached: only reached inside waitForArrivals' firstOf race, whose end cancels it (#1343)
             await withCheckedContinuation { (c: CheckedContinuation<Void, Never>) in
                 let now = lock.withLock { () -> Bool in
                     if arrived >= count || Task.isCancelled { return true }
@@ -274,6 +281,7 @@ final class TestGate: @unchecked Sendable {
     private func park(honouringCancel: Bool = true) async -> Outcome {
         let id = lock.withLock { nextID += 1; return nextID }
         return await withTaskCancellationHandler {
+            // hang-ok: [bounded] TestGate.park: a release, the cancel handler or the uptime deadline (DispatchQueue asyncAfter) resumes it (#1343)
             await withCheckedContinuation { (c: CheckedContinuation<Outcome, Never>) in
                 let (now, arrivedWaiters) = lock.withLock { () -> (Outcome?, [CheckedContinuation<Void, Never>]) in
                     arrived += 1

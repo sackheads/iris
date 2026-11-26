@@ -117,7 +117,9 @@ struct BlockingSpawnTests {
             done.signal()
         }
         #expect(TestClock.seconds(since: started) < 0.3)
+        // hang-ok: [bounded] resumed after done.wait(), which BlockingSpawn.detached(timeoutSeconds: 10) signals
         await withCheckedContinuation { (c: CheckedContinuation<Void, Never>) in
+            // hang-ok: [bounded] done is signalled by BlockingSpawn.detached(timeoutSeconds: 10) completion
             DispatchQueue(label: "iris.test.wait").async { done.wait(); c.resume() }
         }
         #expect(box.lock.withLock { box.status } == .some(4))

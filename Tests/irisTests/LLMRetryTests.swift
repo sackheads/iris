@@ -93,6 +93,7 @@ struct LLMRetryTests {
             }
         } catch { thrown = error }
         #expect(thrown is StreamInterruptedError)
+        // hang-ok: [not a task] actor Int property, not a Task
         #expect(await counter.value == 1)
     }
 }

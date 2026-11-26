@@ -289,6 +289,7 @@ struct SandboxTimeoutTests {
         let answered = Locked<Error?>(nil)
 
         // On a dispatch thread, as in production: the ladder blocks its thread for the grace.
+        // hang-ok: [bounded] resumed after CLIProcessRunner.enforce (fixed-grace synchronous ladder) on a dispatch thread
         await withCheckedContinuation { (done: CheckedContinuation<Void, Never>) in
             DispatchQueue.global().async {
                 CLIProcessRunner.enforce({ CancellationError() }, on: child,

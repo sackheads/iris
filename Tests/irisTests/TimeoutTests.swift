@@ -105,6 +105,7 @@ struct TimeoutTests {
         try? await Task.sleep(nanoseconds: 50_000_000)
         let started = TestClock.now()
         caller.cancel()
+        // hang-ok: [bounded] withTimeout returns on the caller's cancel, which each test sends (two before the body starts); the body is at most a 30 s sleep
         let result = await caller.result
         #expect(TestClock.seconds(since: started) < 10, "the cancel, not the 30 s sleep or deadline")
         #expect(throws: CancellationError.self) { try result.get() }
@@ -122,6 +123,7 @@ struct TimeoutTests {
         try? await Task.sleep(nanoseconds: 50_000_000)
         let started = TestClock.now()
         caller.cancel()
+        // hang-ok: [bounded] withTimeout returns on the caller's cancel, which each test sends (two before the body starts); the body is at most a 30 s sleep
         let result = await caller.result
         #expect(TestClock.seconds(since: started) < 10, "the cancel, not the 30 s operation or deadline")
         #expect(throws: CancellationError.self) { try result.get() }
@@ -137,6 +139,7 @@ struct TimeoutTests {
             }
         }
         let started = TestClock.now()
+        // hang-ok: [bounded] withTimeout returns on the caller's cancel, which each test sends (two before the body starts); the body is at most a 30 s sleep
         let result = await caller.result
         #expect(TestClock.seconds(since: started) < 10, "the cancel, not the 30 s operation or deadline")
         #expect(throws: CancellationError.self) { try result.get() }
@@ -154,6 +157,7 @@ struct TimeoutTests {
                 return 1
             }
         }
+        // hang-ok: [bounded] withTimeout returns on the caller's cancel, which each test sends (two before the body starts); the body is at most a 30 s sleep
         let result = await caller.result
         #expect(throws: CancellationError.self) { try result.get() }
         // Bounded grace for a wrongly started body to show up before counting.
@@ -193,6 +197,7 @@ struct TimeoutTests {
 
     /// Suspends for `seconds` on a continuation nothing cancels, like a native inference call.
     static func ignoresCancellation(seconds: Double) async {
+        // hang-ok: [bounded] resumed by DispatchQueue.asyncAfter(seconds) timer
         await withCheckedContinuation { (c: CheckedContinuation<Void, Never>) in
             DispatchQueue.global().asyncAfter(deadline: .now() + seconds) { c.resume() }
         }
