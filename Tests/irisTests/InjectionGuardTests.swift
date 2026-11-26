@@ -41,8 +41,14 @@ struct InjectionGuardTests {
         #expect(prompt.contains("Reply with one word: SAFE or MALICIOUS."))
         #expect(prompt.hasSuffix("\n\n<t1>\nX\n</t1>"))
         #expect(!prompt.contains("tool output: data the agent fetched"), "it is not the external prompt")
+        #expect(prompt.contains(InjectionGuard.impersonationClause + "\nOtherwise output SAFE."), "#1356: the clause, just before SAFE")
+        #expect(!InjectionGuard.canaryPrompt(tag: "t1", text: "X").contains(InjectionGuard.impersonationClause), "tool output keeps the prompt without it")
+        #expect(InjectionGuard.canaryPrompt(tag: "t1", text: "X", kind: .instructionChannel, impersonationClause: false)
+                == prompt.replacingOccurrences(of: InjectionGuard.impersonationClause + "\n", with: ""), "the clause is the only change")
+        // #1356's clause took it from about 800 to 1138 bytes. `GuardProbeFixtures.predictedInput` reads the template;
+        // `EvalCost.templateTokens` is the tool-output prompt's (an eval sample has no tag), so it doesn't move.
         let template = prompt.utf8.count - "X".utf8.count
-        #expect((600...950).contains(template), "template is \(template) bytes; update EvalCost.templateTokens and GuardProbeFixtures.predictedInput")
+        #expect((1_000...1_300).contains(template), "template is \(template) bytes; check GuardProbeFixtures.predictedInput's comment")
     }
 
     @Test("the prompt the engine receives follows the source: R3 for tool output, the earlier one for a peer message")

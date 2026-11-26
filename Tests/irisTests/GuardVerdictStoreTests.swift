@@ -66,7 +66,7 @@ struct GuardVerdictStoreTests {
     /// `runs` stands in for the canary engine's sampling (2: Ollama or cloud); nil asks the real engine mapping.
     private func store(runs: Int? = nil, seen: Seen? = nil, capacity: Int = GuardVerdictStore.defaultCapacity) -> GuardVerdictStore {
         let version = version, clock = clock
-        return GuardVerdictStore(file: storeFile, now: { clock.now }, version: { _ in version.current }, runsToKeep: { fp in
+        return GuardVerdictStore(file: storeFile, now: { clock.now }, version: { _, _ in version.current }, runsToKeep: { fp in
             seen?.engine = fp.promptGuardEngine
             return runs ?? GuardVerdictStore.runsToKeep(fp)
         }, capacity: capacity)
@@ -413,7 +413,7 @@ struct GuardVerdictStoreTests {
         try src.ensureDirectories()
         _ = try ConversationStore.onDisk(at: src.conversationsDB)
         let version = version, clock = clock
-        GuardVerdictStore(file: src.configDir.appendingPathComponent("guard-verdicts.json"), now: { clock.now }, version: { _ in version.current })
+        GuardVerdictStore(file: src.configDir.appendingPathComponent("guard-verdicts.json"), now: { clock.now }, version: { _, _ in version.current })
             .recordSafe("k", tier2Skipped: true)
         _ = try DevHomeSeeder.seed(from: src, to: dst, identity: .dev,
                                    sourceKeychain: .init(serviceSuffix: ""), destKeychain: .init(serviceSuffix: ".dev"))
@@ -437,9 +437,62 @@ struct GuardVersionTests {
 
     @Test("the version reads both canary prompts and the strip's rules as they are")
     func sources() {
-        #expect(GuardVersion.promptSource.contains(InjectionGuard.canaryPrompt(tag: "TAG", text: "TEXT", kind: .external)))
-        #expect(GuardVersion.promptSource.contains(InjectionGuard.canaryPrompt(tag: "TAG", text: "TEXT", kind: .instructionChannel)))
+        let external = GuardVersion.promptSource(.external)
+        #expect(external.contains(InjectionGuard.canaryPrompt(tag: "TAG", text: "TEXT", kind: .external)))
+        #expect(external.contains(InjectionGuard.canaryPrompt(tag: "TAG", text: "TEXT", kind: .instructionChannel, impersonationClause: false)))
         #expect(PromptInjectionGuard.malRolePatterns.allSatisfy(PromptInjectionGuard.ruleSource.contains))
+    }
+
+    private final class Kinds: @unchecked Sendable {
+        private let lock = NSLock()
+        private var kinds: [InjectionGuard.CanaryPromptKind] = []
+        var seen: [InjectionGuard.CanaryPromptKind] { lock.withLock { kinds } }
+        func add(_ k: InjectionGuard.CanaryPromptKind) { lock.withLock { kinds.append(k) } }
+    }
+    private struct Safe: AuxiliaryInferenceEngine {
+        func loadModel(config: AuxiliaryModelConfig) async throws {}
+        func unloadModel() async {}
+        func generate(prompt: String, jsonSchema: String?) async throws -> String { "SAFE" }
+    }
+    private struct Passing: CoreMLModelProtocol {
+        func evaluate(text: String) async throws -> Double { 0 }
+        func tokenCount(_ text: String) -> Int { max(1, text.utf8.count / 4) }
+    }
+
+    /// #1356 (dev-2's #1411 note): a kept read asks for the version of the prompt its own source is judged under, so a
+    /// store handed to a message channel would key with the clause rather than share tool output's version.
+    @Test("a kept read's version is asked for the prompt its source is judged under (#1356)")
+    func versionFollowsTheSource() async {
+        let file = FileManager.default.temporaryDirectory.appendingPathComponent("iris-1356-\(UUID().uuidString).json")
+        defer { try? FileManager.default.removeItem(at: file) }
+        let kinds = Kinds()
+        let store = GuardVerdictStore(file: file, version: { _, kind in kinds.add(kind); return "v" })
+        for tag in ["tool_output_read_file", "system_event_peer_session", "inbox_emit"] {
+            await AuxiliaryModelManager.$scopedEngines.withValue(["canary": Safe()]) {
+                await CoreMLEvaluator.$scopedModel.withValue(.init(Passing())) {
+                    _ = await InjectionGuard.sanitizeUntrustedDisplay("a note \(UUID().uuidString)", contextTag: tag, maxTier: .tier3_canary,
+                                                                      protectionEnabled: true, verdicts: store)
+                }
+            }
+        }
+        #expect(kinds.seen == [.external, .instructionChannel, .instructionChannel])
+    }
+
+    /// #1356: the clause went on the message channels' prompt only, so a library or artifacts read (tool output,
+    /// judged under `.external`) keeps the version it had, and every verdict kept before the clause still serves.
+    @Test("the impersonation clause leaves a library read's version as it was, and changes a message channel's (#1356)")
+    func clauseKeepsLibraryVersions() {
+        let external = GuardVersion.promptSource(.external)
+        #expect(!external.contains(InjectionGuard.impersonationClause))
+        // The bytes `promptSource` hashed before #1356 (main at a559a408), so any edit to them shows here as the
+        // invalidation of every kept verdict it is.
+        #expect(GuardVersion.make(prompts: external, rules: "", build: "", model: "") == "e49309de57bfe4d23ba42abde9513df6ba1866fde2aee2f2d41853ad5911b1f7")
+        let channel = GuardVersion.promptSource(.instructionChannel)
+        #expect(channel.contains(InjectionGuard.impersonationClause) && channel != external)
+        #expect(GuardVersion.make(prompts: channel, rules: "r", build: "b", model: "m")
+                != GuardVersion.make(prompts: external, rules: "r", build: "b", model: "m"), "a kept read on a message channel is keyed with the clause")
+        // And a kept read is keyed by the prompt its source is judged under: read_file's tag is tool output.
+        #expect(InjectionGuard.canaryPromptKind(source: "tool_output_read_file") == .external)
     }
 
     @Test("Ollama's digest names the model: the exact tag, or :latest for a bare name; nothing when it doesn't say")

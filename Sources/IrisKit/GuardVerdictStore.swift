@@ -48,11 +48,14 @@ final class GuardVerdictStore: @unchecked Sendable {
     private let file: URL
     private let lock = NSLock()
     private let now: @Sendable () -> Date
-    let version: @Sendable (InjectionGuard.GuardConfigFingerprint) async -> String?
+    /// The version for a read judged under that canary prompt kind (#1356: the clause joins only the instruction-channel one's).
+    let version: @Sendable (InjectionGuard.GuardConfigFingerprint, InjectionGuard.CanaryPromptKind) async -> String?
     let runsToKeep: @Sendable (InjectionGuard.GuardConfigFingerprint) -> Int
 
     init(file: URL, now: @escaping @Sendable () -> Date = { Date() },
-         version: @escaping @Sendable (InjectionGuard.GuardConfigFingerprint) async -> String? = { await GuardVersion.current($0) },
+         version: @escaping @Sendable (InjectionGuard.GuardConfigFingerprint, InjectionGuard.CanaryPromptKind) async -> String? = {
+             await GuardVersion.current($0, kind: $1)
+         },
          runsToKeep: @escaping @Sendable (InjectionGuard.GuardConfigFingerprint) -> Int = GuardVerdictStore.runsToKeep,
          capacity: Int = GuardVerdictStore.defaultCapacity) {
         self.file = file
@@ -147,15 +150,20 @@ enum GuardVersion {
         return SHA256.hash(data: Data(joined.utf8)).map { String(format: "%02x", $0) }.joined()
     }
 
-    static func current(_ fingerprint: InjectionGuard.GuardConfigFingerprint) async -> String? {
-        make(prompts: promptSource, rules: PromptInjectionGuard.ruleSource, build: build,
+    static func current(_ fingerprint: InjectionGuard.GuardConfigFingerprint,
+                        kind: InjectionGuard.CanaryPromptKind = .external) async -> String? {
+        make(prompts: promptSource(kind), rules: PromptInjectionGuard.ruleSource, build: build,
              model: await modelIdentity(fingerprint))
     }
 
-    /// Both canary prompts, with fixed stand-ins for the tag and the text.
-    static var promptSource: String {
-        [InjectionGuard.CanaryPromptKind.external, .instructionChannel]
-            .map { InjectionGuard.canaryPrompt(tag: "TAG", text: "TEXT", kind: $0) }.joined(separator: "\u{0}")
+    /// Both canary prompts as they were before #1356, with fixed stand-ins for the tag and the text, plus the
+    /// impersonation clause for a read judged under the instruction-channel prompt. A library or artifacts read is
+    /// tool output, judged under `.external`, so its version is byte for byte what it was and the clause kept every
+    /// such verdict; a kept read on a message channel would miss when the clause changes (#1356).
+    static func promptSource(_ kind: InjectionGuard.CanaryPromptKind) -> String {
+        let prompts = [InjectionGuard.CanaryPromptKind.external, .instructionChannel]
+            .map { InjectionGuard.canaryPrompt(tag: "TAG", text: "TEXT", kind: $0, impersonationClause: false) }
+        return (kind == .instructionChannel ? prompts + [InjectionGuard.impersonationClause] : prompts).joined(separator: "\u{0}")
     }
 
     /// The app's version and build, and the executable's size and date, so an unbumped dev rebuild misses too.
