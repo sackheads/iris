@@ -66,7 +66,7 @@ struct GuardProbeFixturesTests {
     @Test("with no --think, the probe's canary asks for thinking exactly as the product's canary does (#1415)")
     func thinkDefaultsToTheProducts() throws {
         let args = ["iris", "--guard-probe", "--fixtures", "fx", "--model", "ollama:gemma4:12b", "--arm", "a", "--out", "o"]
-        let f = try #require(try GuardProbeCLI.parse(args)?.get()?.fixtures)
+        let f = try #require(try GuardProbeCLI.parse(args)?.get().fixtures)
         #expect(f.think == .product)
         #expect(GuardProbeFixtures.suppressThinking(f.think) == AuxiliaryModelManager.suppressesThinking(role: CloudAuxiliaryEngine.canaryRole))
         #expect(GuardProbeFixtures.suppressThinking(f.think), "the product asks a thinking canary not to think (#783)")
