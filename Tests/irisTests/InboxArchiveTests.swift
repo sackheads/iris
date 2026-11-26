@@ -110,7 +110,7 @@ struct InboxArchiveTests {
         try s.inbox.setArchived(itemId: it.id, true, at: Date(timeIntervalSince1970: 3_000))
         let result = try s.inbox.appendFollowup(threadId: "t-1", fromChain: "dev-1", author: "dev-1", body: "One more thing",
                                                 at: Date(timeIntervalSince1970: 4_000))
-        #expect(result == .success(InboxFollowupResult(itemId: it.id)))
+        #expect(result == .success(InboxFollowupResult(itemId: it.id, reopened: true)), "an answered item reopened, so Brian is told (#920 slice 5)")
         let after = try #require(try s.inbox.item(id: it.id))
         #expect(after.state == .open && after.archivedAt == nil)
         #expect(try s.inbox.openItems().map(\.id) == [it.id])
