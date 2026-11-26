@@ -394,9 +394,12 @@ struct RunJobURLTests {
                                   usageMetadata: nil)
         }
 
-        /// Returns once `n` calls have arrived, or fails the test (#435).
+        /// Returns once `n` calls have arrived, or fails the test (#435). Every caller waits here to hold a run in
+        /// flight, so a call must still be parked: counting arrivals alone passed with a turnstile that never held (#1383).
         func waitForArrivals(_ n: Int, sourceLocation: SourceLocation = #_sourceLocation) async throws {
             try await turnstile.waitForArrivals(n, sourceLocation: sourceLocation)
+            #expect(turnstile.waiting >= 1, "arrival \(n) left no call parked, so no run is held in flight",
+                    sourceLocation: sourceLocation)
         }
     }
 
