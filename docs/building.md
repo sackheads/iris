@@ -190,7 +190,7 @@ frames, the way production judges it (#1356). `--frame-peer` does that from the 
 from a fixed sender (`"iris-dev-2"`, msg `m-1`), and the run's header names the frame. A row that
 already starts with a frame is refused, so a set is never framed twice (#1365).
 `Tests/irisTests/Fixtures/peer-structure-1329` holds bare bodies, for `--frame-peer`.
-`peer-ack-1356` and `role-shapes-1361` were framed by hand when they were written, so they run without the flag. Its topic
+`peer-ack-1356` and `role-shapes-1361` were framed by hand when they were written, so they run without the flag. `peer-ack-1356`'s topic
 (`peer_topic`) and inbox (`inbox_emit`) rows are what those channels judge either way: a topic
 message bare, at publish, and an inbox item's fields joined, at raise.
 
