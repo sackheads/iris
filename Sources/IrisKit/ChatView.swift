@@ -2094,6 +2094,13 @@ struct ApprovalBannerView: View {
                     }
                     .help("Approve, and let \(request.toolName) run without asking for the rest of this conversation.")
                 }
+                // #1397 part 2: a `local` library read no on-device canary could check. Until restart only, never saved.
+                if let scope = request.guardBypass {
+                    Button(action: { onResolve(.bypassGuardUntilRestart, .proposed) }) {
+                        Text(scope == .allOutsideReads ? "Skip for All Reads Until Restart" : "Skip for This Library Until Restart")
+                    }
+                    .help("Read without the Tier 3 check, and don't ask again until Iris restarts.")
+                }
 
                 Spacer()
                 
@@ -2103,7 +2110,7 @@ struct ApprovalBannerView: View {
                 .keyboardShortcut(.cancelAction)
                 
                 Button(action: { onResolve(.approve, .proposed) }) {
-                    Text("Approve Once")
+                    Text(request.guardBypass == nil ? "Approve Once" : "Read Once Unchecked")
                 }
                 .buttonStyle(.borderedProminent)
                 .keyboardShortcut(.defaultAction)

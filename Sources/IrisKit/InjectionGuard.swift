@@ -180,6 +180,9 @@ public struct InjectionGuard {
         /// invisible/control character removed, a tag or delimiter neutralized, a marker deleted).
         /// Zero for every other caller. Cached with the verdict, so a cache hit still says so.
         var divergedLines: Int = 0
+        /// #1397 part 2: set when a library on `local` was blocked because no on-device canary could run, with
+        /// the cause if one was recorded (empty when none). The read site may offer the person a bypass.
+        var onDeviceUnavailable: String? = nil
     }
 
     private final class SanitizationCache: @unchecked Sendable {
@@ -324,13 +327,17 @@ public struct InjectionGuard {
 
     /// #1397: what a library on `local` says when no on-device canary could judge it, naming the cause, so a job
     /// that failed on it says why.
-    private static func onDeviceBlockMarker(_ fingerprint: GuardConfigFingerprint) async -> String {
+    /// #1397 part 2: why no on-device canary could judge, for the block and the bypass prompt: the last failure
+    /// recorded for the role that ran.
+    static func onDeviceCause(_ fingerprint: GuardConfigFingerprint) async -> String? {
         let globalRole = fingerprint.canaryRole == CloudAuxiliaryEngine.canaryRole
-        let cause = await MainActor.run {
+        return await MainActor.run {
             let health = GuardTierHealth.current
-            return globalRole
-                ? health.libraryCanaryFailure ?? health.tier3Failure : health.libraryCanaryFailure
+            return globalRole ? health.libraryCanaryFailure ?? health.tier3Failure : health.libraryCanaryFailure
         }
+    }
+
+    private static func onDeviceBlockMarker(_ fingerprint: GuardConfigFingerprint, cause: String?) -> String {
         let why = fingerprint.onDeviceForUnreadableFile
             ? "Iris's library list (config/library-guard.json) can't be read, so every tool result is checked on this Mac only"
             : "this library is set to on-device checks only"
@@ -588,6 +595,25 @@ public struct InjectionGuard {
                                          library: LibraryGuardMode? = nil,
                                          libraryFileUnreadable: Bool = false,
                                          settings: ConfigManager? = nil) async -> (text: String, cacheable: Bool, unjudged: [String], strippedMarkerLines: Int, divergedLines: Int) {
+        let r = await sanitizeLibraryDisplay(rawInput, contextTag: contextTag, maxTier: maxTier, protectionEnabled: protectionEnabled,
+                                             fidelity: fidelity, verdicts: verdicts, library: library,
+                                             libraryFileUnreadable: libraryFileUnreadable, settings: settings)
+        return (r.text, r.cacheable, r.unjudged, r.strippedMarkerLines, r.divergedLines)
+    }
+
+    /// `sanitizeUntrustedDisplay`, plus what the read site needs for #1397 part 2: whether a library on `local` was
+    /// blocked because no on-device canary could run (`onDeviceUnavailable`, the cause or empty), and `uncached`,
+    /// for the bypassed re-read, which must not leave a verdict in the process cache.
+    static func sanitizeLibraryDisplay(_ rawInput: String, contextTag: String = "",
+                                       maxTier: SanitizationTier = .tier1_structural,
+                                       protectionEnabled: Bool? = nil,
+                                       fidelity: FidelityMode = .off,
+                                       verdicts: GuardVerdictStore? = nil,
+                                       library: LibraryGuardMode? = nil,
+                                       libraryFileUnreadable: Bool = false,
+                                       uncached: Bool = false,
+                                       settings: ConfigManager? = nil) async
+        -> (text: String, cacheable: Bool, unjudged: [String], strippedMarkerLines: Int, divergedLines: Int, onDeviceUnavailable: String?) {
         let stripped = PromptInjectionGuard.stripRecordingDelimiters(rawInput)
         // #1397: a library read is judged under its mode's fingerprint, so its verdicts are keyed apart from
         // another mode's; `none` drops tier 3 only.
@@ -598,9 +624,10 @@ public struct InjectionGuard {
                                              protectionEnabled: protectionEnabled,
                                              delimiterLines: stripped.delimiterLines, config: config, fidelity: fidelity,
                                              preserveCandidate: preserveFidelityCandidate(rawInput, fidelity: fidelity),
-                                             verdicts: verdicts)
+                                             verdicts: verdicts, uncached: uncached)
         let stillStripped = Self.countStillStrippedLines(stripped.delimiterLines, in: verdict.outcome)
-        return (wrapped(verdict.outcome, contextTag: contextTag), verdict.cacheable, verdict.unjudged, stillStripped, verdict.divergedLines)
+        return (wrapped(verdict.outcome, contextTag: contextTag), verdict.cacheable, verdict.unjudged, stillStripped,
+                verdict.divergedLines, verdict.onDeviceUnavailable)
     }
 
     /// How many of `delimiterLines` (the lines `stripRecordingDelimiters` touched, keyed by index
@@ -692,7 +719,8 @@ public struct InjectionGuard {
                          config: GuardConfigFingerprint? = nil,
                          fidelity: FidelityMode = .off,
                          preserveCandidate: String? = nil,
-                         verdicts: GuardVerdictStore? = nil) async -> Verdict {
+                         verdicts: GuardVerdictStore? = nil,
+                         uncached: Bool = false) async -> Verdict {
         recordFidelityCall(contextTag: contextTag, fidelity: fidelity)
         let __turnID = PerformanceProfiler.currentTurnID
         let __start = MonotonicClock.nowMs()
@@ -758,7 +786,7 @@ public struct InjectionGuard {
         // process's: it neither reads nor writes the shared cache. Otherwise one suite's hijacking
         // canary cached a block on shared text (the default empty USER.md) and every later engine
         // in the process was served it (#375). Production never sets a scope.
-        let cache: SanitizationCache? = Self.guardTierScopeActive ? nil : Self.cache
+        let cache: SanitizationCache? = Self.guardTierScopeActive || uncached ? nil : Self.cache
         let key = cacheKey(clean: clean, source: source, maxTier: maxTier, fingerprint: fingerprint,
                            delimiterLines: delimiterLines, fidelity: fidelity, preserveCandidate: preserveCandidate)
         if let cached = cache?.get(key) {
@@ -840,8 +868,13 @@ public struct InjectionGuard {
         case .error:
             // #1390: a block or error between a sampling canary's two SAFEs keeps nothing.
             if let kept, let keptKey { kept.forget(keptKey) }
-            let marker = fingerprint.onDeviceOnly ? await onDeviceBlockMarker(fingerprint) : "[CONTENT BLOCKED BY TIER 3 CANARY GUARD]"
-            return Verdict(outcome: .blocked(marker: marker), cacheable: false, unjudged: unjudged, tier2: tier2.logName)
+            guard fingerprint.onDeviceOnly else {
+                return Verdict(outcome: .blocked(marker: "[CONTENT BLOCKED BY TIER 3 CANARY GUARD]"), cacheable: false,
+                               unjudged: unjudged, tier2: tier2.logName)
+            }
+            let cause = await onDeviceCause(fingerprint)
+            return Verdict(outcome: .blocked(marker: onDeviceBlockMarker(fingerprint, cause: cause)), cacheable: false,
+                           unjudged: unjudged, tier2: tier2.logName, onDeviceUnavailable: cause ?? "")
         case .malicious:
             if let kept, let keptKey { kept.forget(keptKey) }
             let blocked = GuardOutcome.blocked(marker: "[CONTENT BLOCKED BY TIER 3 CANARY GUARD]")

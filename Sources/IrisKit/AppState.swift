@@ -702,6 +702,9 @@ struct ToolApprovalRequest: Identifiable {
     /// the dialog can tell the person why there is no Always Allow button. The call still runs
     /// now, once, as approved — only the saved rule is refused.
     let secretDetectedNote: String?
+    /// #1397 part 2: set on the ask to read a `local` library's note with no on-device check, naming what
+    /// "until Iris restarts" covers. Its card offers that button, and `resolveApproval` records it.
+    let guardBypass: GuardBypassScope?
     let continuation: CheckedContinuation<Bool, Never>
     /// When the ask was raised, so `list_sessions` can say how long a peer has waited (#418).
     let requestedAt: Date
@@ -710,8 +713,9 @@ struct ToolApprovalRequest: Identifiable {
 
     init(id: UUID, toolName: String, details: String, workspace: String?, conversationId: UUID?, origin: String,
          humanOnly: Bool = false, offersAlwaysAllow: Bool = true, offersConversationAllow: Bool = false,
-         requestedAt: Date = Date(), continuation: CheckedContinuation<Bool, Never>) {
+         guardBypass: GuardBypassScope? = nil, requestedAt: Date = Date(), continuation: CheckedContinuation<Bool, Never>) {
         self.id = id
+        self.guardBypass = guardBypass
         self.requestedAt = requestedAt
         self.toolName = toolName
         self.details = details
@@ -733,6 +737,13 @@ struct ToolApprovalRequest: Identifiable {
         self.offersConversationAllow = offersConversationAllow
         self.continuation = continuation
     }
+}
+
+/// #1397 part 2: what a "skip the check until Iris restarts" covers: one library (its root, as the library list
+/// stores it), or, while that list can't be read and every tool result is held on-device, all of them.
+enum GuardBypassScope: Equatable, Sendable {
+    case library(root: String)
+    case allOutsideReads
 }
 
 @MainActor
@@ -5197,6 +5208,9 @@ class AppState {
         /// #812: approve, and let this outbound tool run without asking for the rest of the
         /// conversation. Offered only on the tainted-send card.
         case allowInConversation
+        /// #1397 part 2: approve, and skip the on-device check for the card's `guardBypass` scope until Iris
+        /// restarts. Offered only on that card.
+        case bypassGuardUntilRestart
     }
     
     /// `args` is what the model sent for this call, carried only so a background denial can record
@@ -5647,7 +5661,8 @@ class AppState {
     /// separated from `requestApproval`'s permission/Vibecop fast paths so it is unit-testable.
     func enqueueUserApproval(toolName: String, details: String, workspace: String?,
                              conversationId: UUID?, origin: String, humanOnly: Bool = false,
-                             offersAlwaysAllow: Bool = true, offersConversationAllow: Bool = false) async -> Bool {
+                             offersAlwaysAllow: Bool = true, offersConversationAllow: Bool = false,
+                             guardBypass: GuardBypassScope? = nil) async -> Bool {
         // If our task was already cancelled (e.g. a subagent torn down while we were suspended
         // in the Vibecop/timeout window), do NOT enqueue a request nobody will resolve — the
         // teardown's denyPendingApprovals already ran and would miss a late append.
@@ -5663,7 +5678,7 @@ class AppState {
                     id: requestId, toolName: toolName, details: details, workspace: workspace,
                     conversationId: conversationId, origin: origin, humanOnly: humanOnly,
                     offersAlwaysAllow: offersAlwaysAllow, offersConversationAllow: offersConversationAllow,
-                    continuation: continuation))
+                    guardBypass: guardBypass, continuation: continuation))
             }
         } onCancel: {
             Task { @MainActor [weak self] in self?.denyApproval(id: requestId) }
@@ -6063,8 +6078,57 @@ class AppState {
                 allowOutboundInConversation(pending.toolName, conversationId: id)
             }
             approved = true
+        case .bypassGuardUntilRestart:
+            // Like the cases above: a click on a card that didn't offer it reads this once and records nothing.
+            switch pending.guardBypass {
+            case .library(let root)?: guardBypassedRoots.insert(root)
+            case .allOutsideReads?: guardBypassAllOutsideReads = true
+            case nil: break
+            }
+            approved = true
         }
         pending.continuation.resume(returning: approved)
+    }
+
+    /// #1397 part 2: the on-device check a person chose to skip until Iris restarts. Memory only, never saved:
+    /// a relaunch asks again. There's no "always": that is the library's `none` setting.
+    @ObservationIgnored private(set) var guardBypassedRoots: Set<String> = []
+    @ObservationIgnored private(set) var guardBypassAllOutsideReads = false
+
+    func isGuardBypassed(_ scope: GuardBypassScope) -> Bool {
+        switch scope {
+        case .library(let root): return guardBypassAllOutsideReads || guardBypassedRoots.contains(root)
+        case .allOutsideReads: return guardBypassAllOutsideReads
+        }
+    }
+
+    /// #1397 part 2 (Brian, 11-26): asks the person whether to read `path` with no on-device check, because none
+    /// could run (`cause`). Only on a turn the owner is at: a job, a guest's or a peer's turn, a delegate of one,
+    /// and a headless run all get false at once, so the read stays blocked. It's a person's call: YOLO, the
+    /// allowlist and Vibecop never answer it. True to read this once (a "until restart" click also records the scope).
+    func requestGuardBypass(conversationId: UUID, path: String, cause: String, scope: GuardBypassScope) async -> Bool {
+        guard isOwnerAttended(conversationId), !autoApproveTools else { return false }
+        let what: String
+        switch scope {
+        case .library: what = "This library is set to on-device checks only"
+        case .allOutsideReads: what = "Iris's library list (config/library-guard.json) can't be read, so every tool result is held to on-device checks"
+        }
+        let because = cause.isEmpty ? "" : " (\(cause))"
+        let details = "\(path)\n\(what), and no on-device canary could run\(because). Read it without the Tier 3 check? "
+            + "The structural strip still runs, and the note still counts as outside text."
+        return await enqueueUserApproval(toolName: "read_file", details: details, workspace: nil, conversationId: conversationId,
+                                         origin: "guard", humanOnly: true, offersAlwaysAllow: false, guardBypass: scope)
+    }
+
+    /// The person is at this turn: a user-facing conversation (and root), not a job's, not started or steered by
+    /// a guest, and no peer's message ever reached it or its root. The same reading YOLO uses (`isYoloMode`).
+    func isOwnerAttended(_ conversationId: UUID) -> Bool {
+        let root = delegationRoot(of: conversationId)
+        if isGuestOriginTurn(conversationId) || isGuestOriginTurn(root) { return false }
+        if [conversationId, root].contains(where: { id in conversations.first { $0.id == id }?.hasPeerInput == true }) { return false }
+        guard let conv = conversations.first(where: { $0.id == conversationId }), !conv.isBackground, !conv.isGuest,
+              let rootConv = conversations.first(where: { $0.id == root }), rootConv.isUserFacing else { return false }
+        return true
     }
     
     private var saveTask: Task<Void, Never>? = nil

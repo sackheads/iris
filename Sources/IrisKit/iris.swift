@@ -708,6 +708,26 @@ actor IrisEngine {
     /// (`bindingForCall`), not the engine's own: a `.main` engine is owner-shaped, but a turn bound to a narrower
     /// profile (a guest-steered recipient turn, a stamped job run) is not, and Vibecop's APPROVE must not stand in
     /// for the person on its host reads (#600, #974 Task 8 C5). No conversation keeps the engine's own binding.
+    /// #1397 part 2: the tier to re-read a blocked `local` library's text at, when the owner, at this turn, skips the
+    /// on-device check (already, until restart, or on the prompt this asks); nil to keep the block. Tier 2 still
+    /// runs, the result is never cached, and the read still taints (marked before the guard).
+    func onDeviceBypass(path: String?, cause: String, unreadableFile: Bool, conversationId: UUID) async -> InjectionGuard.SanitizationTier? {
+        guard principal == .main, await callIsOwner(conversationId), let localState = state else { return nil }
+        let scope: GuardBypassScope
+        if unreadableFile {
+            scope = .allOutsideReads
+        } else if let path, let root = libraryGuard.root(for: path) {
+            scope = .library(root: root)
+        } else {
+            return nil
+        }
+        let shown = path ?? "a command's output"
+        let allowed = await MainActor.run { localState.isOwnerAttended(conversationId) && localState.isGuardBypassed(scope) }
+        if allowed { return .tier2_coreML }
+        return await localState.requestGuardBypass(conversationId: conversationId, path: shown, cause: cause, scope: scope)
+            ? .tier2_coreML : nil
+    }
+
     func callIsOwner(_ conversationId: UUID?) async -> Bool {
         guard let conversationId else { return binding.isOwner }
         return await bindingForCall(conversationId: conversationId).isOwner
@@ -8957,7 +8977,16 @@ actor IrisEngine {
                 ? guardVerdicts : nil
             let library = libraryGuard.readMode(readPath)
             let libraryFileUnreadable = library == .local && libraryGuard.isUnreadable
-            let judged = await InjectionGuard.sanitizeUntrustedDisplay(result, contextTag: "tool_output_\(name)", maxTier: maxTier, protectionEnabled: protectionEnabled, fidelity: fidelity, verdicts: keptVerdicts, library: library, libraryFileUnreadable: libraryFileUnreadable)
+            var judged = await InjectionGuard.sanitizeLibraryDisplay(result, contextTag: "tool_output_\(name)", maxTier: maxTier, protectionEnabled: protectionEnabled, fidelity: fidelity, verdicts: keptVerdicts, library: library, libraryFileUnreadable: libraryFileUnreadable)
+            // #1397 part 2: no on-device canary could judge a `local` library's text. The owner, at this turn, may read
+            // it without tier 3; anyone else's turn keeps the block, which names the cause.
+            if let cause = judged.onDeviceUnavailable, let conversationId,
+               let bypassed = await onDeviceBypass(path: readPath, cause: cause, unreadableFile: libraryFileUnreadable,
+                                                   conversationId: conversationId) {
+                judged = await InjectionGuard.sanitizeLibraryDisplay(result, contextTag: "tool_output_\(name)", maxTier: bypassed,
+                                                                     protectionEnabled: protectionEnabled, fidelity: fidelity,
+                                                                     uncached: true)
+            }
             sanitizedResult = judged.text
             alteredFidelityLines = judged.divergedLines
             withheldByVerdict = judged.cacheable && InjectionGuard.isWholeBlock(judged.text)

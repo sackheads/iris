@@ -47,7 +47,7 @@ struct LibraryGuardSettingsSection: View {
                 }
             }
             if let failure {
-                Text("A library's own canary last failed: \(failure). Its reads are blocked until it runs.")
+                Text("A library's own canary last failed: \(failure). Its reads are blocked until it runs, unless you choose to read one unchecked when Iris asks.")
                     .font(.caption).foregroundColor(.red)
             }
             Button("Add Library Folder…") { addFolder() }
