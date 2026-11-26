@@ -722,7 +722,8 @@ actor IrisEngine {
             return nil
         }
         let shown = path ?? "a command's output"
-        let allowed = await MainActor.run { localState.isOwnerAttended(conversationId) && localState.isGuardBypassed(scope) }
+        let allowed = await MainActor.run { localState.isOwnerAttended(conversationId) && !localState.autoApproveTools
+            && localState.isGuardBypassed(scope) }
         if allowed { return .tier2_coreML }
         return await localState.requestGuardBypass(conversationId: conversationId, path: shown, cause: cause, scope: scope)
             ? .tier2_coreML : nil
