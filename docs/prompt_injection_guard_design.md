@@ -121,6 +121,19 @@ blocked. Tier 1 still runs on every call. Motivation: the first perf ladder run 
 Tier 3 cloud canary re-sanitizing the static 32-byte `USER.md` on every turn, 0.7-0.9 s each
 (#130, `docs/reviews/2026-09-17-tool-eagerness-analysis.md`).
 
+**Across launches (#1370, #1398).** A `read_file` of a note in `memory/library/` or `memory/artifacts/`, or
+under an external library root in Settings → Security → Libraries (#1397), also keeps a SAFE verdict in
+`config/guard-verdicts.json` (`GuardVerdictStore`), so a note pays the canary once per version, not once per
+launch. Only a whole pass tier 3 judged SAFE, with tier 2 withholding nothing, is kept. A sampling canary
+(Ollama, cloud) has to say SAFE on two reads in a row before it is kept, and a block or error between them
+keeps nothing; llama.cpp's greedy canary keeps its first (#1390). The key is the cache key above plus
+`GuardVersion`: the canary prompts, the strip's rules, the build, and the tier-2 and tier-3 models'
+identity (an Ollama digest, a model file's size and date; MLX has none, so it keeps nothing). A note's edit,
+a settings or mode change, any of those, or 30 days since the judgement makes it judged again. What is kept is
+the verdict, never text: a hit runs tier 1 again, wraps the note and taints the reader as a judged read does.
+The store holds up to 10,000 notes, dropping the least recently served. A missing or garbled file keeps
+nothing, and so does a root list that doesn't decode. The file is protected like `guard-trust.json`.
+
 > **Historical note:** an earlier design used a "SECRET_UUID summarization trap" (the canary had to
 > echo a secret token; a hijacked model would omit it). That was replaced by the direct
 > `SAFE`/`MALICIOUS` classifier prompt described above.

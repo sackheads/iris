@@ -1,8 +1,9 @@
 import CryptoKit
 import Foundation
 
-/// #1370 (#1295 (b') step 2): the guard's SAFE verdicts on library/ and artifacts/ reads, kept across launches, so
-/// each version of a note `GuardTrustStore` doesn't vouch for (a `run_command` write, a tainted turn's write, an
+/// #1370 (#1295 (b') step 2): the guard's SAFE verdicts on library/ and artifacts/ reads, and since #1398 on reads under
+/// an external library root in Settings (`LibraryGuardStore`), kept across launches, so each version of a note
+/// `GuardTrustStore` doesn't vouch for (a `run_command` write, a tainted turn's write, an
 /// outside edit) pays tiers 2 and 3 once, not on every launch's first read (16-20 s on gemma for 12 KB).
 ///
 /// Only a whole pass that tier 3 actually judged is kept: a block, a tier error, a tier-2 partial and a skipped
@@ -18,7 +19,9 @@ import Foundation
 final class GuardVerdictStore: @unchecked Sendable {
     static let shared = GuardVerdictStore(file: IrisPaths.default.configDir.appendingPathComponent("guard-verdicts.json"))
     static let ttl: TimeInterval = 30 * 86_400
-    static let capacity = 512
+    /// Sized for an external vault (#1398), not only the 48 notes of library/ and artifacts/.
+    static let defaultCapacity = 10_000
+    let capacity: Int
 
     /// When a verdict was reached, and when it was last served (the LRU order). Wall time: the TTL is calendar days.
     struct Entry: Codable, Equatable {
@@ -50,8 +53,10 @@ final class GuardVerdictStore: @unchecked Sendable {
 
     init(file: URL, now: @escaping @Sendable () -> Date = { Date() },
          version: @escaping @Sendable (InjectionGuard.GuardConfigFingerprint) async -> String? = { await GuardVersion.current($0) },
-         runsToKeep: @escaping @Sendable (InjectionGuard.GuardConfigFingerprint) -> Int = GuardVerdictStore.runsToKeep) {
+         runsToKeep: @escaping @Sendable (InjectionGuard.GuardConfigFingerprint) -> Int = GuardVerdictStore.runsToKeep,
+         capacity: Int = GuardVerdictStore.defaultCapacity) {
         self.file = file
+        self.capacity = capacity
         self.now = now
         self.version = version
         self.runsToKeep = runsToKeep
@@ -98,8 +103,8 @@ final class GuardVerdictStore: @unchecked Sendable {
             } else {
                 entries[key] = Entry(judged: at, used: at, tier2Skipped: tier2Skipped, confirmed: false)
             }
-            if entries.count > Self.capacity {
-                for stale in entries.sorted(by: { $0.value.used < $1.value.used }).prefix(entries.count - Self.capacity) {
+            if entries.count > capacity {
+                for stale in entries.sorted(by: { $0.value.used < $1.value.used }).prefix(entries.count - capacity) {
                     entries.removeValue(forKey: stale.key)
                 }
             }
