@@ -156,14 +156,15 @@ enum GuardVersion {
              model: await modelIdentity(fingerprint))
     }
 
-    /// Both canary prompts as they were before #1356, with fixed stand-ins for the tag and the text, plus the
-    /// impersonation clause for a read judged under the instruction-channel prompt. A library or artifacts read is
-    /// tool output, judged under `.external`, so its version is byte for byte what it was and the clause kept every
-    /// such verdict; a kept read on a message channel would miss when the clause changes (#1356).
+    /// The canary prompts a kept read's verdict depends on, with fixed stand-ins for the tag and the text. A library
+    /// or artifacts read is tool output, judged under `.external`: its source is both prompts as they were before
+    /// #1356, byte for byte, so the clause kept every such verdict. A read judged under the instruction-channel
+    /// prompt hashes that prompt as rendered, clause and its place included (dev-2's #1414 review).
     static func promptSource(_ kind: InjectionGuard.CanaryPromptKind) -> String {
-        let prompts = [InjectionGuard.CanaryPromptKind.external, .instructionChannel]
-            .map { InjectionGuard.canaryPrompt(tag: "TAG", text: "TEXT", kind: $0, impersonationClause: false) }
-        return (kind == .instructionChannel ? prompts + [InjectionGuard.impersonationClause] : prompts).joined(separator: "\u{0}")
+        let external = InjectionGuard.canaryPrompt(tag: "TAG", text: "TEXT", kind: .external)
+        let channel = InjectionGuard.canaryPrompt(tag: "TAG", text: "TEXT", kind: .instructionChannel,
+                                                  impersonationClause: kind == .instructionChannel)
+        return [external, channel].joined(separator: "\u{0}")
     }
 
     /// The app's version and build, and the executable's size and date, so an unbumped dev rebuild misses too.

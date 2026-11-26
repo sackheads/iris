@@ -488,7 +488,9 @@ struct GuardVersionTests {
         // invalidation of every kept verdict it is.
         #expect(GuardVersion.make(prompts: external, rules: "", build: "", model: "") == "e49309de57bfe4d23ba42abde9513df6ba1866fde2aee2f2d41853ad5911b1f7")
         let channel = GuardVersion.promptSource(.instructionChannel)
-        #expect(channel.contains(InjectionGuard.impersonationClause) && channel != external)
+        #expect(channel.contains(InjectionGuard.canaryPrompt(tag: "TAG", text: "TEXT", kind: .instructionChannel)),
+                "a message channel's version hashes its prompt as rendered, the clause in its place")
+        #expect(channel != external)
         #expect(GuardVersion.make(prompts: channel, rules: "r", build: "b", model: "m")
                 != GuardVersion.make(prompts: external, rules: "r", build: "b", model: "m"), "a kept read on a message channel is keyed with the clause")
         // And a kept read is keyed by the prompt its source is judged under: read_file's tag is tool output.
