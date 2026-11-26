@@ -12,10 +12,11 @@ struct LibraryGuardSettingsSection: View {
     var body: some View {
         Section(header: Text("Libraries: how notes you keep are checked").font(.headline)) {
             Text("For folders of notes you wrote yourself, such as an Obsidian vault. A note read from one is still "
-                 + "treated as outside text; this only chooses who runs the Tier 3 check.")
+                 + "treated as outside text; this only chooses who runs the Tier 3 check, for notes read with read_file. "
+                 + "Command output (cat, grep) is checked by the Tier 3 engine above.")
                 .font(.caption).foregroundColor(.secondary)
             if unreadable {
-                Text("library-guard.json can't be read, so every outside text is checked on this Mac only until it's "
+                Text("library-guard.json can't be read, so every tool result is checked on this Mac only until it's "
                      + "fixed. Remove it from \(IrisPaths.standard.agentFacing("~/.iris/config/")) or add a library again to rewrite it.")
                     .font(.caption).foregroundColor(.red)
             }
@@ -33,8 +34,11 @@ struct LibraryGuardSettingsSection: View {
                     Button(role: .destructive) { store.remove(root: entry.root); reload() } label: { Image(systemName: "minus.circle") }
                         .buttonStyle(.borderless)
                 }
-                if entry.mode == .cloud {
-                    Text("Each note read from here is sent to your cloud provider for the check.")
+                if entry.mode == .local {
+                    Text("The check runs on this Mac. A note Iris reads still goes to your chat model.")
+                        .font(.caption).foregroundColor(.secondary)
+                } else if entry.mode == .cloud {
+                    Text("Each note read from here is also sent to your cloud canary's provider for the check, which can differ from your chat provider.")
                         .font(.caption).foregroundColor(.orange)
                 } else if entry.mode == .none {
                     Text("No Tier 3 check. The structural strip still runs, and the note still marks the conversation "

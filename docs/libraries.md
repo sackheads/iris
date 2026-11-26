@@ -129,9 +129,11 @@ variety of document types - even images, slides, etc.
 
 A folder of your own notes, such as an Obsidian vault, can be added under Settings → Security → Libraries.
 Its notes are still outside text for the guard, and reading one still marks the conversation. The setting
-only chooses who runs tier 3: "On this Mac" (the default, never the cloud), "Cloud" (each note goes to your
-cloud provider, for a vault that is scanned there anyway), or "No check". Only Settings changes it; the
-registry below does not. See the guard's [per-library bullet](prompt_injection_guard_design.md#tier-3-auxiliary-model-classifier-probe-implemented).
+only chooses who runs tier 3: "On this Mac" (the default: the guard check runs on this Mac, so no second
+cloud provider sees the note), "Cloud" (the note is also sent to the canary's provider, which can differ from the chat provider, for a
+vault that is scanned there anyway), or "No check". Either way a note still goes to your chat model when Iris reads it.
+Only a `read_file` is matched to a library: a note printed by `run_command` (`cat`, `grep`) is checked by
+the global tier-3 engine. Only Settings changes it; the registry below does not. See the guard's [per-library bullet](prompt_injection_guard_design.md#tier-3-auxiliary-model-classifier-probe-implemented).
 
 ## Indexing
 

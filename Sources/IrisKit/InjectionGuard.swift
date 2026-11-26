@@ -316,6 +316,10 @@ public struct InjectionGuard {
         /// A library on `local` (#1397): a canary that can't run blocks the read rather than skipping tier 3,
         /// since skipping would hand the note over unjudged by the mode meant to judge it on-device.
         var onDeviceOnly = false
+        /// `onDeviceOnly` because `config/library-guard.json` doesn't decode, not a library's setting: the block
+        /// says so, since the text may be from no library at all (dev-3's #1403 review). Not in `cacheKey`: it
+        /// changes only the marker of a block, which is never kept.
+        var onDeviceForUnreadableFile = false
     }
 
     /// #1397: what a library on `local` says when no on-device canary could judge it, naming the cause, so a job
@@ -327,7 +331,10 @@ public struct InjectionGuard {
             return globalRole
                 ? health.libraryCanaryFailure ?? health.tier3Failure : health.libraryCanaryFailure
         }
-        return "[CONTENT BLOCKED: this library is set to on-device checks only, and no on-device canary could run"
+        let why = fingerprint.onDeviceForUnreadableFile
+            ? "Iris's library list (config/library-guard.json) can't be read, so every tool result is checked on this Mac only"
+            : "this library is set to on-device checks only"
+        return "[CONTENT BLOCKED: \(why), and no on-device canary could run"
             + (cause.map { " (\(IrisEngine.flattenToolEcho($0, cap: 200)))" } ?? "") + ". Settings → Security shows the canary's state.]"
     }
 
@@ -579,11 +586,13 @@ public struct InjectionGuard {
                                          fidelity: FidelityMode = .off,
                                          verdicts: GuardVerdictStore? = nil,
                                          library: LibraryGuardMode? = nil,
+                                         libraryFileUnreadable: Bool = false,
                                          settings: ConfigManager? = nil) async -> (text: String, cacheable: Bool, unjudged: [String], strippedMarkerLines: Int, divergedLines: Int) {
         let stripped = PromptInjectionGuard.stripRecordingDelimiters(rawInput)
         // #1397: a library read is judged under its mode's fingerprint, so its verdicts are keyed apart from
         // another mode's; `none` drops tier 3 only.
-        let config = library.flatMap { maxTier == .tier3_canary ? libraryFingerprint($0, protectionEnabled: protectionEnabled, settings: settings) : nil }
+        var config = library.flatMap { maxTier == .tier3_canary ? libraryFingerprint($0, protectionEnabled: protectionEnabled, settings: settings) : nil }
+        if libraryFileUnreadable { config?.onDeviceForUnreadableFile = true }
         let tier = library == LibraryGuardMode.none && maxTier == .tier3_canary ? .tier2_coreML : maxTier
         let verdict = await classifyDetailed(stripped.text, contextTag: contextTag, maxTier: tier,
                                              protectionEnabled: protectionEnabled,
@@ -1225,6 +1234,15 @@ public struct InjectionGuard {
         let startTime = UptimeClock.live.now()   // uptime: a sleep is not time spent (#608)
         do {
             let engine = try await AuxiliaryModelManager.shared.getEngine(for: config.canaryRole, config: engineConfig)
+            // #1397 (dev-2's review): `getEngine` keeps the first engine a role loaded, so a global engine switched
+            // from cloud without a relaunch still hands back the cloud one. A library on `local` never sends to it.
+            if config.onDeviceOnly, engine is CloudAuxiliaryEngine {
+                await MainActor.run {
+                    GuardTierHealth.current.recordTier3Failure("the canary loaded this launch is the cloud one; relaunch Iris to use the on-device engine",
+                                                               engine: engineTypeString, role: libraryLocalRole)
+                }
+                return .error
+            }
             let tag = UUID().uuidString.prefix(8)
             // #709's backstop: the canary is never sent more than the model-visible cap, whoever
             // calls it. A tool result is cut to that size before it gets here; a longer input from

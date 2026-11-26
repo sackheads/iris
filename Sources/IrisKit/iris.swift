@@ -8954,7 +8954,8 @@ actor IrisEngine {
             let readPath = name == "read_file" ? (execArgs["path"]?.stringValue).map { ToolExecutor.resolvePath($0, cwd: cwd) } : nil
             let keptVerdicts = readPath.map { GuardTrustStore.covers(IrisPaths.realPath($0)) } == true ? guardVerdicts : nil
             let library = libraryGuard.readMode(readPath)
-            let judged = await InjectionGuard.sanitizeUntrustedDisplay(result, contextTag: "tool_output_\(name)", maxTier: maxTier, protectionEnabled: protectionEnabled, fidelity: fidelity, verdicts: keptVerdicts, library: library)
+            let libraryFileUnreadable = library == .local && libraryGuard.isUnreadable
+            let judged = await InjectionGuard.sanitizeUntrustedDisplay(result, contextTag: "tool_output_\(name)", maxTier: maxTier, protectionEnabled: protectionEnabled, fidelity: fidelity, verdicts: keptVerdicts, library: library, libraryFileUnreadable: libraryFileUnreadable)
             sanitizedResult = judged.text
             alteredFidelityLines = judged.divergedLines
             withheldByVerdict = judged.cacheable && InjectionGuard.isWholeBlock(judged.text)
