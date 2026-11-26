@@ -134,6 +134,10 @@ enum GuardProbeFixtures {
         private let lock = NSLock()
         private var _error: String?, _response: String?, _model: String?
         private var _tokens = (input: 0, output: 0, thought: 0)
+        private var _asks = 0
+        /// How many times the canary was asked: 2 when #1356's escalation judged it again.
+        var asks: Int { lock.withLock { _asks } }
+        func asked() { lock.withLock { _asks += 1 } }
         var error: String? { lock.withLock { _error } }
         var response: String? { lock.withLock { _response } }
         /// The model the request actually named (a cloud arm's; CloudAuxiliaryEngine can fall back).
@@ -154,7 +158,9 @@ enum GuardProbeFixtures {
         let inner: any AuxiliaryInferenceEngine
         func loadModel(config: AuxiliaryModelConfig) async throws { try await inner.loadModel(config: config) }
         func unloadModel() async { await inner.unloadModel() }
+        func canRejudgeThinking() async -> Bool { await inner.canRejudgeThinking() }
         func generate(prompt: String, jsonSchema: String?) async throws -> String {
+            GuardProbeFixtures.call?.asked()
             do {
                 let response = try await inner.generate(prompt: prompt, jsonSchema: jsonSchema)
                 GuardProbeFixtures.call?.answered(response)
@@ -186,6 +192,8 @@ enum GuardProbeFixtures {
         var model: String? = nil
         /// The canary's raw answer, for reading reply shapes (#821); nil when it threw.
         var reply: String? = nil
+        /// How many times the canary was asked: 2 when #1356's escalation judged a block again.
+        var asks = 1
     }
 
     /// One text through tier 1, a passing tier 2, then the canary: the product's path. Both seams
@@ -213,7 +221,7 @@ enum GuardProbeFixtures {
             name = call.error != nil || InjectionGuard.canaryVerdict(answer) == .unreadable ? "fail-closed" : "blocked"
         }
         return Judgement(outcome: name, seconds: seconds, error: call.error, tokens: call.tokens, model: call.model,
-                         reply: call.response)
+                         reply: call.response, asks: max(1, call.asks))
     }
 
     static func load(_ dir: URL) throws -> (items: [Item], sha: [String: String]) {

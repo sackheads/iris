@@ -30,10 +30,16 @@ protocol AuxiliaryInferenceEngine: Sendable {
     /// Default returns true (assumes always loaded) — engines that can unload
     /// (e.g. Ollama) should implement this to query their runtime state.
     func isModelLoaded() async -> Bool
+
+    /// #1356 (Brian, 11-26: "2: e"): whether a block can be judged again with the model thinking, for the second
+    /// stage of a message channel's verdict. Default false: only an Ollama model that thinks, asked not to by
+    /// default, has a different answer to give.
+    func canRejudgeThinking() async -> Bool
 }
 
 extension AuxiliaryInferenceEngine {
     func isModelLoaded() async -> Bool { true }
+    func canRejudgeThinking() async -> Bool { false }
 
     /// Optional 3-parameter overload for vision-capable auxiliary engines.
     /// Default implementation ignores images and calls 2-parameter generate.
