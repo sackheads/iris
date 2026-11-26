@@ -121,7 +121,7 @@ struct SyntheticLibraryTests {
 
 /// #1395's timed pass: every sampled note judged by the product guard (tier 1, a passing tier 2, the canary) on a
 /// real model, extrapolated to a full pass at each library size. Opt-in: `IRIS_SYNTH_GUARD_MODEL=ollama:gemma4:12b`
-/// (any `EvalModelSpec`), optionally `IRIS_SYNTH_SAMPLE=<notes per shape>` (default 40). It holds the build slot
+/// (any `EvalModelSpec`), optionally `IRIS_SYNTH_SAMPLE=<notes per shape>` (default 40) and `IRIS_SYNTH_OUT=<dir>` for a copy of each benign note that was blocked. It holds the build slot
 /// (rule 33) and takes about 18 s a note on gemma.
 @Suite("the guard's time over a synthetic library (#1395, opt-in)",
        .enabled(if: ProcessInfo.processInfo.environment["IRIS_SYNTH_GUARD_MODEL"] != nil, "opt-in: IRIS_SYNTH_GUARD_MODEL=<model spec>"),
@@ -133,6 +133,15 @@ struct SyntheticLibraryGuardTiming {
         let spec = try #require(env["IRIS_SYNTH_GUARD_MODEL"].flatMap(EvalModelSpec.parse), "not a model spec")
         let perShape = env["IRIS_SYNTH_SAMPLE"].flatMap(Int.init) ?? 40
         let canary = try await EvalGuardTask.canary(spec, think: .product)
+        let out = env["IRIS_SYNTH_OUT"].map { URL(fileURLWithPath: $0) }
+        // Cold: an Ollama model is evicted first (keep_alive 0), so the first judgement pays the load, as the
+        // first read after a launch or an idle unload does. Its own server reloads it on the next call.
+        if spec.runtime == .ollama, var request = URL(string: "http://localhost:11434/api/generate").map({ URLRequest(url: $0) }) {
+            request.httpMethod = "POST"
+            request.httpBody = try JSONSerialization.data(withJSONObject: ["model": spec.name, "keep_alive": 0])
+            _ = try? await URLSession.shared.data(for: request)
+        }
+        var cold = true
         let config = EvalGuardTask.guardConfig(canary: spec, tier2: true, thinkingLevel: canary.thinkingLevel)
         let attacks = try SyntheticLibrary.corpusAttacks(repoRoot: PerfPaths.repoRoot())
         for (shape, count, sizes) in [(SyntheticLibrary.Shape.home, 2_000, [100, 500, 2_000]), (.vault, 10_000, [2_000, 5_000, 10_000])] {
@@ -148,8 +157,27 @@ struct SyntheticLibraryGuardTiming {
                 let start = MonotonicClock.nowMs()
                 let result = await EvalGuardTask.product(text, canary: canary.engine, config: config,
                                                          tier2: .init(GuardProbeFixtures.PassingTier2()))
-                seconds.append((MonotonicClock.nowMs() - start) / 1000)
-                if result.outcome != .passed { if note.sample == nil { blockedBenign += 1 } else { blockedAttack += 1 } }
+                let took = (MonotonicClock.nowMs() - start) / 1000
+                // One line a note, for the size breakdown; the cold call is kept out of the warm figures.
+                print("synthetic-library: note \(shape.rawValue) \(cold ? "cold" : "warm") \(String(format: "%.2f", took)) s "
+                      + "\(note.bytes) bytes \(result.outcome.rawValue) \(note.sample ?? "benign") \(note.path)")
+                if cold { cold = false } else { seconds.append(took) }
+                if result.outcome != .passed {
+                    if note.sample == nil { blockedBenign += 1 } else { blockedAttack += 1 }
+                    if note.sample == nil {
+                        // A sampled canary may block once and pass the next time: judge it again to see which.
+                        var again: [String] = []
+                        for _ in 0..<5 {
+                            again.append(await EvalGuardTask.product(text, canary: canary.engine, config: config,
+                                                                     tier2: .init(GuardProbeFixtures.PassingTier2())).outcome.rawValue)
+                        }
+                        print("synthetic-library: rejudged \(note.path): \(again.joined(separator: " "))")
+                        if let out {
+                            try? FileManager.default.createDirectory(at: out, withIntermediateDirectories: true)
+                            try? text.write(to: out.appendingPathComponent(note.path.replacingOccurrences(of: "/", with: "_")), atomically: true, encoding: .utf8)
+                        }
+                    }
+                }
             }
             let sorted = seconds.sorted(), mean = seconds.reduce(0, +) / Double(seconds.count)
             let attacksSampled = sample.filter { $0.sample != nil }.count
