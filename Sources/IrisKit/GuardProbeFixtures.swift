@@ -255,9 +255,13 @@ enum GuardProbeFixtures {
     /// Whether the payload was kept from the model: the text blocked whole, or fail-closed.
     static func caught(_ outcome: String) -> Bool { outcome != "passed" }
 
-    /// The input tokens a call is expected to cost: the capped text at 4 bytes a token, plus the
-    /// canary prompt's ~200. Calibration scales it by what the provider reported.
-    static func predictedInput(_ item: Item) -> Int { min(item.text.utf8.count, 32 * 1024) / 4 + 200 }
+    /// The input tokens a call is expected to cost: the capped text and the canary prompt the row's tag picks (about
+    /// 200 tokens for tool output, 285 for a message channel's since #1356's clause), at 4 bytes a token.
+    /// Calibration scales it by what the provider reported.
+    static func predictedInput(_ item: Item) -> Int {
+        let kind = InjectionGuard.canaryPromptKind(source: item.contextTag ?? defaultContextTag)
+        return min(item.text.utf8.count, 32 * 1024) / 4 + InjectionGuard.canaryPrompt(tag: "00000000", text: "", kind: kind).utf8.count / 4
+    }
 
     static func dollars(_ t: (input: Int, output: Int, thought: Int), rates: TokenRates) -> Double {
         Double(t.input) * rates.input + Double(t.output + t.thought) * rates.output
