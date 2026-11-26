@@ -47,12 +47,7 @@ struct InboxView: View {
                 .padding(8)
                 List(selection: Binding(
                     get: { state.selectedInboxItemId },
-                    set: { newId in
-                        state.selectedInboxItemId = newId
-                        chosenOptionId = nil
-                        freeText = ""
-                        lastOutcome = nil
-                    }
+                    set: { state.selectedInboxItemId = $0 }   // the draft resets in `.onChange` below
                 )) {
                     ForEach(items, id: \.id) { item in
                         inboxRowSummary(item).tag(Optional(item.id))
@@ -91,8 +86,13 @@ struct InboxView: View {
             lastOutcome = nil
         }
         // An item opened from outside the list (a notification's Open, #920 slice 5) shows in the mailbox,
-        // so a selection the Archive view doesn't hold switches back to it rather than showing nothing.
+        // so a selection the Archive view doesn't hold switches back to it rather than showing nothing. And any
+        // change of item, a row's click or not, drops the last one's draft: a note left over would otherwise be
+        // sent as the next item's veto reason (dev-3's #1410 review).
         .onChange(of: state.selectedInboxItemId) {
+            chosenOptionId = nil
+            freeText = ""
+            lastOutcome = nil
             if showingArchive, let id = state.selectedInboxItemId, !items.contains(where: { $0.id == id }) {
                 showingArchive = false
             }
