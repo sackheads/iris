@@ -39,6 +39,10 @@ import Foundation
     /// anyone having to clear it (#218, "cleared on the next success").
     private(set) var tier2Failure: String?
     private(set) var tier3Failure: String?
+    /// #1397: the last failure of a library's own canary (cloud beside a local global engine, or on-device beside a cloud one). Kept apart so a
+    /// broken cloud key doesn't light the global tier-3 LED, and a cloud success doesn't clear a local failure.
+    /// Its reads still fail closed; Settings shows this next to the libraries.
+    private(set) var libraryCanaryFailure: String?
 
     /// Announced once per failing *spell*, not once per call. A broken tier is retried on every
     /// evaluation — uncached, by design — so notifying per failure would paste the same line into
@@ -98,7 +102,8 @@ import Foundation
     /// notice is a permanent message in someone's transcript, so it waits for a second consecutive
     /// failure. The LED goes red immediately either way: a light can be wrong for two seconds, a
     /// system message cannot be taken back.
-    func recordTier3Failure(_ description: String, engine: String) {
+    func recordTier3Failure(_ description: String, engine: String, role: String = CloudAuxiliaryEngine.canaryRole) {
+        guard role == CloudAuxiliaryEngine.canaryRole else { libraryCanaryFailure = description; return }
         tier3Failure = description
         tier3Consecutive += 1
         guard !tier3Announced, tier3Consecutive >= Self.announceThreshold(engine: engine),
@@ -116,7 +121,8 @@ import Foundation
     /// is swallowed by it. One odd reply can be a fluke,
     /// so the notice waits for a second in a row whatever the engine; the light changes at once.
     /// The reply is never kept here: it can echo the untrusted text.
-    func recordTier3Unreadable() {
+    func recordTier3Unreadable(role: String = CloudAuxiliaryEngine.canaryRole) {
+        guard role == CloudAuxiliaryEngine.canaryRole else { libraryCanaryFailure = Self.tier3UnreadableReason; return }
         tier3Failure = Self.tier3UnreadableReason
         tier3UnreadableConsecutive += 1
         guard !tier3UnreadableAnnounced, tier3UnreadableConsecutive >= 2, let announce else { return }
@@ -175,7 +181,11 @@ import Foundation
         tier2Announced = false
     }
 
-    func clearTier3() {
+    func clearTier3(role: String = CloudAuxiliaryEngine.canaryRole) {
+        guard role == CloudAuxiliaryEngine.canaryRole else {
+            if libraryCanaryFailure != nil { libraryCanaryFailure = nil }
+            return
+        }
         // Nothing recorded means nothing to invalidate: this runs after *every* successful guard
         // evaluation — every tool output — and an unconditional write still goes through
         // `withMutation`, redrawing the LED bar on every tool call for no change.

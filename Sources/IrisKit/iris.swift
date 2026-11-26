@@ -264,6 +264,8 @@ actor IrisEngine {
     /// #1370: the SAFE verdicts kept across launches for the library/artifacts reads `guardTrust` doesn't vouch for.
     private let injectedGuardVerdicts: GuardVerdictStore?
     var guardVerdicts: GuardVerdictStore { injectedGuardVerdicts ?? .shared }
+    private let injectedLibraryGuard: LibraryGuardStore?
+    var libraryGuard: LibraryGuardStore { injectedLibraryGuard ?? .shared }
     /// 5a Task 7 fix round 1: same idiom as `injectedFactStore`/`factStore`. `MemoryManager` has no
     /// per-instance seam other than `init(paths:)`, so a test that needs an isolated USER.md/SOUL.md
     /// constructs its own manager and hands it here, instead of mutating the process-global
@@ -925,7 +927,7 @@ actor IrisEngine {
     /// `CacheTTLPolicy.resolve` picks (5c §0.8). Nil everywhere else.
     private let cacheTTLOverride: CacheTTLPolicy?
 
-    init(state: AppState, tier: ModelTier = .medium, principal: Principal = .main, roleLabel: String? = nil, client: any LLMClientProtocol = LLMClient(), evaluatorChecks: [String] = [], retryDelays: [TimeInterval] = [2, 4, 8], streamResponses: Bool? = nil, factStore: FactStoreManager? = nil, protectionEnabled: Bool? = nil, checkpointAutoAdvance: Bool? = nil, sessionPeerCount: Int? = nil, recentWrites: RecentWrites = .shared, guardTrust: GuardTrustStore? = nil, guardVerdicts: GuardVerdictStore? = nil, requestDumpSink: (@Sendable (GeminiRequest, Int, Int) -> Void)? = nil, memory: MemoryManager? = nil, declareStateGatedTools: Bool = false, stickyTools: Bool = true, roundStartHook: (@Sendable (Int) async -> Void)? = nil, cacheTTLOverride: CacheTTLPolicy? = nil, hooks: HookManager = .shared, provider: String? = nil, replayThinking: Bool? = nil, subagentConfig: ConfigManager = .shared, repromptDelay: TimeInterval = 1.5,
+    init(state: AppState, tier: ModelTier = .medium, principal: Principal = .main, roleLabel: String? = nil, client: any LLMClientProtocol = LLMClient(), evaluatorChecks: [String] = [], retryDelays: [TimeInterval] = [2, 4, 8], streamResponses: Bool? = nil, factStore: FactStoreManager? = nil, protectionEnabled: Bool? = nil, checkpointAutoAdvance: Bool? = nil, sessionPeerCount: Int? = nil, recentWrites: RecentWrites = .shared, guardTrust: GuardTrustStore? = nil, guardVerdicts: GuardVerdictStore? = nil, libraryGuard: LibraryGuardStore? = nil, requestDumpSink: (@Sendable (GeminiRequest, Int, Int) -> Void)? = nil, memory: MemoryManager? = nil, declareStateGatedTools: Bool = false, stickyTools: Bool = true, roundStartHook: (@Sendable (Int) async -> Void)? = nil, cacheTTLOverride: CacheTTLPolicy? = nil, hooks: HookManager = .shared, provider: String? = nil, replayThinking: Bool? = nil, subagentConfig: ConfigManager = .shared, repromptDelay: TimeInterval = 1.5,
          subagentRoute: ProviderRoute? = nil,
          primaryClient: (any LLMClientProtocol)? = nil,
          routedClient: @escaping @Sendable (ProviderRoute) -> any LLMClientProtocol = { LLMClient(route: $0) },
@@ -957,6 +959,7 @@ actor IrisEngine {
         self.injectedFactStore = factStore
         self.injectedGuardTrust = guardTrust
         self.injectedGuardVerdicts = guardVerdicts
+        self.injectedLibraryGuard = libraryGuard
         self.injectedMemory = memory
         self.modelTier = tier
         self.principal = principal
@@ -8946,10 +8949,12 @@ actor IrisEngine {
             // either tool — without this, only `read_file` got the fidelity carve-out #952 built.
             let fidelity: InjectionGuard.FidelityMode = (name == "read_file" || name == "run_command") ? .preserveWhenJudged : .off
             // #1370: a library/artifacts read pays tiers 2 and 3 once per version of the note, not once per launch.
-            let readPath = name == "read_file" ? execArgs["path"]?.stringValue : nil
-            let keptVerdicts = readPath.map { GuardTrustStore.covers(IrisPaths.realPath(ToolExecutor.resolvePath($0, cwd: cwd))) } == true
-                ? guardVerdicts : nil
-            let judged = await InjectionGuard.sanitizeUntrustedDisplay(result, contextTag: "tool_output_\(name)", maxTier: maxTier, protectionEnabled: protectionEnabled, fidelity: fidelity, verdicts: keptVerdicts)
+            // #1397: a read under a library root in Settings is judged as that library's mode says. Memory, peer
+            // messages and MCP descriptions aren't vault text and keep the global settings.
+            let readPath = name == "read_file" ? (execArgs["path"]?.stringValue).map { ToolExecutor.resolvePath($0, cwd: cwd) } : nil
+            let keptVerdicts = readPath.map { GuardTrustStore.covers(IrisPaths.realPath($0)) } == true ? guardVerdicts : nil
+            let library = libraryGuard.readMode(readPath)
+            let judged = await InjectionGuard.sanitizeUntrustedDisplay(result, contextTag: "tool_output_\(name)", maxTier: maxTier, protectionEnabled: protectionEnabled, fidelity: fidelity, verdicts: keptVerdicts, library: library)
             sanitizedResult = judged.text
             alteredFidelityLines = judged.divergedLines
             withheldByVerdict = judged.cacheable && InjectionGuard.isWholeBlock(judged.text)

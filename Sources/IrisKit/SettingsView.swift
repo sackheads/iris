@@ -834,6 +834,8 @@ struct SettingsView: View {
                             }
                         }
                     }
+
+                    LibraryGuardSettingsSection()
                 }
             }
             .padding(.bottom)

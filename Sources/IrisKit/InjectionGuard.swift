@@ -154,8 +154,8 @@ public struct InjectionGuard {
     /// protection on, and a canary registered (or scoped) or a provisioned model to load (#732).
     private static func tier3Runs(_ fingerprint: GuardConfigFingerprint) -> Bool {
         guard fingerprint.protectionEnabled else { return false }
-        if let scoped = AuxiliaryModelManager.scopedEngines { return scoped["canary"] != nil }
-        if AuxiliaryModelManager.shared.hasEngine(for: "canary") { return true }
+        if let scoped = AuxiliaryModelManager.scopedEngines { return scoped[fingerprint.canaryRole] != nil }
+        if AuxiliaryModelManager.shared.hasEngine(for: fingerprint.canaryRole) { return true }
         if case .unprovisioned = fingerprint.tier3Provisioning { return false }
         return true
     }
@@ -163,6 +163,8 @@ public struct InjectionGuard {
     /// Whether a test has scoped a tier-2 model or a tier-3 canary for this task tree.
     private static var guardTierScopeActive: Bool {
         CoreMLEvaluator.scopedModel != nil || AuxiliaryModelManager.scopedEngines?["canary"] != nil
+            || AuxiliaryModelManager.scopedEngines?[libraryCloudRole] != nil
+            || AuxiliaryModelManager.scopedEngines?[libraryLocalRole] != nil
     }
 
     /// One classification: the outcome, whether a caller may keep it, and the line ranges tier 2
@@ -308,6 +310,75 @@ public struct InjectionGuard {
         let tier3ModelsDir: String
         let tier2Provisioning: Tier2Provisioning
         let tier3Provisioning: Tier3Provisioning
+        /// The `AuxiliaryModelManager` role tier 3 runs as: "canary", or `libraryCloudRole` for a library set to
+        /// `cloud` while the rest of Iris judges locally (#1397), so neither engine is handed the other's.
+        var canaryRole: String = CloudAuxiliaryEngine.canaryRole
+        /// A library on `local` (#1397): a canary that can't run blocks the read rather than skipping tier 3,
+        /// since skipping would hand the note over unjudged by the mode meant to judge it on-device.
+        var onDeviceOnly = false
+    }
+
+    /// #1397: what a library on `local` says when no on-device canary could judge it, naming the cause, so a job
+    /// that failed on it says why.
+    private static func onDeviceBlockMarker(_ fingerprint: GuardConfigFingerprint) async -> String {
+        let globalRole = fingerprint.canaryRole == CloudAuxiliaryEngine.canaryRole
+        let cause = await MainActor.run {
+            let health = GuardTierHealth.current
+            return globalRole
+                ? health.libraryCanaryFailure ?? health.tier3Failure : health.libraryCanaryFailure
+        }
+        return "[CONTENT BLOCKED: this library is set to on-device checks only, and no on-device canary could run"
+            + (cause.map { " (\(IrisEngine.flattenToolEcho($0, cap: 200)))" } ?? "") + ". Settings → Security shows the canary's state.]"
+    }
+
+    /// #1397: the roles of a library's own canary when its mode differs from the global engine: a cloud one beside
+    /// a local global engine, and an on-device one beside a cloud global engine.
+    static let libraryCloudRole = "canary.cloud"
+    static let libraryLocalRole = "canary.local"
+
+    /// The fingerprint a read from a library is judged under, for its mode; nil for `none`, which has no tier 3.
+    /// `local` is on-device by construction: the global engine when it is one (llama.cpp, MLX, Ollama, which
+    /// Iris only reaches on localhost), else llama.cpp with the default gemma, failing closed if that isn't
+    /// downloaded. `cloud` is the configured cloud canary, its model and thinking level. Either is the global
+    /// fingerprint, unchanged, when the global engine already is that kind.
+    static func libraryFingerprint(_ mode: LibraryGuardMode, protectionEnabled: Bool?,
+                                   settings: ConfigManager? = nil) -> GuardConfigFingerprint? {
+        let config = settings ?? ConfigManager.shared
+        let global = currentConfigFingerprint(protectionEnabled: protectionEnabled, settings: config)
+        let globalIsCloud = global.promptGuardEngine == AuxiliaryEngineType.cloud.rawValue
+        switch mode {
+        case .none:
+            return nil
+        case .local where !globalIsCloud:
+            var local = global
+            local.onDeviceOnly = true
+            return local
+        case .cloud where globalIsCloud:
+            return global
+        case .local:
+            let model = ConfigManager.defaultLocalModel
+            var local = GuardConfigFingerprint(
+                protectionEnabled: global.protectionEnabled, promptGuardEngine: AuxiliaryEngineType.llamaCPP.rawValue,
+                promptGuardModel: model, promptGuardCoreMLModel: global.promptGuardCoreMLModel,
+                tier3CloudModel: "", tier3ThinkingLevel: "",
+                tier2ModelsDir: global.tier2ModelsDir, tier3ModelsDir: global.tier3ModelsDir,
+                tier2Provisioning: global.tier2Provisioning,
+                tier3Provisioning: tier3Provisioning(engine: AuxiliaryEngineType.llamaCPP.rawValue, modelName: model,
+                                                     modelsDir: URL(fileURLWithPath: global.tier3ModelsDir)))
+            local.canaryRole = libraryLocalRole
+            local.onDeviceOnly = true
+            return local
+        case .cloud:
+            var cloud = GuardConfigFingerprint(
+                protectionEnabled: global.protectionEnabled, promptGuardEngine: AuxiliaryEngineType.cloud.rawValue,
+                promptGuardModel: global.promptGuardModel, promptGuardCoreMLModel: global.promptGuardCoreMLModel,
+                tier3CloudModel: resolvedCloudModel(config),
+                tier3ThinkingLevel: CloudAuxiliaryEngine.thinkingLevel(role: CloudAuxiliaryEngine.canaryRole, config: config) ?? "",
+                tier2ModelsDir: global.tier2ModelsDir, tier3ModelsDir: global.tier3ModelsDir,
+                tier2Provisioning: global.tier2Provisioning, tier3Provisioning: .provisioned)
+            cloud.canaryRole = libraryCloudRole
+            return cloud
+        }
     }
 
     /// Resolves `GuardConfigFingerprint` exactly as `classify` resolves the equivalent locals —
@@ -364,6 +435,7 @@ public struct InjectionGuard {
                      fingerprint.promptGuardEngine, fingerprint.promptGuardModel, fingerprint.promptGuardCoreMLModel,
                      fingerprint.tier3CloudModel, fingerprint.tier3ThinkingLevel, fingerprint.tier2ModelsDir, fingerprint.tier3ModelsDir,
                      String(describing: fingerprint.tier2Provisioning), String(describing: fingerprint.tier3Provisioning),
+                     fingerprint.canaryRole, String(fingerprint.onDeviceOnly),
                      // #952: a deletion-mode result must never be served to a fidelity-mode caller
                      // (or vice versa) even in the edge case where the two candidate texts happen
                      // to be byte-identical (a file with no role markers at all) — `clean` alone
@@ -505,11 +577,17 @@ public struct InjectionGuard {
                                          maxTier: SanitizationTier = .tier1_structural,
                                          protectionEnabled: Bool? = nil,
                                          fidelity: FidelityMode = .off,
-                                         verdicts: GuardVerdictStore? = nil) async -> (text: String, cacheable: Bool, unjudged: [String], strippedMarkerLines: Int, divergedLines: Int) {
+                                         verdicts: GuardVerdictStore? = nil,
+                                         library: LibraryGuardMode? = nil,
+                                         settings: ConfigManager? = nil) async -> (text: String, cacheable: Bool, unjudged: [String], strippedMarkerLines: Int, divergedLines: Int) {
         let stripped = PromptInjectionGuard.stripRecordingDelimiters(rawInput)
-        let verdict = await classifyDetailed(stripped.text, contextTag: contextTag, maxTier: maxTier,
+        // #1397: a library read is judged under its mode's fingerprint, so its verdicts are keyed apart from
+        // another mode's; `none` drops tier 3 only.
+        let config = library.flatMap { maxTier == .tier3_canary ? libraryFingerprint($0, protectionEnabled: protectionEnabled, settings: settings) : nil }
+        let tier = library == LibraryGuardMode.none && maxTier == .tier3_canary ? .tier2_coreML : maxTier
+        let verdict = await classifyDetailed(stripped.text, contextTag: contextTag, maxTier: tier,
                                              protectionEnabled: protectionEnabled,
-                                             delimiterLines: stripped.delimiterLines, fidelity: fidelity,
+                                             delimiterLines: stripped.delimiterLines, config: config, fidelity: fidelity,
                                              preserveCandidate: preserveFidelityCandidate(rawInput, fidelity: fidelity),
                                              verdicts: verdicts)
         let stillStripped = Self.countStillStrippedLines(stripped.delimiterLines, in: verdict.outcome)
@@ -753,7 +831,8 @@ public struct InjectionGuard {
         case .error:
             // #1390: a block or error between a sampling canary's two SAFEs keeps nothing.
             if let kept, let keptKey { kept.forget(keptKey) }
-            return Verdict(outcome: .blocked(marker: "[CONTENT BLOCKED BY TIER 3 CANARY GUARD]"), cacheable: false, unjudged: unjudged, tier2: tier2.logName)
+            let marker = fingerprint.onDeviceOnly ? await onDeviceBlockMarker(fingerprint) : "[CONTENT BLOCKED BY TIER 3 CANARY GUARD]"
+            return Verdict(outcome: .blocked(marker: marker), cacheable: false, unjudged: unjudged, tier2: tier2.logName)
         case .malicious:
             if let kept, let keptKey { kept.forget(keptKey) }
             let blocked = GuardOutcome.blocked(marker: "[CONTENT BLOCKED BY TIER 3 CANARY GUARD]")
@@ -1107,7 +1186,7 @@ public struct InjectionGuard {
         case "cloud": engineType = .cloud
         default: engineType = .llamaCPP
         }
-        return AuxiliaryModelConfig(role: "canary", engineType: engineType, modelPathOrName: config.promptGuardModel)
+        return AuxiliaryModelConfig(role: config.canaryRole, engineType: engineType, modelPathOrName: config.promptGuardModel)
     }
 
     /// The engine, model and provisioning come from `config`, the fingerprint this call resolved
@@ -1123,14 +1202,19 @@ public struct InjectionGuard {
         // of what the filesystem says — `getEngine` below will hand it straight back without
         // touching disk again. Checked before the file-based `provisioning` so a test can drive
         // tier 3 through a mock without a real model file on disk.
-        let hasRegisteredEngine = AuxiliaryModelManager.shared.hasEngine(for: "canary")
+        let hasRegisteredEngine = AuxiliaryModelManager.shared.hasEngine(for: config.canaryRole)
 
         let engineTypeString = config.promptGuardEngine
+        let role = config.canaryRole
 
         // #202: distinguish "no model provisioned" (skip, don't block) from "model present but
         // failed to load/run" (fail closed, below, unchanged). Only llama_cpp has a local file to
         // check; cloud/ollama/mlx are always provisioned per `tier3Provisioning`.
         if !hasRegisteredEngine, case .unprovisioned(let modelName) = provisioning {
+            if config.onDeviceOnly {
+                await MainActor.run { GuardTierHealth.current.recordTier3Failure("\(modelName) isn't downloaded", engine: engineTypeString, role: libraryLocalRole) }
+                return .error
+            }
             logTier3SkipOnce(modelName: modelName)
             return .skipped
         }
@@ -1140,7 +1224,7 @@ public struct InjectionGuard {
 
         let startTime = UptimeClock.live.now()   // uptime: a sleep is not time spent (#608)
         do {
-            let engine = try await AuxiliaryModelManager.shared.getEngine(for: "canary", config: engineConfig)
+            let engine = try await AuxiliaryModelManager.shared.getEngine(for: config.canaryRole, config: engineConfig)
             let tag = UUID().uuidString.prefix(8)
             // #709's backstop: the canary is never sent more than the model-visible cap, whoever
             // calls it. A tool result is cut to that size before it gets here; a longer input from
@@ -1162,18 +1246,18 @@ public struct InjectionGuard {
                 // output behind a green light (#822). The reply goes to the console only, never
                 // into anything kept: it can echo the untrusted text.
                 print("[InjectionGuard] Canary reply had no clear verdict; failing closed. Reply: \(Self.canaryReplyForLog(response))")
-                await MainActor.run { GuardTierHealth.current.recordTier3Unreadable() }
+                await MainActor.run { GuardTierHealth.current.recordTier3Unreadable(role: role) }
                 return .malicious
             }
             // As tier 2 above: the canary answered with a verdict, so the model is fine — what it
             // answered is a statement about the content, not about the model (#218).
-            await MainActor.run { GuardTierHealth.current.clearTier3() }
+            await MainActor.run { GuardTierHealth.current.clearTier3(role: role) }
             return verdict == .safe ? .safe : .malicious
         } catch {
             let durationMs = UptimeClock.live.seconds(since: startTime) * 1000
             await MetricsManager.shared.trackLatency(operation: .promptGuardTier3, modelName: modelName, durationMs: durationMs, success: false)
             print("[InjectionGuard] Canary execution failed: \(error). Failing closed for canary.")
-            await MainActor.run { GuardTierHealth.current.recordTier3Failure("\(error)", engine: engineTypeString) }
+            await MainActor.run { GuardTierHealth.current.recordTier3Failure("\(error)", engine: engineTypeString, role: role) }
             return .error
         }
     }
