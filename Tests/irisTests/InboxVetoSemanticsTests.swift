@@ -172,6 +172,24 @@ struct InboxVetoSemanticsTests {
         #expect(InboxUIModel.answerSummary(InboxAnswer(chosenOptionId: "a", freeText: nil, at: t0), item: item) == ["You chose: Ship"])
     }
 
+    @Test("Approve now names the default it approves, and is offered only on an open timed veto with one (#920 slice 4b)")
+    func approveNowLabel() {
+        func veto(_ mode: InboxResponseMode = .timedVeto, state: InboxItemState = .open, defaultId: String? = "b") -> InboxItem {
+            InboxItem(id: "1", threadId: "t", ownerChain: "c", emitter: UUID(), emitterLabel: "dev-1", title: "Ship?", situation: "s",
+                      options: [InboxOption(id: "a", label: "Hold", pros: [], cons: []), InboxOption(id: "b", label: "Ship", pros: [], cons: [])],
+                      responseMode: mode, routeBack: [], notify: [], deadline: t0, vetoDefaultOptionId: defaultId,
+                      emitterTainted: false, state: state, createdAt: t0, lastActivityAt: t0, answer: nil)
+        }
+        #expect(InboxUIModel.approveNowLabel(veto()) == "Approve now: Ship", "the default, not the first option")
+        #expect(InboxUIModel.approveNowLabel(veto(state: .answered)) == nil)
+        #expect(InboxUIModel.approveNowLabel(veto(.optionsAndFreeform)) == nil)
+        #expect(InboxUIModel.approveNowLabel(veto(defaultId: nil)) == nil)
+        #expect(InboxUIModel.approveNowLabel(veto(defaultId: "gone")) == nil, "a default naming no option offers nothing to approve")
+        let item = veto()
+        #expect(item.options.map { InboxUIModel.isVetoDefault($0, of: item) } == [false, true])
+        #expect(!InboxUIModel.isVetoDefault(item.options[1], of: veto(.optionsAndFreeform)))
+    }
+
     @Test("an answer stored before these fields reads as neither vetoed nor late (Invariant 1)")
     func oldAnswerDecodes() throws {
         let json = #"{"chosenOptionId":"a","at":800000000,"automatic":true}"#

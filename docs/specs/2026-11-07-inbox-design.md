@@ -152,7 +152,11 @@ going back out to the agents.
   (Invariant-style separation; cf. the streaming-read lesson in AGENTS.md).
 - A macOS notification on a new or reopened item (#920 slice 5, Brian F6: on by default, title only): a constant `Iris: Inbox`
   title, the item's title quoted as the body (generic `New Inbox item` for a tainted emitter), one banner per few-second burst,
-  none while the Inbox is in front, Open to the item. Optional still: a visible countdown on a timed-veto item.
+  none while the Inbox is in front, Open to the item.
+- A timed-veto item's detail (#920 slice 4b): the countdown to its deadline, its options read-only with the default
+  marked, an optional "why" note, and two buttons, **Approve now: <default>** and **Veto**. There is no option picker:
+  the only choices are the default early or a veto. An answered item's summary says "You" only for Brian's own
+  answer; an automatic default says nobody chose it, and says so again when it was applied while Iris was away.
 
 ## Agent-facing surface (emit contract)
 

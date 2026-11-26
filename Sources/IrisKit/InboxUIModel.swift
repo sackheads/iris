@@ -106,6 +106,19 @@ enum InboxUIModel {
         }
     }
 
+    /// #920 slice 4b: the Approve now button's label, naming the default it approves; nil when the item isn't an
+    /// open timed veto with a default (the engine refuses those too).
+    static func approveNowLabel(_ item: InboxItem) -> String? {
+        guard item.responseMode == .timedVeto, item.state == .open, let id = item.vetoDefaultOptionId,
+              let option = item.options.first(where: { $0.id == id }) else { return nil }
+        return "Approve now: \(option.label)"
+    }
+
+    /// #920 slice 4b: whether an option is the one a timed veto applies unless Brian vetoes it.
+    static func isVetoDefault(_ option: InboxOption, of item: InboxItem) -> Bool {
+        item.responseMode == .timedVeto && item.vetoDefaultOptionId == option.id
+    }
+
     /// #920 slice 4: the read-only lines an answered item shows, for the detail pane (4b wires it in). Only an
     /// answer Brian gave says "You": an automatic one says nobody chose, and a veto says it was a veto.
     static func answerSummary(_ answer: InboxAnswer, item: InboxItem) -> [String] {

@@ -543,9 +543,9 @@ struct InboxAnswerNoForgeTests {
         // and must be looked at, same as the count above.
         // #920 slice 4a: `approveInboxVetoNow` is the second iris.swift occurrence, Approve now's own path.
         #expect(try occurrences(of: "submitInboxAnswer(") == ["iris.swift": 2, "InboxView.swift": 1])
-        // Veto and Approve now are Brian's buttons (4b wires them into InboxView): nothing else calls them.
-        #expect(try occurrences(of: "vetoInboxItem(") == ["iris.swift": 1])
-        #expect(try occurrences(of: "approveInboxVetoNow(") == ["iris.swift": 1])
+        // Veto and Approve now are Brian's buttons, InboxView's two calls (#920 slice 4b): nothing else calls them.
+        #expect(try occurrences(of: "vetoInboxItem(") == ["iris.swift": 1, "InboxView.swift": 1])
+        #expect(try occurrences(of: "approveInboxVetoNow(") == ["iris.swift": 1, "InboxView.swift": 1])
         #expect(try occurrences(of: "redeliverAwaitingInbox(") == ["iris.swift": 1, "AppState.swift": 1])
     }
 
