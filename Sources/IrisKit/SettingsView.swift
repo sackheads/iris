@@ -210,7 +210,7 @@ struct SettingsView: View {
                     .help("Needs attention: a banner when a background job is blocked on a call, when a failed run's job is paused by a limit (not by you), or when an approval is waiting and the chat window is not in front. A banner never approves anything: Open shows the details, Deny refuses an approval, Dismiss clears a blocked run. Only the installed app posts them, not swift run.")
                     Toggle("Notify for new Inbox items", isOn: $config.inboxNotifications)
                         .disabled(config.notificationMode == .off)
-                        .help("A banner when an item is raised in your Inbox, or one you answered is reopened, unless the Inbox is already in front. It shows the item's title only, never its details, and just \"New Inbox item\" when the session that raised it had read outside content. Items raised within a few seconds share one banner.")
+                        .help("A banner when an item is raised in your Inbox, or a follow-up reopens one (one you answered, or one marked stale), unless the Inbox is already in front. It shows the item's title only, never its details, and just \"New Inbox item\" when the session that raised it had read outside content. Items raised within a few seconds share one banner.")
                     Picker("Archive idle sessions after", selection: $config.autoArchiveDays) {
                         Text("Never").tag(AutoArchiveDays.never)
                         Text("7 days").tag(AutoArchiveDays.week)
