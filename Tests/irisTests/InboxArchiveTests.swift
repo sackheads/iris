@@ -117,11 +117,14 @@ struct InboxArchiveTests {
         #expect(try s.inbox.archivedItems().isEmpty)
     }
 
-    @Test("the mailbox list: open, then awaiting delivery, then settled; Archive is offered only where nothing is owed")
+    @Test("the mailbox list: open, then stale, then awaiting delivery, then settled; Archive is offered only where nothing is owed")
     func listComposition() {
         let open = item("o"), waiting = { var i = item("w"); i.state = .awaitingDelivery; return i }()
         let done = { var i = item("d"); i.state = .answered; return i }()
-        #expect(InboxUIModel.mailboxItems(open: [open], awaitingDelivery: [waiting], settled: [done]).map(\.threadId) == ["o", "w", "d"])
+        let gone = { var i = item("s"); i.state = .stale; return i }()
+        #expect(InboxUIModel.mailboxItems(open: [open], stale: [gone], awaitingDelivery: [waiting], settled: [done]).map(\.threadId)
+                == ["o", "s", "w", "d"])
+        #expect(InboxUIModel.canArchive(gone))
         #expect(!InboxUIModel.canArchive(open))
         #expect(!InboxUIModel.canArchive(waiting))
         #expect(InboxUIModel.canArchive(done))
@@ -129,6 +132,20 @@ struct InboxArchiveTests {
         #expect(!InboxUIModel.canArchive(put), "already archived: Unarchive instead")
         var closed = item("c"); closed.state = .closed
         #expect(InboxUIModel.canArchive(closed))
+    }
+
+    @Test("an archived stale item leaves the mailbox for the Archive view, and unarchiving brings it back (#920 slice 3)")
+    func archivedStaleLeavesTheMailbox() throws {
+        let s = try ConversationStore.inMemory()
+        let it = item("t-stale")
+        try s.inbox.createItem(it, question: "Context.")
+        #expect(try s.inbox.markStale(itemId: it.id, quietSince: Date(timeIntervalSince1970: 1_500), at: Date(timeIntervalSince1970: 2_000)))
+        #expect(try s.inbox.staleItems().map(\.id) == [it.id])
+        #expect(ok(try s.inbox.setArchived(itemId: it.id, true, at: Date(timeIntervalSince1970: 3_000))))
+        #expect(try s.inbox.staleItems().isEmpty, "an archived stale item would show in both views")
+        #expect(try s.inbox.archivedItems().map(\.id) == [it.id])
+        #expect(ok(try s.inbox.setArchived(itemId: it.id, false, at: Date())))
+        #expect(try s.inbox.staleItems().map(\.id) == [it.id])
     }
 
     @Test("a database from before the column opens, its rows load, and none is archived (Invariant 1)")
