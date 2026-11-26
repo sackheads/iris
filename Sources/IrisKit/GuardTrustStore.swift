@@ -53,6 +53,24 @@ final class GuardTrustStore: @unchecked Sendable {
         return lock.withLock { load()[hash] != nil }
     }
 
+    /// #1374: drops each entry whose file is gone or no longer hashes to its key, so a deleted or edited note's
+    /// entry doesn't stay forever. At launch only (`IrisApp.openStore`), never on a read, which already loads
+    /// and rewrites the whole list (#1402). It only ever removes trust: a missing or undecodable list is left as
+    /// it is, still trusting nothing. Returns how many entries it dropped.
+    @discardableResult
+    func pruneStale() -> Int {
+        lock.withLock {
+            guard let data = try? Data(contentsOf: file),
+                  let entries = try? JSONDecoder().decode([String: String].self, from: data) else { return 0 }
+            let kept = entries.filter { hash, path in
+                FileManager.default.contents(atPath: path).map { Self.sha256($0) == hash } ?? false
+            }
+            guard kept.count < entries.count else { return 0 }
+            save(kept)
+            return entries.count - kept.count
+        }
+    }
+
     /// `[sha256: path]`. Anything that doesn't decode is an empty list.
     private func load() -> [String: String] {
         guard let data = try? Data(contentsOf: file) else { return [:] }

@@ -174,6 +174,53 @@ struct GuardTrustStoreTests {
         #expect(!(try await readBack(file, store: store()).result.contains(marker)), "missing")
     }
 
+    /// The list as it is on disk: `[sha256: path]`, or nil when there's none or it doesn't decode.
+    private func entries() -> [String: String]? {
+        (try? Data(contentsOf: storeFile)).flatMap { try? JSONDecoder().decode([String: String].self, from: $0) }
+    }
+
+    @Test("at launch a deleted note's entry is dropped and a live one's kept, which still reads back raw (#1374)")
+    func pruneDropsDeletedKeepsLive() async throws {
+        let gone = note(), live = note()
+        defer { for f in [gone, live, storeFile] { try? FileManager.default.removeItem(at: f) } }
+        try FileManager.default.createDirectory(at: paths.libraryDir, withIntermediateDirectories: true)
+        _ = try await run([write(gone, "deleted later\n"), write(live, "# Live\n\(marker)\n")], store: store())
+        #expect(entries()?.count == 2, "both clean writes were recorded")
+        try FileManager.default.removeItem(at: gone)
+        let relaunched = store()
+        #expect(relaunched.pruneStale() == 1)
+        #expect(entries()?.values.sorted() == [IrisPaths.realPath(live.path)], "\(entries() ?? [:])")
+        #expect(relaunched.pruneStale() == 0, "a second launch has nothing to drop")
+        let back = try await readBack(live, store: relaunched)
+        #expect(back.result.contains(marker) && !back.tainted, "the live note lost its trust: \(back.result.prefix(300))")
+    }
+
+    @Test("at launch an edited note's entry is dropped: its file no longer hashes to the key (#1374)")
+    func pruneDropsEdited() async throws {
+        let file = note()
+        defer { try? FileManager.default.removeItem(at: file); try? FileManager.default.removeItem(at: storeFile) }
+        try FileManager.default.createDirectory(at: paths.libraryDir, withIntermediateDirectories: true)
+        _ = try await run([write(file, "clean text\n")], store: store())
+        try "clean text, edited outside\n".write(to: file, atomically: true, encoding: .utf8)
+        #expect(store().pruneStale() == 1)
+        #expect(entries()?.isEmpty == true)
+    }
+
+    @Test("pruning a missing or garbled list writes nothing, so it still trusts nothing (#1374)")
+    func pruneLeavesMissingAndGarbledAlone() async throws {
+        let file = note()
+        defer { try? FileManager.default.removeItem(at: file); try? FileManager.default.removeItem(at: storeFile) }
+        #expect(store().pruneStale() == 0)
+        #expect(!FileManager.default.fileExists(atPath: storeFile.path), "no list was created")
+        try FileManager.default.createDirectory(at: paths.libraryDir, withIntermediateDirectories: true)
+        _ = try await run([write(file, "\(marker)\n")], store: store())
+        let garbled = Data("{not json".utf8)
+        try garbled.write(to: storeFile)
+        #expect(store().pruneStale() == 0)
+        #expect((try? Data(contentsOf: storeFile)) == garbled, "the garbled list was left as it was")
+        #expect(!(try await readBack(file, store: store()).result.contains(marker)), "and it still trusts nothing")
+    }
+
     @Test("the list lives where the protection applies: a protected write, and a policy-store write for a shell")
     func listIsProtected() throws {
         let list = paths.configDir.appendingPathComponent("guard-trust.json").path

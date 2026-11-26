@@ -107,6 +107,7 @@ struct IrisApp: App {
     static func openStore() {
         IrisMigrator.migrate(.default)
         ShippedSkills.seedIfNeeded(.default)
+        GuardTrustStore.shared.pruneStale()   // #1374: after the seed, which re-records the shipped library files
         AgentProfileStore.seedExamplesIfNeeded(.default)   // #465: once, when the folder is new
         // Once, in the app, on the one `AppState` that exists here — never from `AppState.init`,
         // which a test suite runs hundreds of times (#218).
