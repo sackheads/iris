@@ -146,8 +146,8 @@ going back out to the agents.
   style of the peer ledger / conversation store (not an ephemeral pub/sub topic; pub/sub's role here
   is at most to *notify* that an item exists). Any persisted `Codable` added for this uses
   `decodeIfPresent` (Invariant 1).
-- **Entry point:** a row under the pinned **Iris** conversation in the sidebar, with an unread
-  **badge count**, opening the mailbox view (list + detail). Validated in the mockup.
+- **Entry point:** a row under the pinned **Iris** conversation in the sidebar, with an open-items
+  **badge count** (F1; unread shows per row), opening the mailbox view (list + detail). Validated in the mockup.
 - Reading the Inbox must not re-evaluate the chat window or load the pinned Iris conversation
   (Invariant-style separation; cf. the streaming-read lesson in AGENTS.md).
 - A macOS notification on a new or reopened item (#920 slice 5, Brian F6: on by default, title only): a constant `Iris: Inbox`
