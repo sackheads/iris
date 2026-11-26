@@ -37,6 +37,8 @@ enum GuardProbeFixtures {
         var estimateOnly = false
         /// Only the latency calls: re-times an arm without judging the fixtures again.
         var latencyOnly = false
+        /// #1365: frame each peer-session row with the product's own `framePeerMessage` before judging it.
+        var framePeer = false
     }
 
     enum Runtime: Equatable {
@@ -70,10 +72,39 @@ enum GuardProbeFixtures {
     struct Item {
         let id: String
         let category: String
-        let text: String
+        var text: String
         let payload: String?
         var contextTag: String? = nil
         var label: String { payload == nil ? "benign" : "attack" }
+    }
+
+    /// #1365: the tag a peer message is judged under, `sanitizeArrival`'s for `IrisEngine.peerSource`.
+    static let peerContextTag = "system_event_\(IrisEngine.peerSource)"
+    /// The sender and envelope `--frame-peer` frames under: fixed, so every arm and every run judges the same bytes.
+    static let framedSender = (name: "iris-dev-2", id: UUID(uuidString: "1A2B3C4D-0000-4000-8000-000000000001")!)
+    static let framedEnvelope = PeerEnvelope(msgId: "m-1", contextId: "ctx-m-1", depth: 0, expectsReply: false, replyTo: nil)
+    /// How a peer message's frame starts, request or reply, topic or guest: a row starting so is already framed.
+    static let frameOpenings = ["Request from another session", "Reply from another session", "Message on topic ",
+                                "Request from \(IrisEngine.guestCautionMarker)", "Reply from \(IrisEngine.guestCautionMarker)"]
+
+    struct AlreadyFramed: Error, CustomStringConvertible {
+        let id: String
+        var description: String { "row \(id) is already framed; --frame-peer frames bare peer bodies, so drop the flag for this set" }
+    }
+
+    /// #1365: each peer-session row as `deliverPeerMessage` hands it to the guard, framed by the product's own
+    /// `framePeerMessage`, not a copy of it written into the fixture. A `peer_topic` row is left as it is (a topic
+    /// message is judged bare, once, at publish), and so is an `inbox_emit` row (the decision's fields, joined,
+    /// at raise), as is every other row.
+    static func framed(_ items: [Item]) throws -> [Item] {
+        try items.map { item in
+            guard item.contextTag == peerContextTag else { return item }
+            guard !frameOpenings.contains(where: item.text.hasPrefix) else { throw AlreadyFramed(id: item.id) }
+            var framed = item
+            framed.text = IrisEngine.framePeerMessage(item.text, senderName: framedSender.name, senderId: framedSender.id,
+                                                      envelope: framedEnvelope)
+            return framed
+        }
     }
 
     /// What one canary call did, filled in by `Recording` and the cloud send.

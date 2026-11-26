@@ -60,7 +60,13 @@ extension GuardProbeFixtures {
             FileHandle.standardError.write(Data("iris --guard-probe: can't read fixtures in \(o.dir): \(error)\n".utf8))
             return 1
         }
-        let all = fixtures.items + (o.joins ? joins(fixtures.items) : [])
+        let judged: [Item]
+        do { judged = o.framePeer ? try framed(fixtures.items) : fixtures.items } catch {
+            FileHandle.standardError.write(Data("iris --guard-probe: \(error)\n".utf8))
+            return 1
+        }
+        // The joins are tool output (no tag), so they are built from the rows as written.
+        let all = judged + (o.joins ? joins(fixtures.items) : [])
         let outDir = URL(fileURLWithPath: (o.out as NSString).expandingTildeInPath)
         try? FileManager.default.createDirectory(at: outDir, withIntermediateDirectories: true)
 
@@ -118,7 +124,7 @@ extension GuardProbeFixtures {
 
         // A paid run says what it expects to spend before its first call, and stops at the cap.
         // Planned calls: the first pass, the repeats, the latency calls, and flips at a guessed 10%.
-        let repeatSet = o.agreementSample > 0 ? agreementSample(fixtures.items, count: o.agreementSample) : all
+        let repeatSet = o.agreementSample > 0 ? agreementSample(judged, count: o.agreementSample) : all
         let planned = all + Array(repeating: repeatSet, count: max(0, o.repeats - 1)).flatMap { $0 }
             + Array(repeating: Item(id: "latency", category: "latency", text: GuardProbeCLI.defaultText, payload: nil), count: o.latency ? 15 : 0)
         if let rates, let ledger {
@@ -129,7 +135,7 @@ extension GuardProbeFixtures {
             var inRatio = 1.0, outPerCall = 600.0
             var basis = "uncalibrated: 600 output and thinking tokens per call assumed; --estimate-only calibrates"
             if o.estimateOnly {
-                let bySize = fixtures.items.sorted { $0.text.utf8.count < $1.text.utf8.count }
+                let bySize = judged.sorted { $0.text.utf8.count < $1.text.utf8.count }
                 let probes = [bySize.first!, bySize[bySize.count / 2], bySize.last!]
                 var predicted = 0, measuredIn = 0, measuredOut = 0, cost = 0.0
                 for item in probes {
@@ -178,7 +184,10 @@ extension GuardProbeFixtures {
 
         header.merge(["type": "header", "arm": o.arm, "task": "injection.verdict", "configuration": "tier 1 + 3",
                       "model": o.model, "dataset_family": "injection", "dataset_path": o.dir, "dataset_sha256": fixtures.sha,
-                      "joins": o.joins, "repeats": o.repeats, "agreement_sample": o.agreementSample,
+                      "joins": o.joins, "repeats": o.repeats,
+                      "peer_frame": o.framePeer
+                          ? "framePeerMessage request from \"\(framedSender.name)\" (\(framedSender.id.uuidString.prefix(8))), msg \(framedEnvelope.msgId)"
+                          : "none: row text as given", "agreement_sample": o.agreementSample,
                       "environment": environment()]) { a, _ in a }
         rows.write(header)
         rows.write(machineLoad(o.arm, at: "start"))
