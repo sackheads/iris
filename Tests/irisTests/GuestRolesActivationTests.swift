@@ -304,6 +304,20 @@ struct GuestRolesActivationTests {
         return condition()
     }
 
+    /// #1408: the guest stamp on a recipient, read at each of its turn's model calls, while the turn is running.
+    private final class StampAtTurn: LLMClientProtocol, @unchecked Sendable {
+        private let lock = NSLock()
+        private var stamps: [AccessBinding?] = []
+        private let read: @MainActor @Sendable () -> AccessBinding?
+        init(_ read: @escaping @MainActor @Sendable () -> AccessBinding?) { self.read = read }
+        var seen: [AccessBinding?] { lock.withLock { stamps } }
+        func generateContent(request: GeminiRequest, tier: ModelTier) async throws -> GeminiResponse {
+            let stamp = await read()
+            lock.withLock { stamps.append(stamp) }
+            return GeminiResponse(candidates: [Candidate(content: Content(role: "model", parts: [Part(text: "noted")]))], usageMetadata: nil)
+        }
+    }
+
     /// A guest engine whose model sends `message` to each address in turn, then ends.
     private func guestEngine(_ w: World, _ r: Rig, sends: [(to: String, message: String)]) -> IrisEngine {
         var responses = sends.enumerated().map { i, s in
@@ -320,12 +334,17 @@ struct GuestRolesActivationTests {
         let r = try rig(); defer { r.tearDown() }
         try r.registry.setRoles(["reviewer"], forClientId: "dev-1")
         let w = world(r)
+        // #1408: the stamp lives only while the recipient's turn runs (cleared when it ends), and this turn ends at
+        // once, so it's read at the turn's own model call, not from the store afterwards.
+        let stamps = StampAtTurn { [app = w.app, reviewer = w.reviewer] in app.guestSteeredBinding(for: reviewer) }
+        w.app.installEngine(IrisEngine(state: w.app, tier: .medium, principal: .main, client: stamps, retryDelays: [],
+                                       protectionEnabled: false))
         let engine = guestEngine(w, r, sends: [("role:reviewer", "to the reviewer"), ("role:builder", "to the builder")])
         await engine.processInput("go", source: "UI", conversationId: w.guest)
         #expect(await eventually { self.text(w.app, w.reviewer).contains("to the reviewer") })
-        let stamped = w.app.guestSteeredBinding(for: w.reviewer)
-        #expect(stamped?.principal == .mcpGuest && stamped?.isOwner == false && stamped?.profile.peerRoles == ["reviewer"],
-                "the recipient turn is a stamped non-owner .main turn")
+        #expect(await eventually { !stamps.seen.isEmpty }, "the recipient turn made its model call")
+        #expect(stamps.seen.allSatisfy { $0?.principal == .mcpGuest && $0?.isOwner == false && $0?.profile.peerRoles == ["reviewer"] },
+                "the recipient turn is a stamped non-owner .main turn: \(stamps.seen)")
         try await Task.sleep(nanoseconds: 300_000_000)
         #expect(!text(w.app, w.builder).contains("to the builder"), "an ungranted role stays unreachable")
     }
