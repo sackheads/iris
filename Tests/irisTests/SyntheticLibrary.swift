@@ -1,5 +1,6 @@
 import CryptoKit
 import Foundation
+@testable import IrisKit
 
 /// #1395 (part 0 of the background guard checker, #1391-#1394): a fake library to measure against, since a real
 /// one barely exists yet. Deterministic from a seed, so two runs compare byte for byte.
@@ -12,6 +13,9 @@ import Foundation
 /// A slice of notes carry an injection sample, and only ever one taken verbatim from the guard eval corpus
 /// (`EvalGuardTask`'s dataset): no new attack payloads (#802). The rest is generated prose that asks nothing of
 /// anyone.
+///
+/// Test tooling, so it lives with the tests (dev-3's #1401 review); #1391-#1394 measure through opt-in suites like
+/// `SyntheticLibraryGuardTiming`.
 enum SyntheticLibrary {
     enum Shape: String, Codable, Sendable {
         case home, vault
