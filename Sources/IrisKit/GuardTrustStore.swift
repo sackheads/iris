@@ -54,7 +54,7 @@ final class GuardTrustStore: @unchecked Sendable {
     }
 
     /// #1374: drops each entry whose file is gone or no longer hashes to its key, so a deleted or edited note's
-    /// entry doesn't stay forever. At launch only (`IrisApp.openStore`), never on a read, which already loads
+    /// entry doesn't stay forever. At launch only (`IrisApp.openStore`, off main), never on a read, which already loads
     /// and rewrites the whole list (#1402). It only ever removes trust: a missing or undecodable list is left as
     /// it is, still trusting nothing. Returns how many entries it dropped.
     @discardableResult
