@@ -46,6 +46,15 @@ final class LibraryGuardStore: @unchecked Sendable {
         Self.mode(for: path, in: entries())
     }
 
+    /// The root, as stored, of the deepest library `path` is under: what a bypass "for this library" is keyed by
+    /// (#1397 part 2).
+    func root(for path: String) -> String? {
+        let target = IrisPaths.realPath(path).lowercased()
+        return entries()
+            .filter { let root = IrisPaths.realPath($0.root).lowercased(); return target == root || target.hasPrefix(root + "/") }
+            .max { $0.root.count < $1.root.count }?.root
+    }
+
     static func mode(for path: String, in entries: [Entry]) -> LibraryGuardMode? {
         let target = IrisPaths.realPath(path).lowercased()
         return entries
