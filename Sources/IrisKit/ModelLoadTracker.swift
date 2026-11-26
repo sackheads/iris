@@ -12,7 +12,7 @@ enum ModelLoadPurpose: Sendable, Equatable {
     /// and the Setup Wizard test the same model as "promptGuard".
     init(role: String) {
         switch role {
-        case "canary", "canary.cloud", "promptGuard": self = .guardTier3
+        case "canary", "canary.cloud", "canary.local", "promptGuard": self = .guardTier3
         case "vibecop": self = .vibecop
         case "vision": self = .vision
         default: self = .other(role)

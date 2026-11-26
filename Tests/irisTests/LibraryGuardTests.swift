@@ -47,13 +47,15 @@ struct LibraryGuardTests {
 
     /// One guarded read of `text` as a library in `mode`, under scoped tiers and a health box of its own.
     private func judge(_ mode: LibraryGuardMode, engines: [String: AuxiliaryInferenceEngine],
-                       settings: ConfigManager, text: String = "a note \(UUID().uuidString)") async -> String {
+                       settings: ConfigManager, unreadableFile: Bool = false,
+                       text: String = "a note \(UUID().uuidString)") async -> String {
         let health = await MainActor.run { GuardTierHealth() }
         return await GuardTierHealth.$scoped.withValue(health) {
             await CoreMLEvaluator.$scopedModel.withValue(.init(PassingTier2())) {
                 await AuxiliaryModelManager.$scopedEngines.withValue(engines) {
                     await InjectionGuard.sanitizeUntrustedDisplay(text, contextTag: "tool_output_read_file", maxTier: .tier3_canary,
-                                                                  protectionEnabled: true, library: mode, settings: settings).text
+                                                                  protectionEnabled: true, library: mode,
+                                                                  libraryFileUnreadable: unreadableFile, settings: settings).text
                 }
             }
         }
@@ -206,6 +208,33 @@ struct LibraryGuardTests {
             #expect(text.contains("on-device checks only"), "\(text)")
             #expect(text.contains("isn't downloaded"), "the cause is named: \(text)")
             #expect(cloud.calls == 0)
+        }
+    }
+
+    @Test("local never sends to a cloud engine left on the global role by a switch without a relaunch (dev-2's #1403 review)")
+    func localRefusesACachedCloudEngine() async {
+        await withSettings { settings in
+            settings.promptGuardEngine = AuxiliaryEngineType.ollama.rawValue
+            let sends = CountingCanary()
+            var cloud = CloudAuxiliaryEngine.make(role: "canary", config: settings)
+            cloud.send = { _, _ in
+                _ = try await sends.generate(prompt: "", jsonSchema: nil)
+                return GeminiResponse(candidates: [Candidate(content: Content(role: "model", parts: [Part(text: "SAFE")]))], usageMetadata: nil)
+            }
+            cloud.sendFresh = nil
+            // `getEngine` keeps the first engine a role loaded; this stands in for the cloud one loaded before the switch.
+            let text = await judge(.local, engines: ["canary": cloud], settings: settings)
+            #expect(sends.calls == 0, "the note went to the cloud")
+            #expect(text.contains("on-device checks only") && text.contains("relaunch"), "\(text)")
+        }
+    }
+
+    @Test("with the library list unreadable, a block names the file, not a library (dev-3's #1403 review)")
+    func unreadableFileBlockSaysSo() async {
+        await withSettings { settings in
+            settings.promptGuardEngine = AuxiliaryEngineType.cloud.rawValue
+            let text = await judge(.local, engines: [:], settings: settings, unreadableFile: true)
+            #expect(text.contains("library-guard.json") && !text.contains("this library is set"), "\(text)")
         }
     }
 

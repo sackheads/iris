@@ -3,9 +3,11 @@ import Foundation
 /// #1397: how tier 3 judges a read from a registered external library. Brian, on a work vault Gemini already
 /// scans: "at most it should be an *option* to use cloud or gemini (or maybe none at all)."
 enum LibraryGuardMode: String, Codable, CaseIterable, Sendable {
-    /// On-device only, whatever the global engine: the global one when it is local, else llama.cpp's gemma.
+    /// The guard check runs on this Mac, whatever the global engine: the global one when it is local, else
+    /// llama.cpp's gemma. The note still goes to the chat model when Iris reads it.
     case local
-    /// The configured cloud canary, whatever the global engine: the note's text goes to the cloud provider.
+    /// The configured cloud canary, whatever the global engine: the note also goes to the canary's provider,
+    /// which can differ from the chat provider.
     case cloud
     /// No tier 3. Tier 1's strip, the `<untrusted_context>` wrap and the conversation's taint all stay.
     case none
@@ -15,8 +17,9 @@ enum LibraryGuardMode: String, Codable, CaseIterable, Sendable {
 /// `library/EXTERNAL_LIBRARIES.md` (a tainted turn could otherwise set its own library to `none`). It lives in
 /// `config/`, a protected directory like `guard-trust.json` (#1369): `write_file` there is a protected write and
 /// a host command naming it is a person's call, even under YOLO (#1315, #1326), best effort for a path built at
-/// run time (#1373). A missing or unreadable file, or one with a mode this build doesn't know, names no roots,
-/// so no read is a library read and each is judged by the global settings, as before #1397.
+/// run time (#1373). A missing file names no roots, so each read is judged by the global settings, as before
+/// #1397. One that is there but doesn't decode (a mode this build doesn't know too) sends every guarded tool
+/// result to `local`: which paths were a vault's can't be told, so none goes to a cloud canary.
 final class LibraryGuardStore: @unchecked Sendable {
     static let shared = LibraryGuardStore(file: IrisPaths.default.configDir.appendingPathComponent("library-guard.json"))
 
@@ -67,8 +70,9 @@ final class LibraryGuardStore: @unchecked Sendable {
     }
 
     /// The mode a guarded tool result is judged under (#1397): `local` for every one while the file is there but
-    /// doesn't decode (which paths were a vault's can't be told, so none goes to the cloud), else the mode of the
-    /// root `path` is under, else nil (the global settings). `path` is a `read_file`'s, nil for other tools.
+    /// doesn't decode (which paths were a vault's can't be told, so none goes to a cloud canary), else the mode of the
+    /// root `path` is under, else nil (the global settings). `path` is a `read_file`'s, nil for other
+    /// tools: a `run_command` that prints a note follows the global settings (planner, #1403).
     func readMode(_ path: String?) -> LibraryGuardMode? {
         let state: [Entry]? = lock.withLock {
             guard let data = try? Data(contentsOf: file) else { return [] }
@@ -78,8 +82,8 @@ final class LibraryGuardStore: @unchecked Sendable {
         return path.flatMap { Self.mode(for: $0, in: entries) }
     }
 
-    /// The file is there but doesn't decode: every library is judged by the global settings until it's fixed,
-    /// and Settings says so.
+    /// The file is there but doesn't decode: every guarded tool result is judged `local` until it's fixed, and
+    /// Settings says so.
     var isUnreadable: Bool {
         lock.withLock {
             guard let data = try? Data(contentsOf: file) else { return false }
