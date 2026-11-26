@@ -194,8 +194,7 @@ struct InboxView: View {
                         freeTextSection(item, required: true)
                     case .timedVetoCountdown:
                         countdownSection(item)
-                        optionsSection(item)
-                        freeTextSection(item, required: false)
+                        vetoSection(item)
                     case .dismissOnly:
                         EmptyView()
                     }
@@ -260,14 +259,51 @@ struct InboxView: View {
         return InboxUIModel.history(of: (try? state.store.inbox.thread(itemId: item.id)) ?? [])
     }
 
-    /// A read-only summary of Brian's own answer, for an item no longer `.open` (finding 3).
+    /// A read-only summary of the answer, for an item no longer `.open` (finding 3). "You" only for Brian's own:
+    /// an automatic default and a veto say what they were (#920 slice 4).
     private func answeredSummary(_ answer: InboxAnswer, item: InboxItem) -> some View {
         VStack(alignment: .leading, spacing: 4) {
-            if let chosen = answer.chosenOptionId, let option = item.options.first(where: { $0.id == chosen }) {
-                Text("You chose: \(option.label)").font(.body)
+            ForEach(Array(InboxUIModel.answerSummary(answer, item: item).enumerated()), id: \.offset) { _, line in
+                Text(line).font(.body)
             }
-            if let text = answer.freeText {
-                Text("You wrote: \(text)").font(.body)
+        }
+    }
+
+    /// #920 slice 4b: a timed veto's response area. The options are shown for what they say, the default marked;
+    /// Brian approves the default early or vetoes it, with his reasons if he gives any.
+    private func vetoSection(_ item: InboxItem) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            ForEach(item.options, id: \.id) { option in
+                VStack(alignment: .leading, spacing: 2) {
+                    HStack(spacing: 6) {
+                        Text(option.label).font(.body)
+                        if InboxUIModel.isVetoDefault(option, of: item) {
+                            Text("default").font(.caption2.bold()).foregroundColor(.accentColor)
+                        }
+                    }
+                    if !option.pros.isEmpty {
+                        Text("For: " + option.pros.joined(separator: ", ")).font(.caption).foregroundColor(IrisPalette.pro)
+                    }
+                    if !option.cons.isEmpty {
+                        Text("Against: " + option.cons.joined(separator: ", ")).font(.caption).foregroundColor(IrisPalette.con)
+                    }
+                }
+            }
+            Text("Why, if you veto (optional)").font(.caption).foregroundColor(.secondary)
+            TextEditor(text: $freeText)
+                .frame(minHeight: 40, maxHeight: 100)
+                .font(.body)
+                .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.secondary.opacity(0.3)))
+            routingDisclosure(item)
+            HStack {
+                if let approve = InboxUIModel.approveNowLabel(item) {
+                    Button(approve) { approveNow(item) }
+                        .disabled(submitting)
+                        .help("Your choice of the default, sent now rather than at the deadline")
+                }
+                Button("Veto") { veto(item) }
+                    .disabled(submitting)
+                    .help("The default doesn't go ahead; your reasons, if any, go with it")
             }
         }
     }
@@ -437,6 +473,28 @@ struct InboxView: View {
         let text = freeText
         Task {
             let outcome = await state.engine.submitInboxAnswer(itemId: item.id, choice: choice, freeText: text)
+            await MainActor.run {
+                submitting = false
+                lastOutcome = Self.describe(outcome)
+                if case .refused = outcome { } else { state.selectedInboxItemId = nil }
+            }
+        }
+    }
+
+    private func approveNow(_ item: InboxItem) {
+        run { await state.engine.approveInboxVetoNow(itemId: item.id) }
+    }
+
+    private func veto(_ item: InboxItem) {
+        let note = freeText
+        run { await state.engine.vetoInboxItem(itemId: item.id, note: note) }
+    }
+
+    /// One answer, as `submit` sends one: the outcome shown, and the selection cleared unless it was refused.
+    private func run(_ send: @escaping () async -> IrisEngine.InboxSubmitOutcome) {
+        submitting = true
+        Task {
+            let outcome = await send()
             await MainActor.run {
                 submitting = false
                 lastOutcome = Self.describe(outcome)
