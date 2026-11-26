@@ -14,14 +14,16 @@ struct GuardVerdictStoreTests {
     /// other text too.
     private final class CountingCanary: AuxiliaryInferenceEngine, @unchecked Sendable {
         let flag: String?
+        let fails: Bool
         private let lock = NSLock()
         private var count = 0
         var calls: Int { lock.withLock { count } }
-        init(flagging flag: String? = nil) { self.flag = flag }
+        init(flagging flag: String? = nil, fails: Bool = false) { self.flag = flag; self.fails = fails }
         func loadModel(config: AuxiliaryModelConfig) async throws {}
         func unloadModel() async {}
         func generate(prompt: String, jsonSchema: String?) async throws -> String {
             if prompt.contains(GuardVerdictStoreTests.token) { lock.withLock { count += 1 } }
+            if fails, prompt.contains(GuardVerdictStoreTests.token) { throw CocoaError(.fileReadUnknown) }
             if let flag, prompt.contains(flag) { return "MALICIOUS" }
             return "SAFE"
         }
@@ -30,7 +32,11 @@ struct GuardVerdictStoreTests {
     /// Passes everything, or flags any window holding `flag`.
     private struct Tier2: CoreMLModelProtocol {
         var flag: String? = nil
-        func evaluate(text: String) async throws -> Double { flag.map { text.contains($0) ? 0.99 : 0 } ?? 0 }
+        var fails = false
+        func evaluate(text: String) async throws -> Double {
+            if fails { throw CocoaError(.fileReadUnknown) }
+            return flag.map { text.contains($0) ? 0.99 : 0 } ?? 0
+        }
         func tokenCount(_ text: String) -> Int { max(1, text.utf8.count / 4) }
     }
 
@@ -134,8 +140,6 @@ struct GuardVerdictStoreTests {
         #expect(second.tainted, "a kept verdict is still someone else's text")
     }
 
-    /// dev-1's #1390 review: with tier 2 skipped, tier 3 judges `clean` cut to the cap, and a hit must show that cut
-    /// too. Only reachable when tier 1 grows a read that was already capped: NFKC turns U+FDFA (3 bytes) into 33.
     @Test("llama.cpp's greedy canary keeps its first SAFE (Brian's #1390 ruling)")
     func greedyKeepsFirstRun() async throws {
         let file = try note("plain note\n")
@@ -178,6 +182,24 @@ struct GuardVerdictStoreTests {
         #expect(try await launchAndRead(file, runs: 2).canaryCalls == 0)
     }
 
+    @Test("a sampling canary's SAFE then any other tier's block or error keeps nothing (dev-3's #1390 review)",
+          arguments: ["tier 2 block", "tier 2 error", "tier 3 error"])
+    func samplingSafeThenFailureKeepsNothing(failure: String) async throws {
+        let file = try note("plain note\n")
+        defer { cleanup(file) }
+        #expect(try await launchAndRead(file, runs: 2).canaryCalls == 1)
+        #expect(try entries().count == 1)
+        let failed = switch failure {
+        case "tier 2 block": try await launchAndRead(file, tier2: Tier2(flag: "plain note"), runs: 2)
+        case "tier 2 error": try await launchAndRead(file, tier2: Tier2(fails: true), runs: 2)
+        default: try await launchAndRead(file, canary: CountingCanary(fails: true), runs: 2)
+        }
+        #expect(failed.result.contains("BLOCKED"), "not a \(failure): \(failed.result.prefix(300))")
+        #expect(try entries().isEmpty, "a \(failure) between the two SAFEs left the first behind")
+    }
+
+    /// dev-1's #1390 review: with tier 2 skipped, tier 3 judges `clean` cut to the cap, and a hit must show that cut
+    /// too. Only reachable when tier 1 grows a read that was already capped: NFKC turns U+FDFA (3 bytes) into 33.
     @Test("with tier 2 skipped, a hit shows the same capped text tier 3 judged")
     func skippedTier2HitIsCapped() async throws {
         let file = try note(String(repeating: "\u{FDFA}", count: 10_000) + "\n")
@@ -258,6 +280,20 @@ struct GuardVerdictStoreTests {
         defer { cleanup(file, file.deletingLastPathComponent()) }
         #expect(try await launchAndRead(file).canaryCalls == 1)
         #expect(!FileManager.default.fileExists(atPath: storeFile.path))
+    }
+
+    @Test("a confirmed verdict's 30 days count from the first SAFE, not the confirming one (dev-1's #1390 review)")
+    func ttlFromFirstRun() {
+        defer { cleanup() }
+        let kept = store()
+        let t0 = clock.now
+        kept.recordSafe("k", tier2Skipped: false, runs: 2)
+        #expect(kept.safeVerdict("k") == nil, "an unconfirmed SAFE was served")
+        clock.now = t0.addingTimeInterval(29 * 86_400)
+        kept.recordSafe("k", tier2Skipped: false, runs: 2)
+        #expect(kept.safeVerdict("k") != nil)
+        clock.now = t0.addingTimeInterval(GuardVerdictStore.ttl + 60)
+        #expect(kept.safeVerdict("k") == nil, "the confirming SAFE restarted the 30 days")
     }
 
     @Test("the store holds at most 512 verdicts, dropping the least recently served")
