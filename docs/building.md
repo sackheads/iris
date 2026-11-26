@@ -198,7 +198,10 @@ Each run writes one row per judgement to `<out>/<arm>.jsonl`, with the model's d
 and the dataset's sha256 in a header row. `--joins` adds each benign category joined to 8 and
 32 KB; `--latency` times a cold call, five warm and three rounds of three at once; `--baseline`
 re-judges, `--flip-repeats` times (3), every text whose first verdict differs from that arm's.
-`--think off` asks a thinking Ollama model not to think. A cloud arm makes paid calls. It needs
+Thinking is sent as the product's canary sends it, off for an Ollama model that thinks (#783); `--think on`
+leaves `think` out of the request, so a thinking model deliberates, and `--think off` asks it not to. The
+header's `think_sent` says which. Before #1415 the probe's default was `on`, a configuration no product
+check runs. A cloud arm makes paid calls. It needs
 `--allow-paid` and a `CloudModels` row with a current listed price (one without, or past its price date, is
 refused before any call, as `iris --eval` and `--bench` refuse it, #1346), prints its estimate before the first call, and never passes `--max-dollars` (5):
 each call first reserves the most it could cost in the spend ledger, and settles what it did cost

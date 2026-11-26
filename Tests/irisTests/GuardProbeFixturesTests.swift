@@ -57,8 +57,22 @@ struct GuardProbeFixturesTests {
         let f = try #require(o.fixtures)
         #expect(f.model == "ollama:gemma4:12b-32k")
         #expect(GuardProbeFixtures.Runtime(f.model) == .ollama("gemma4:12b-32k"), "split on the first colon only")
-        #expect(f.thinkOff && f.repeats == 3 && f.agreementSample == 40 && f.joins && f.latency)
+        #expect(f.think == .off && f.repeats == 3 && f.agreementSample == 40 && f.joins && f.latency)
         #expect(!f.allowPaid && f.maxDollars == 5 && f.geminiAuth == "adc")
+    }
+
+    /// #1415: with no `--think`, the probe measures what the product runs. It used to send no `think`, so a thinking
+    /// gemma deliberated on every judgement, and #1414's first A/B timed a configuration no product check uses.
+    @Test("with no --think, the probe's canary asks for thinking exactly as the product's canary does (#1415)")
+    func thinkDefaultsToTheProducts() throws {
+        let args = ["iris", "--guard-probe", "--fixtures", "fx", "--model", "ollama:gemma4:12b", "--arm", "a", "--out", "o"]
+        let f = try #require(try GuardProbeCLI.parse(args)?.get()?.fixtures)
+        #expect(f.think == .product)
+        #expect(GuardProbeFixtures.suppressThinking(f.think) == AuxiliaryModelManager.suppressesThinking(role: CloudAuxiliaryEngine.canaryRole))
+        #expect(GuardProbeFixtures.suppressThinking(f.think), "the product asks a thinking canary not to think (#783)")
+        #expect(GuardProbeFixtures.thinkSent(f.think).hasSuffix("as the product sends it"))
+        #expect(!GuardProbeFixtures.suppressThinking(.on) && GuardProbeFixtures.suppressThinking(.off))
+        #expect(GuardProbeFixtures.thinkSent(.on) == "none (the model thinks if it can), --think on")
     }
 
     @Test func refusesAnIncompleteOrBadArm() {
