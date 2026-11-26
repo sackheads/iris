@@ -702,8 +702,10 @@ public struct InjectionGuard {
         PerformanceProfiler.event("guard.tier2 end source=\(source) ms=\(Int(MonotonicClock.nowMs() - tier2Start)) verdict=\(tier2.logName)")
         switch tier2 {
         case .error:
+            if let kept, let keptKey { kept.forget(keptKey) }
             return Verdict(outcome: .blocked(marker: "[CONTENT BLOCKED BY TIER 2 INJECTION GUARD]"), cacheable: false, unjudged: unjudged, tier2: tier2.logName)
         case .malicious:
+            if let kept, let keptKey { kept.forget(keptKey) }
             let blocked = GuardOutcome.blocked(marker: "[CONTENT BLOCKED BY TIER 2 INJECTION GUARD]")
             cache?.set(key, blocked, unjudged: unjudged)
             return Verdict(outcome: blocked, cacheable: true, unjudged: unjudged, tier2: tier2.logName)
@@ -749,8 +751,11 @@ public struct InjectionGuard {
         PerformanceProfiler.event("guard.tier3 end source=\(source) ms=\(Int(MonotonicClock.nowMs() - tier3Start)) verdict=\(tier3.logName)")
         switch tier3 {
         case .error:
+            // #1390: a block or error between a sampling canary's two SAFEs keeps nothing.
+            if let kept, let keptKey { kept.forget(keptKey) }
             return Verdict(outcome: .blocked(marker: "[CONTENT BLOCKED BY TIER 3 CANARY GUARD]"), cacheable: false, unjudged: unjudged, tier2: tier2.logName)
         case .malicious:
+            if let kept, let keptKey { kept.forget(keptKey) }
             let blocked = GuardOutcome.blocked(marker: "[CONTENT BLOCKED BY TIER 3 CANARY GUARD]")
             cache?.set(key, blocked, unjudged: unjudged)
             return Verdict(outcome: blocked, cacheable: true, unjudged: unjudged, tier2: tier2.logName)
@@ -768,9 +773,10 @@ public struct InjectionGuard {
             let shown = display(clean, markersMayCarry: attemptingFidelity && modelTierRan)
             let passed = GuardOutcome.passed(clean: shown.text)
             cache?.set(key, passed, unjudged: unjudged, divergedLines: shown.diverged)
-            // #1370: kept only when tier 3 judged the whole text safe and tier 2 withheld nothing.
+            // #1370: kept only when tier 3 judged the whole text safe and tier 2 withheld nothing; a sampling
+            // canary needs a second agreeing read first (#1390).
             if let kept, let keptKey, tier3 == .safe, tier2 == .safe || tier2 == .skipped {
-                kept.recordSafe(keptKey, tier2Skipped: tier2 == .skipped)
+                kept.recordSafe(keptKey, tier2Skipped: tier2 == .skipped, runs: kept.runsToKeep(fingerprint))
             }
             return Verdict(outcome: passed, cacheable: true, unjudged: unjudged, tier2: tier2.logName, divergedLines: shown.diverged)
         }

@@ -54,9 +54,27 @@ struct GuardVerdictStoreTests {
     private let clock = Clock()
     private var paths: IrisPaths { IrisPaths.default }
 
-    private func store() -> GuardVerdictStore {
+    /// `runs` stands in for the canary engine's sampling (2: Ollama or cloud); nil asks the real engine mapping.
+    private func store(runs: Int? = nil, seen: Seen? = nil) -> GuardVerdictStore {
         let version = version, clock = clock
-        return GuardVerdictStore(file: storeFile, now: { clock.now }, version: { _ in version.current })
+        return GuardVerdictStore(file: storeFile, now: { clock.now }, version: { _ in version.current }, runsToKeep: { fp in
+            seen?.engine = fp.promptGuardEngine
+            return runs ?? GuardVerdictStore.runsToKeep(fp)
+        })
+    }
+
+    /// The canary engine the store was asked about, so a test knows which mapping it exercised.
+    private final class Seen: @unchecked Sendable {
+        private let lock = NSLock()
+        private var value: String?
+        var engine: String? { get { lock.withLock { value } } set { lock.withLock { value = newValue } } }
+    }
+
+    private func entries() throws -> [String: GuardVerdictStore.Entry] {
+        guard let data = try? Data(contentsOf: storeFile) else { return [:] }
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .secondsSince1970
+        return try decoder.decode([String: GuardVerdictStore.Entry].self, from: data)
     }
 
     private func note(_ text: String, in folder: URL? = nil) throws -> URL {
@@ -69,7 +87,8 @@ struct GuardVerdictStoreTests {
 
     /// One launch's first `read_file` of `file` (`tier2` nil: tier 2 skips): a fresh engine, a fresh store over the same file. Returns what the
     /// model was handed, whether it tainted, and how many times the canary was asked.
-    private func launchAndRead(_ file: URL, canary: CountingCanary = CountingCanary(), tier2: Tier2? = Tier2()) async throws
+    private func launchAndRead(_ file: URL, canary: CountingCanary = CountingCanary(), tier2: Tier2? = Tier2(),
+                               runs: Int? = nil, seen: Seen? = nil) async throws
         -> (result: String, tainted: Bool, canaryCalls: Int) {
         let state = AppState(store: try ConversationStore.inMemory(), tier2Provisioning: .provisioned,
                              tier3Provisioning: .provisioned, createIfEmpty: false, emitLaunchNotices: false)
@@ -82,7 +101,7 @@ struct GuardVerdictStoreTests {
             reply(Part(functionCall: FunctionCall(name: "read_file", args: ["path": .string(file.path)]))),
             reply(Part(text: "done")),
         ]), retryDelays: [], protectionEnabled: true, sessionPeerCount: 0,
-            guardTrust: GuardTrustStore(file: trustFile), guardVerdicts: store())
+            guardTrust: GuardTrustStore(file: trustFile), guardVerdicts: store(runs: runs, seen: seen))
         await CoreMLEvaluator.$scopedModel.withValue(.init(tier2)) {
             await AuxiliaryModelManager.$scopedEngines.withValue(["canary": canary]) {
                 await engine.processInput("go", source: "UI", conversationId: id)
@@ -117,6 +136,48 @@ struct GuardVerdictStoreTests {
 
     /// dev-1's #1390 review: with tier 2 skipped, tier 3 judges `clean` cut to the cap, and a hit must show that cut
     /// too. Only reachable when tier 1 grows a read that was already capped: NFKC turns U+FDFA (3 bytes) into 33.
+    @Test("llama.cpp's greedy canary keeps its first SAFE (Brian's #1390 ruling)")
+    func greedyKeepsFirstRun() async throws {
+        let file = try note("plain note\n")
+        defer { cleanup(file) }
+        let seen = Seen()
+        #expect(try await launchAndRead(file, seen: seen).canaryCalls == 1)
+        #expect(seen.engine == AuxiliaryEngineType.llamaCPP.rawValue, "the live read asked about \(seen.engine ?? "nothing")")
+        #expect(try entries().values.map(\.confirmed) == [true])
+        #expect(try await launchAndRead(file).canaryCalls == 0)
+    }
+
+    @Test("a sampling canary keeps a verdict only after two agreeing SAFEs; the first is never served (Brian's #1390 ruling)")
+    func samplingNeedsTwo() async throws {
+        let file = try note("plain note\n")
+        defer { cleanup(file) }
+        let first = try await launchAndRead(file, runs: 2)
+        #expect(first.canaryCalls == 1)
+        #expect(try entries().values.map(\.confirmed) == [false])
+        let second = try await launchAndRead(file, runs: 2)
+        #expect(second.canaryCalls == 1, "one SAFE roll was served")
+        #expect(second.result == first.result, "the live read returns on its own verdict, as before")
+        #expect(try entries().values.map(\.confirmed) == [true])
+        let third = try await launchAndRead(file, runs: 2)
+        #expect(third.canaryCalls == 0)
+        #expect(third.result == first.result)
+    }
+
+    @Test("a sampling canary's SAFE then BLOCK keeps nothing: the next SAFE starts again (Brian's #1390 ruling)")
+    func samplingSafeThenBlockKeepsNothing() async throws {
+        let marker = "SOMETIMES-1370-\(UUID().uuidString)"
+        let file = try note("a note that says \(marker)\n")
+        defer { cleanup(file) }
+        #expect(try await launchAndRead(file, runs: 2).canaryCalls == 1)
+        #expect(try entries().count == 1)
+        let blocked = try await launchAndRead(file, canary: CountingCanary(flagging: marker), runs: 2)
+        #expect(!blocked.result.contains(marker))
+        #expect(try entries().isEmpty, "a block between the two SAFEs left the first behind")
+        #expect(try await launchAndRead(file, runs: 2).canaryCalls == 1)
+        #expect(try await launchAndRead(file, runs: 2).canaryCalls == 1, "the SAFE before the block counted toward two")
+        #expect(try await launchAndRead(file, runs: 2).canaryCalls == 0)
+    }
+
     @Test("with tier 2 skipped, a hit shows the same capped text tier 3 judged")
     func skippedTier2HitIsCapped() async throws {
         let file = try note(String(repeating: "\u{FDFA}", count: 10_000) + "\n")
@@ -310,6 +371,23 @@ struct GuardVersionTests {
         #expect(retrained != before, "a retrained tier-2 model under the same name")
         try Data("yy".utf8).write(to: gguf)
         #expect(await GuardVersion.modelIdentity(fp, ollamaTags: { nil }) != retrained, "a re-downloaded canary file")
+    }
+
+    @Test("only llama.cpp's greedy decode keeps one SAFE; every sampling engine needs two")
+    func runsPerEngine() {
+        let dir = FileManager.default.temporaryDirectory
+        #expect(GuardVerdictStore.runsToKeep(fingerprint(engine: "llama_cpp", model: "m", dir: dir)) == 1)
+        for engine in ["ollama", "cloud", "mlx", "something-new"] {
+            #expect(GuardVerdictStore.runsToKeep(fingerprint(engine: engine, model: "m", dir: dir)) == 2, "\(engine)")
+        }
+    }
+
+    @Test("an entry written before #1390's ruling decodes as unconfirmed, so it isn't served")
+    func oldEntryIsUnconfirmed() throws {
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .secondsSince1970
+        let entry = try decoder.decode(GuardVerdictStore.Entry.self, from: Data(#"{"judged":1,"used":1,"tier2Skipped":false}"#.utf8))
+        #expect(!entry.confirmed)
     }
 
     @Test("an MLX canary has no identity Iris can see, so nothing is kept for it (dev-3's #1390 review)")

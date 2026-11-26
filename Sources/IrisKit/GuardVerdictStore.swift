@@ -6,7 +6,9 @@ import Foundation
 /// outside edit) pays tiers 2 and 3 once, not on every launch's first read (16-20 s on gemma for 12 KB).
 ///
 /// Only a whole pass that tier 3 actually judged is kept: a block, a tier error, a tier-2 partial and a skipped
-/// canary are judged again next time. What is kept is the verdict, never text: a hit runs tier 1 again and wraps
+/// canary are judged again next time. A sampling canary (Ollama, cloud) has to say SAFE on two reads of the same
+/// version before it is kept, so one lucky roll isn't served for 30 days (Brian, #1390); a block or error between
+/// them drops the first. llama.cpp's canary is greedy, so its one pass is kept. What is kept is the verdict, never text: a hit runs tier 1 again and wraps
 /// the result like any judged read. The key is `InjectionGuard.cacheKey` (the content and the guard settings) plus
 /// `GuardVersion`, what that key doesn't cover: the canary prompts, the strip's rules, the build and the tier-3
 /// model's identity. No version (an Ollama that doesn't answer) keeps and serves nothing.
@@ -24,29 +26,52 @@ final class GuardVerdictStore: @unchecked Sendable {
         var used: Date
         /// Tier 2 skipped (no model), so the judged text was capped for tier 3; a hit caps it the same way.
         var tier2Skipped: Bool
+        /// False for a sampling canary's first SAFE, which is never served: it waits for a second one.
+        var confirmed: Bool
+
+        init(judged: Date, used: Date, tier2Skipped: Bool, confirmed: Bool) {
+            self.judged = judged; self.used = used; self.tier2Skipped = tier2Skipped; self.confirmed = confirmed
+        }
+
+        init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            judged = try c.decode(Date.self, forKey: .judged)
+            used = try c.decode(Date.self, forKey: .used)
+            tier2Skipped = try c.decode(Bool.self, forKey: .tier2Skipped)
+            confirmed = try c.decodeIfPresent(Bool.self, forKey: .confirmed) ?? false
+        }
     }
 
     private let file: URL
     private let lock = NSLock()
     private let now: @Sendable () -> Date
     let version: @Sendable (InjectionGuard.GuardConfigFingerprint) async -> String?
+    let runsToKeep: @Sendable (InjectionGuard.GuardConfigFingerprint) -> Int
 
     init(file: URL, now: @escaping @Sendable () -> Date = { Date() },
-         version: @escaping @Sendable (InjectionGuard.GuardConfigFingerprint) async -> String? = { await GuardVersion.current($0) }) {
+         version: @escaping @Sendable (InjectionGuard.GuardConfigFingerprint) async -> String? = { await GuardVersion.current($0) },
+         runsToKeep: @escaping @Sendable (InjectionGuard.GuardConfigFingerprint) -> Int = GuardVerdictStore.runsToKeep) {
         self.file = file
         self.now = now
         self.version = version
+        self.runsToKeep = runsToKeep
+    }
+
+    /// How many agreeing SAFE judgements keep a verdict: one for llama.cpp's greedy decode, two for anything that
+    /// samples (Ollama and cloud send no temperature). MLX has no version, so it keeps nothing either way.
+    static func runsToKeep(_ fingerprint: InjectionGuard.GuardConfigFingerprint) -> Int {
+        fingerprint.promptGuardEngine == AuxiliaryEngineType.llamaCPP.rawValue ? 1 : 2
     }
 
     static func key(_ cacheKey: String, version: String) -> String {
         SHA256.hash(data: Data("\(cacheKey)\u{0}\(version)".utf8)).map { String(format: "%02x", $0) }.joined()
     }
 
-    /// The kept SAFE verdict for `key`, if one is younger than the TTL; marks it used.
+    /// The kept SAFE verdict for `key`, if one is confirmed and younger than the TTL; marks it used.
     func safeVerdict(_ key: String) -> Entry? {
         lock.withLock {
             var entries = load()
-            guard var entry = entries[key] else { return nil }
+            guard var entry = entries[key], entry.confirmed else { return nil }
             let at = now()
             guard at.timeIntervalSince(entry.judged) < Self.ttl else {
                 entries.removeValue(forKey: key)
@@ -60,16 +85,33 @@ final class GuardVerdictStore: @unchecked Sendable {
         }
     }
 
-    func recordSafe(_ key: String, tier2Skipped: Bool) {
+    /// One SAFE judgement of `key`. With `runs` 2, the first is held unconfirmed and the second confirms it; the
+    /// TTL still counts from the first.
+    func recordSafe(_ key: String, tier2Skipped: Bool, runs: Int = 1) {
         lock.withLock {
             let at = now()
             var entries = load().filter { at.timeIntervalSince($0.value.judged) < Self.ttl }
-            entries[key] = Entry(judged: at, used: at, tier2Skipped: tier2Skipped)
+            if runs <= 1 {
+                entries[key] = Entry(judged: at, used: at, tier2Skipped: tier2Skipped, confirmed: true)
+            } else if let first = entries[key] {
+                entries[key] = Entry(judged: first.judged, used: at, tier2Skipped: tier2Skipped, confirmed: true)
+            } else {
+                entries[key] = Entry(judged: at, used: at, tier2Skipped: tier2Skipped, confirmed: false)
+            }
             if entries.count > Self.capacity {
                 for stale in entries.sorted(by: { $0.value.used < $1.value.used }).prefix(entries.count - Self.capacity) {
                     entries.removeValue(forKey: stale.key)
                 }
             }
+            save(entries)
+        }
+    }
+
+    /// A block or error on `key`: an unconfirmed first SAFE doesn't survive it.
+    func forget(_ key: String) {
+        lock.withLock {
+            var entries = load()
+            guard entries.removeValue(forKey: key) != nil else { return }
             save(entries)
         }
     }
