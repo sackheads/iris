@@ -365,6 +365,7 @@ struct GuestSessionDriverTests {
         let r = try rig()
         let latch = TestGate()
         r.script.latch = latch
+        defer { latch.open() }
         guard case .accepted = await r.driver.submit(text: "first", from: "dev-1") else { Issue.record("first refused"); return }
         #expect(await r.driver.submit(text: "second", from: "dev-1") == .busy)
         latch.open()
@@ -417,6 +418,7 @@ struct GuestSessionDriverTests {
         let r = try rig(clients: ["dev-1", "dev-2"])
         let latch = TestGate()
         r.script.latch = latch
+        defer { latch.open() }
         _ = await r.driver.submit(text: "one", from: "dev-1")
         _ = await r.driver.submit(text: "two", from: "dev-2")
         try r.tokens.revokeToken(forClientId: "dev-1")
@@ -435,6 +437,7 @@ struct GuestSessionDriverTests {
         let r = try rig(ttl: .seconds(900))
         let latch = TestGate()
         r.script.latch = latch
+        defer { latch.open() }
         _ = await r.driver.submit(text: "long", from: "dev-1")
         let script = r.script
         #expect(await polled(within: 10) { script.texts.count == 1 })
