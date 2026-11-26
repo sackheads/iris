@@ -107,7 +107,9 @@ struct IrisApp: App {
     static func openStore() {
         IrisMigrator.migrate(.default)
         ShippedSkills.seedIfNeeded(.default)
-        GuardTrustStore.shared.pruneStale()   // #1374: after the seed, which re-records the shipped library files
+        // #1374: after the seed, which re-records the shipped library files. Off main: it reads every recorded
+        // note, and the first window shouldn't wait on that. The store's own lock orders it with any write.
+        DispatchQueue.global(qos: .utility).async { GuardTrustStore.shared.pruneStale() }
         AgentProfileStore.seedExamplesIfNeeded(.default)   // #465: once, when the folder is new
         // Once, in the app, on the one `AppState` that exists here — never from `AppState.init`,
         // which a test suite runs hundreds of times (#218).
