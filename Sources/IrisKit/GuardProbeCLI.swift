@@ -105,7 +105,7 @@ enum GuardProbeCLI {
                 case "--out": f.out = value
                 case "--think":
                     guard value == "on" || value == "off" else { return .failure(.badValue(flag)) }
-                    f.thinkOff = value == "off"
+                    f.think = value == "off" ? .off : .on
                 case "--thinking-level": f.thinkingLevel = value
                 case "--repeats", "--agreement-sample", "--flip-repeats":
                     guard let n = Int(value), n >= (flag == "--agreement-sample" ? 0 : 1) else { return .failure(.badValue(flag)) }

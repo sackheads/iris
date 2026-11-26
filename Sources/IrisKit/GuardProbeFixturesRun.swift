@@ -76,7 +76,7 @@ extension GuardProbeFixtures {
         var rates: TokenRates?
         switch runtime {
         case .ollama(let name):
-            let ollama = OllamaEngine(tracker: ModelLoadTracker(log: { _ in }), suppressThinking: o.thinkOff)
+            let ollama = OllamaEngine(tracker: ModelLoadTracker(log: { _ in }), suppressThinking: suppressThinking(o.think))
             try? await ollama.loadModel(config: AuxiliaryModelConfig(role: "canary", engineType: .ollama, modelPathOrName: name))
             if let preload = await ollama.pendingPreload { await preload.value }
             engine = ollama
@@ -85,7 +85,7 @@ extension GuardProbeFixtures {
             header["model_thinks"] = await ollamaThinks(name) ?? "unknown"
             // Quantisation, size and the parent build: a pre-release tag shows here (#783's e4b).
             header["model_details"] = await ollamaJSON("show", body: ["model": name])?["details"] ?? "unknown"
-            header["think_sent"] = o.thinkOff ? "false (if the model thinks)" : "none (today's request)"
+            header["think_sent"] = thinkSent(o.think)
         case .gemini(let id):
             let config = ConfigManager.shared
             config.primaryProvider = LLMProvider.gemini.rawValue

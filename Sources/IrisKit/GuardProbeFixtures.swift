@@ -16,7 +16,10 @@ enum GuardProbeFixtures {
         var model = ""
         var arm = ""
         var out = ""
-        var thinkOff = false
+        /// #1415: thinking as the product's canary sends it unless `--think on` or `off` says otherwise. The probe used
+        /// to default to no `think` at all, which a thinking model reads as on, a configuration the product never runs
+        /// (it misled #1414's first A/B).
+        var think: EvalGuardTask.Think = .product
         var thinkingLevel: String?
         var repeats = 1
         /// Passes after the first run over this many fixed texts; 0 means the whole set.
@@ -39,6 +42,25 @@ enum GuardProbeFixtures {
         var latencyOnly = false
         /// #1365: frame each peer-session row with the product's own `framePeerMessage` before judging it.
         var framePeer = false
+    }
+
+    /// Whether the probe's Ollama canary is asked not to think: the product's own choice for the canary role
+    /// (`AuxiliaryModelManager.suppressesThinking`), unless the run overrides it.
+    static func suppressThinking(_ think: EvalGuardTask.Think) -> Bool {
+        switch think {
+        case .product: return AuxiliaryModelManager.suppressesThinking(role: CloudAuxiliaryEngine.canaryRole)
+        case .on: return false
+        case .off: return true
+        }
+    }
+
+    /// The header's `think_sent`: what the request carried, and why.
+    static func thinkSent(_ think: EvalGuardTask.Think) -> String {
+        let sent = suppressThinking(think) ? "false (if the model thinks)" : "none (the model thinks if it can)"
+        switch think {
+        case .product: return "\(sent), as the product sends it"
+        case .on, .off: return "\(sent), --think \(think.rawValue)"
+        }
     }
 
     enum Runtime: Equatable {
