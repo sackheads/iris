@@ -184,9 +184,15 @@ swift run iris --guard-probe --compare ~/bakeoff --baseline-arm g12-today   # th
 
 A row may carry a `contextTag`, the source label the guard judges it under. Without one it is
 `tool_output_run_command`, tool output. The tag picks the canary's prompt (#906), so a peer row
-needs `system_event_peer_session`, and its `text` should be the message as `framePeerMessage`
-frames it, the way production judges it (#1356). `Tests/irisTests/Fixtures/peer-ack-1356` has
-peer, topic (`peer_topic`, bare) and inbox (`inbox_emit`) rows built that way.
+needs `system_event_peer_session`, and it should be judged as the message `framePeerMessage`
+frames, the way production judges it (#1356). `--frame-peer` does that from the product: each
+`system_event_peer_session` row's `text` is the bare body, framed by `framePeerMessage` as a request
+from a fixed sender (`"iris-dev-2"`, msg `m-1`), and the run's header names the frame. A row that
+already starts with a frame is refused, so a set is never framed twice (#1365).
+`Tests/irisTests/Fixtures/peer-structure-1329` holds bare bodies, for `--frame-peer`.
+`peer-ack-1356` and `role-shapes-1361` were framed by hand when they were written, so they run without the flag. Its topic
+(`peer_topic`) and inbox (`inbox_emit`) rows are what those channels judge either way: a topic
+message bare, at publish, and an inbox item's fields joined, at raise.
 
 Each run writes one row per judgement to `<out>/<arm>.jsonl`, with the model's digest, the machine
 and the dataset's sha256 in a header row. `--joins` adds each benign category joined to 8 and
