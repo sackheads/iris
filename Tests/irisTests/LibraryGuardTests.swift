@@ -274,3 +274,107 @@ struct LibraryGuardTests {
         #expect(store.readMode(vault.appendingPathComponent("x.md").path) == .local)
     }
 }
+
+/// #1397 end to end (dev-3's #1403 review): real `read_file` and `run_command` turns through `IrisEngine`, on a
+/// `LibraryGuardStore` of their own, so the read site's wiring (`readMode`, the unreadable flag) is what's tested,
+/// not only the guard one layer down. The global engine is the default llama.cpp, unprovisioned in the test home.
+@MainActor
+@Suite("a library's mode reaches the read through the engine (#1397)", .serialized, .timeLimit(.minutes(1)))
+struct LibraryGuardEngineTests {
+    /// Counts only the prompts that carry `marker`: a turn also has the global canary judge the user profile.
+    private final class CountingCanary: AuxiliaryInferenceEngine, @unchecked Sendable {
+        private let lock = NSLock()
+        private var count = 0
+        let marker: String
+        init(_ marker: String) { self.marker = marker }
+        var calls: Int { lock.withLock { count } }
+        func loadModel(config: AuxiliaryModelConfig) async throws {}
+        func unloadModel() async {}
+        func generate(prompt: String, jsonSchema: String?) async throws -> String {
+            if prompt.contains(marker) { lock.withLock { count += 1 } }
+            return "SAFE"
+        }
+    }
+
+    private let marker = "NOTE-1397-\(UUID().uuidString)"
+
+    private struct PassingTier2: CoreMLModelProtocol {
+        func evaluate(text: String) async throws -> Double { 0 }
+        func tokenCount(_ text: String) -> Int { max(1, text.utf8.count / 4) }
+    }
+
+    private let dir = FileManager.default.temporaryDirectory.appendingPathComponent("iris-1397e-\(UUID().uuidString)")
+    private var storeFile: URL { dir.appendingPathComponent("library-guard.json") }
+
+    /// One turn running `call`; returns the tool result the model was handed.
+    private func run(_ call: FunctionCall, store: LibraryGuardStore, engines: [String: AuxiliaryInferenceEngine]) async throws -> String {
+        let state = AppState(store: try ConversationStore.inMemory(), tier2Provisioning: .provisioned,
+                             tier3Provisioning: .provisioned, createIfEmpty: false, emitLaunchNotices: false)
+        state.autoApproveTools = true
+        let id = state.createNewConversation(isBackground: false, select: true)
+        func reply(_ part: Part) -> GeminiResponse {
+            GeminiResponse(candidates: [Candidate(content: Content(role: "model", parts: [part]))], usageMetadata: nil)
+        }
+        let engine = IrisEngine(state: state, client: FakeLLMClient(responses: [reply(Part(functionCall: call)), reply(Part(text: "done"))]),
+                                retryDelays: [], protectionEnabled: true, sessionPeerCount: 0, libraryGuard: store)
+        let health = GuardTierHealth()
+        await GuardTierHealth.$scoped.withValue(health) {
+            await CoreMLEvaluator.$scopedModel.withValue(.init(PassingTier2())) {
+                await AuxiliaryModelManager.$scopedEngines.withValue(engines) {
+                    await engine.processInput("go", source: "UI", conversationId: id)
+                }
+            }
+        }
+        let conversation = try #require(state.conversations.first { $0.id == id })
+        return conversation.history.flatMap(\.parts).compactMap { part -> String? in
+            guard case .string(let s)? = part.functionResponse?.response["result"] else { return nil }
+            return s
+        }.last ?? ""
+    }
+
+    private func note() throws -> URL {
+        let vault = dir.appendingPathComponent("vault")
+        try FileManager.default.createDirectory(at: vault, withIntermediateDirectories: true)
+        let file = vault.appendingPathComponent("n.md")
+        try "a note \(marker)\n".write(to: file, atomically: true, encoding: .utf8)
+        return file
+    }
+
+    private func read(_ file: URL) -> FunctionCall { FunctionCall(name: "read_file", args: ["path": .string(file.path)]) }
+
+    @Test("a read_file under a cloud root is judged by the library's cloud canary, not the global one")
+    func readFileUsesTheRootsMode() async throws {
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let file = try note()
+        let store = LibraryGuardStore(file: storeFile)
+        store.set(root: file.deletingLastPathComponent().path, mode: .cloud)
+        let global = CountingCanary(marker), cloud = CountingCanary(marker)
+        let result = try await run(read(file), store: store, engines: ["canary": global, InjectionGuard.libraryCloudRole: cloud])
+        #expect(cloud.calls == 1 && global.calls == 0, "\(result.prefix(300))")
+        #expect(result.contains("<untrusted_context"))
+    }
+
+    @Test("the same read outside every root keeps the global canary")
+    func readFileOutsideRootsIsGlobal() async throws {
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let file = try note()
+        let global = CountingCanary(marker), cloud = CountingCanary(marker)
+        let result = try await run(read(file), store: LibraryGuardStore(file: storeFile),
+                                   engines: ["canary": global, InjectionGuard.libraryCloudRole: cloud])
+        #expect(global.calls == 1 && cloud.calls == 0, "\(result.prefix(400))")
+    }
+
+    @Test("with the list garbled, a run_command result is held to on-device and its block names the file")
+    func garbledFileBlocksACommandResult() async throws {
+        defer { try? FileManager.default.removeItem(at: dir) }
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        try Data("{garbled".utf8).write(to: storeFile)
+        let call = FunctionCall(name: "run_command", args: ["command": .string("echo library-\(UUID().uuidString)")])
+        // No on-device canary: the global llama.cpp model isn't in the test home, and none is scoped.
+        let held = try await run(call, store: LibraryGuardStore(file: storeFile), engines: [:])
+        #expect(held.contains("library-guard.json"), "\(held.prefix(400))")
+        let missing = dir.appendingPathComponent("absent.json")
+        let global = try await run(call, store: LibraryGuardStore(file: missing), engines: [:])
+        #expect(!global.contains("CONTENT BLOCKED"), "with no file, tier 3 skips as #202 says: \(global.prefix(400))")
+    }
+}
