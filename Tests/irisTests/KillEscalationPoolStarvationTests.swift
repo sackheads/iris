@@ -292,6 +292,7 @@ final class PoolHold: @unchecked Sendable {
     /// Synchronous, so the blocking wait is allowed: holding the thread is the point.
     private func hold() {
         lock.withLock { running += 1 }
+        // hang-ok: [bounded] PoolHold: `release()` signals on every exit of its time-bounded body
         gate.wait()
     }
 

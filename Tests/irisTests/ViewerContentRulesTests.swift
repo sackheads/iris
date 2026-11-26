@@ -22,6 +22,7 @@ struct ViewerContentRulesTests {
         let store = WKContentRuleListStore.default()!
         let badJSON = "{ not a rule list }"
         await #expect(throws: Error.self) {
+            // hang-ok: [completion] resumed by compileContentRuleList's completion, which WebKit calls with the list or an error
             try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<WKContentRuleList, Error>) in
                 store.compileContentRuleList(forIdentifier: "iris-view-test-bad-\(UUID().uuidString)", encodedContentRuleList: badJSON) { list, error in
                     if let error {

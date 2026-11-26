@@ -258,6 +258,7 @@ struct CLISignalTests {
 
     /// Blocks the calling thread on `gate`. Synchronous, so a pool thread can be held with it
     /// without the async-context warning.
+    // hang-ok: [exit-test child] never signalled by design; used only inside a `processExitsWith` child, which `_exit()`s
     static func park(_ gate: DispatchSemaphore) { gate.wait() }
 
     /// Fix wave, finding 1: the first signal used to do nothing until the run's stop watcher got a

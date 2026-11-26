@@ -395,6 +395,7 @@ struct GitHubIdentityInFlightTests {
         let results = await withTaskGroup(of: GitHubProxyClient.IdentityCheck?.self) { group in
             group.addTask { await GitHubIdentityMonitor.verify(config: config, keychain: keychain, transport: held) }
             // Wait for the first to reach the transport before the rest start.
+            // hang-ok: [bounded] `awaitStarted()` is bounded by `started.wait(timeout: 20)` (#1340)
             await Task.detached { held.awaitStarted() }.value
             for _ in 0..<Self.heldWidth {
                 group.addTask { await GitHubIdentityMonitor.verify(config: config, keychain: keychain, transport: held) }

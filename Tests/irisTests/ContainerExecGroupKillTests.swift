@@ -374,6 +374,7 @@ struct ContainerExecGroupKillTests {
     /// `BlockingSpawn.run`, off the cooperative pool: the suite's tests run in parallel, and a pool
     /// thread parked on a blocking spawn can keep the wrapper's own task from starting (#574 review).
     private func spawnOffPool(_ path: String, _ arguments: [String], timeoutSeconds: Double) async -> Int32? {
+        // hang-ok: [bounded] resumed after BlockingSpawn.run(timeoutSeconds:) on its own queue
         await withCheckedContinuation { done in
             DispatchQueue(label: "iris.test.spawn").async {
                 done.resume(returning: BlockingSpawn.run(path, arguments, timeoutSeconds: timeoutSeconds))

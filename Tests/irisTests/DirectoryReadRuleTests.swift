@@ -346,6 +346,7 @@ struct DirectoryReadRuleTests {
     /// resumed straight away because nothing here waits on the answer.
     private func request(_ tool: String, details: String, humanOnly: Bool = false, offersAlwaysAllow: Bool = true) async -> ToolApprovalRequest {
         var made: ToolApprovalRequest?
+        // hang-ok: [synchronous] resumed synchronously in the same closure
         _ = await withCheckedContinuation { (continuation: CheckedContinuation<Bool, Never>) in
             made = ToolApprovalRequest(id: UUID(), toolName: tool, details: details, workspace: nil, conversationId: nil, origin: "Iris",
                                        humanOnly: humanOnly, offersAlwaysAllow: offersAlwaysAllow, continuation: continuation)

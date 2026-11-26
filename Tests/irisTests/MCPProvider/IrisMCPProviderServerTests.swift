@@ -94,6 +94,7 @@ private final class RawConnection: @unchecked Sendable {
     init(_ connection: NWConnection) { self.connection = connection }
 
     func send(_ string: String) async throws {
+        // hang-ok: [completion] resumed by .contentProcessed, which Network calls once the bytes are taken or the connection fails
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
             connection.send(content: Data(string.utf8), completion: .contentProcessed { error in
                 if let error { continuation.resume(throwing: error) } else { continuation.resume() }
@@ -102,6 +103,7 @@ private final class RawConnection: @unchecked Sendable {
     }
 
     func readSome(timeout: TimeInterval) async -> String? {
+        // hang-ok: [bounded] OneShotResumer raced against asyncAfter(timeout)
         await withCheckedContinuation { (continuation: CheckedContinuation<String?, Never>) in
             let resumer = OneShotResumer(continuation)
             connection.receive(minimumIncompleteLength: 1, maximumLength: 4096) { data, _, _, _ in
@@ -120,6 +122,7 @@ private func rawConnect(port: UInt16) async throws -> RawConnection {
     // #1340: bounded, as `LoopbackHTTPListenerTests.rawConnect` is: `.waiting` forever would otherwise park
     // a bare continuation that `.timeLimit` cannot end (#428).
     let ready = Task<Void, any Error> {
+        // hang-ok: [bounded] inside a Task awaited with value(of:within: 10)
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
             let resumer = OneShotThrowingResumer(continuation)
             connection.stateUpdateHandler = { state in

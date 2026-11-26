@@ -215,6 +215,7 @@ private final class AllowEverythingNavigationWaiter: NSObject, WKNavigationDeleg
     /// `didFinish` never fired and the 2-minute suite `.timeLimit` never got a chance to end it.
     func waitForFinish() async {
         if finished { return }
+        // hang-ok: [bounded] inside a Task awaited with value(of:within: 10)
         let task = Task<Void, Never> { await withCheckedContinuation { self.continuation = $0 } }
         _ = try? await irisTests.value(of: task, within: 10)
     }
@@ -246,6 +247,7 @@ private final class TrustedOnlyNavigationWaiterForZeroLookup: NSObject, WKNaviga
     /// Bounded for the same reason as `AllowEverythingNavigationWaiter.waitForFinish` above.
     func waitForFinish() async {
         if finished { return }
+        // hang-ok: [bounded] inside a Task awaited with value(of:within: 10)
         let task = Task<Void, Never> { await withCheckedContinuation { self.continuation = $0 } }
         _ = try? await irisTests.value(of: task, within: 10)
     }

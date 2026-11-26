@@ -143,6 +143,7 @@ import Foundation
     }
 
     private func finish(_ task: Task<Void, Never>) async throws {
+        // hang-ok: [bounded] inside bounded(), raced against a timer
         try await bounded("rotation to finish") { await task.value }
     }
 

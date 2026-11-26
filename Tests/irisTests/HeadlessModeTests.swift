@@ -67,6 +67,7 @@ struct HeadlessModeTests {
     func detachedTaskDoesNotInherit() async {
         var sawInsideDetached: Bool?
         await HeadlessMode.withEnabled {
+            // hang-ok: [synchronous] detached body is a synchronous property read
             sawInsideDetached = await Task.detached { HeadlessMode.isEnabled }.value
         }
         #expect(sawInsideDetached == false)

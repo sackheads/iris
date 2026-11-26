@@ -366,6 +366,7 @@ struct JobRetryTests {
         /// `true` once the count is at least `target`; `false` if `seconds` pass first.
         func reach(_ target: Int, within seconds: TimeInterval = 30) async -> Bool {
             let id = UUID()
+            // hang-ok: [bounded] Signal.reach: detached timer resumes with false after `seconds`
             return await withCheckedContinuation { continuation in
                 let already = lock.withLock { () -> Bool in
                     if count >= target { return true }
@@ -424,8 +425,10 @@ struct JobRetryTests {
     /// The task's value, or `nil` if it has not finished within `seconds`: the bound that turns
     /// "the deadline never ended the run" into a failure rather than a hung suite.
     private func finished<T: Sendable>(_ task: Task<T, Never>, within seconds: TimeInterval = 30) async -> T? {
+        // hang-ok: [bounded] `finished()`'s `FirstAnswer`, raced against a detached sleep timer
         await withCheckedContinuation { continuation in
             let answer = FirstAnswer<T>(continuation)
+            // hang-ok: [bounded] inside finished()'s race; the timer resolves the outer wait
             Task { answer.resolve(await task.value) }
             Task.detached {
                 try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
