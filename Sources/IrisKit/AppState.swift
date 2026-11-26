@@ -6115,7 +6115,7 @@ class AppState {
         case .allOutsideReads: what = "Iris's library list (config/library-guard.json) can't be read, so every tool result is held to on-device checks"
         }
         let because = cause.isEmpty ? "" : " (\(cause))"
-        let details = "\(path)\n\(what), and no on-device canary could run\(because). Read it without the Tier 3 check? "
+        let details = "\(path)\n\(what), and the on-device check couldn't judge it\(because). Read it without the Tier 3 check? "
             + "The structural strip still runs, and the note still counts as outside text."
         return await enqueueUserApproval(toolName: "read_file", details: details, workspace: nil, conversationId: conversationId,
                                          origin: "guard", humanOnly: true, offersAlwaysAllow: false, guardBypass: scope)
