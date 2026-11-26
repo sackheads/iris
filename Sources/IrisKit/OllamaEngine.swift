@@ -340,6 +340,14 @@ actor OllamaEngine: AuxiliaryInferenceEngine {
     /// Whether `/api/show` lists `thinking` for this model. nil when it didn't answer; a definite
     /// answer is kept, and after no answer it isn't asked again for `showRetryMs`, so a failing
     /// show (up to its 5 s timeout) can't delay every canary check (#801 review).
+    /// #1356: `think` for the calls in this task, overriding `suppressThinking`: the escalation's second judgement.
+    @TaskLocal static var thinkForThisCall: Bool?
+
+    func canRejudgeThinking() async -> Bool {
+        guard suppressThinking else { return false }
+        return await modelThinks() == true
+    }
+
     func modelThinks(now: Double = MonotonicClock.nowMs()) async -> Bool? {
         if let thinks { return thinks }
         if let failed = showFailedAt, now - failed < Self.showRetryMs { return nil }
@@ -376,8 +384,11 @@ actor OllamaEngine: AuxiliaryInferenceEngine {
             body["images"] = images
         }
 
-        // Only to a model that thinks: a model without the capability gets today's request.
-        if suppressThinking, await modelThinks() == true {
+        // Only to a model that thinks: a model without the capability gets today's request. #1356: the
+        // escalation's second judgement asks it to think, for that call only.
+        if let think = Self.thinkForThisCall, await modelThinks() == true {
+            body["think"] = think
+        } else if suppressThinking, await modelThinks() == true {
             body["think"] = false
         }
         

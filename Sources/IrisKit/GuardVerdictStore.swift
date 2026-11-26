@@ -159,12 +159,14 @@ enum GuardVersion {
     /// The canary prompts a kept read's verdict depends on, with fixed stand-ins for the tag and the text. A library
     /// or artifacts read is tool output, judged under `.external`: its source is both prompts as they were before
     /// #1356, byte for byte, so the clause kept every such verdict. A read judged under the instruction-channel
-    /// prompt hashes that prompt as rendered, clause and its place included (dev-2's #1414 review).
+    /// prompt hashes that prompt as rendered, clause and its place included (dev-2's #1414 review), and the
+    /// escalation that reaches its verdict (#1356 e).
     static func promptSource(_ kind: InjectionGuard.CanaryPromptKind) -> String {
         let external = InjectionGuard.canaryPrompt(tag: "TAG", text: "TEXT", kind: .external)
         let channel = InjectionGuard.canaryPrompt(tag: "TAG", text: "TEXT", kind: .instructionChannel,
                                                   impersonationClause: kind == .instructionChannel)
-        return [external, channel].joined(separator: "\u{0}")
+        let parts = kind == .instructionChannel ? [external, channel, InjectionGuard.messageVerdictStages] : [external, channel]
+        return parts.joined(separator: "\u{0}")
     }
 
     /// The app's version and build, and the executable's size and date, so an unbumped dev rebuild misses too.

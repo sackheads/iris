@@ -41,6 +41,22 @@ struct OllamaThinkingTests {
         #expect(sent.showCount == 1, "the capability is asked once")
     }
 
+    /// #1356: the escalation's second judgement asks a thinking model to think, for that call only, and only a
+    /// thinking model asked not to by default can be judged again that way.
+    @Test func theEscalationAsksAThinkingModelToThinkForThatCallOnly() async throws {
+        let sent = Sent()
+        let engine = try await engine(suppress: true, capabilities: ["completion", "thinking"], sent: sent)
+        _ = try await engine.generate(prompt: "p", jsonSchema: nil)
+        _ = try await OllamaEngine.$thinkForThisCall.withValue(true) { try await engine.generate(prompt: "p", jsonSchema: nil) }
+        _ = try await engine.generate(prompt: "p", jsonSchema: nil)
+        #expect(sent.all.map { $0["think"] as? Bool } == [false, true, false])
+        #expect(await engine.canRejudgeThinking())
+        let plain = try await self.engine(suppress: true, capabilities: ["completion"], sent: Sent())
+        #expect(!(await plain.canRejudgeThinking()), "a model that doesn't think has nothing to turn on")
+        let vibecop = try await self.engine(suppress: false, capabilities: ["thinking"], sent: Sent())
+        #expect(!(await vibecop.canRejudgeThinking()), "an engine already thinking has no second stage")
+    }
+
     @Test func aModelThatDoesNotThinkGetsTodaysRequest() async throws {
         let sent = Sent()
         let engine = try await engine(suppress: true, capabilities: ["completion"], sent: sent)
