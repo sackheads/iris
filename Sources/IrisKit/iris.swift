@@ -8952,7 +8952,9 @@ actor IrisEngine {
             // #1397: a read under a library root in Settings is judged as that library's mode says. Memory, peer
             // messages and MCP descriptions aren't vault text and keep the global settings.
             let readPath = name == "read_file" ? (execArgs["path"]?.stringValue).map { ToolExecutor.resolvePath($0, cwd: cwd) } : nil
-            let keptVerdicts = readPath.map { GuardTrustStore.covers(IrisPaths.realPath($0)) } == true ? guardVerdicts : nil
+            // #1398: and under a registered external root, read from the protected list (no roots when it's garbled).
+            let keptVerdicts = readPath.map { GuardTrustStore.covers(IrisPaths.realPath($0)) || libraryGuard.mode(for: $0) != nil } == true
+                ? guardVerdicts : nil
             let library = libraryGuard.readMode(readPath)
             let libraryFileUnreadable = library == .local && libraryGuard.isUnreadable
             let judged = await InjectionGuard.sanitizeUntrustedDisplay(result, contextTag: "tool_output_\(name)", maxTier: maxTier, protectionEnabled: protectionEnabled, fidelity: fidelity, verdicts: keptVerdicts, library: library, libraryFileUnreadable: libraryFileUnreadable)

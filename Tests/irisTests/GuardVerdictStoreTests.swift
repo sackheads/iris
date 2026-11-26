@@ -56,17 +56,20 @@ struct GuardVerdictStoreTests {
     nonisolated static let token = "NOTE-1370-TOKEN"
     private let storeFile = FileManager.default.temporaryDirectory.appendingPathComponent("iris-1370-verdicts-\(UUID().uuidString).json")
     private let trustFile = FileManager.default.temporaryDirectory.appendingPathComponent("iris-1370-trust-\(UUID().uuidString).json")
+    /// #1398: the registered external roots; missing (no roots) unless a test writes it.
+    private let libraryFile = FileManager.default.temporaryDirectory.appendingPathComponent("iris-1398-libraries-\(UUID().uuidString).json")
+    private let vault = FileManager.default.temporaryDirectory.appendingPathComponent("iris-1398-vault-\(UUID().uuidString)")
     private let version = Version()
     private let clock = Clock()
     private var paths: IrisPaths { IrisPaths.default }
 
     /// `runs` stands in for the canary engine's sampling (2: Ollama or cloud); nil asks the real engine mapping.
-    private func store(runs: Int? = nil, seen: Seen? = nil) -> GuardVerdictStore {
+    private func store(runs: Int? = nil, seen: Seen? = nil, capacity: Int = GuardVerdictStore.defaultCapacity) -> GuardVerdictStore {
         let version = version, clock = clock
         return GuardVerdictStore(file: storeFile, now: { clock.now }, version: { _ in version.current }, runsToKeep: { fp in
             seen?.engine = fp.promptGuardEngine
             return runs ?? GuardVerdictStore.runsToKeep(fp)
-        })
+        }, capacity: capacity)
     }
 
     /// The canary engine the store was asked about, so a test knows which mapping it exercised.
@@ -94,7 +97,8 @@ struct GuardVerdictStoreTests {
     /// One launch's first `read_file` of `file` (`tier2` nil: tier 2 skips): a fresh engine, a fresh store over the same file. Returns what the
     /// model was handed, whether it tainted, and how many times the canary was asked.
     private func launchAndRead(_ file: URL, canary: CountingCanary = CountingCanary(), tier2: Tier2? = Tier2(),
-                               runs: Int? = nil, seen: Seen? = nil) async throws
+                               runs: Int? = nil, seen: Seen? = nil, library: LibraryGuardStore? = nil,
+                               cloudCanary: CountingCanary? = nil) async throws
         -> (result: String, tainted: Bool, canaryCalls: Int) {
         let state = AppState(store: try ConversationStore.inMemory(), tier2Provisioning: .provisioned,
                              tier3Provisioning: .provisioned, createIfEmpty: false, emitLaunchNotices: false)
@@ -107,9 +111,12 @@ struct GuardVerdictStoreTests {
             reply(Part(functionCall: FunctionCall(name: "read_file", args: ["path": .string(file.path)]))),
             reply(Part(text: "done")),
         ]), retryDelays: [], protectionEnabled: true, sessionPeerCount: 0,
-            guardTrust: GuardTrustStore(file: trustFile), guardVerdicts: store(runs: runs, seen: seen))
+            guardTrust: GuardTrustStore(file: trustFile), guardVerdicts: store(runs: runs, seen: seen),
+            libraryGuard: library ?? LibraryGuardStore(file: libraryFile))
+        var engines: [String: AuxiliaryInferenceEngine] = ["canary": canary]
+        if let cloudCanary { engines[InjectionGuard.libraryCloudRole] = cloudCanary }
         await CoreMLEvaluator.$scopedModel.withValue(.init(tier2)) {
-            await AuxiliaryModelManager.$scopedEngines.withValue(["canary": canary]) {
+            await AuxiliaryModelManager.$scopedEngines.withValue(engines) {
                 await engine.processInput("go", source: "UI", conversationId: id)
             }
         }
@@ -122,7 +129,7 @@ struct GuardVerdictStoreTests {
     }
 
     private func cleanup(_ files: URL...) {
-        for file in files + [storeFile, trustFile] { try? FileManager.default.removeItem(at: file) }
+        for file in files + [storeFile, trustFile, libraryFile, vault] { try? FileManager.default.removeItem(at: file) }
     }
 
     @Test("a judged-safe note pays the canary once: the next launch's read is served the verdict, still wrapped and tainting",
@@ -296,11 +303,85 @@ struct GuardVerdictStoreTests {
         #expect(kept.safeVerdict("k") == nil, "the confirming SAFE restarted the 30 days")
     }
 
-    @Test("the store holds at most 512 verdicts, dropping the least recently served")
+    /// A note in the external vault, its root registered as `mode`.
+    private func vaultNote(_ text: String, mode: LibraryGuardMode? = .local) throws -> (file: URL, library: LibraryGuardStore) {
+        try FileManager.default.createDirectory(at: vault, withIntermediateDirectories: true)
+        let file = vault.appendingPathComponent("note-\(UUID().uuidString).md")
+        try (Self.token + "\n" + text).write(to: file, atomically: true, encoding: .utf8)
+        let library = LibraryGuardStore(file: libraryFile)
+        if let mode { library.set(root: vault.path, mode: mode) }
+        return (file, library)
+    }
+
+    @Test("a read under a registered external root keeps its SAFE verdict across launches, as library/ does (#1398)")
+    func externalRootKept() async throws {
+        let (file, library) = try vaultNote("### Vault note\nkept\n")
+        defer { cleanup(file) }
+        let first = try await launchAndRead(file, library: library)
+        #expect(first.canaryCalls == 1)
+        let second = try await launchAndRead(file, library: library)
+        #expect(second.canaryCalls == 0, "the kept verdict was not served")
+        #expect(second.result == first.result)
+        #expect(second.result.contains("<untrusted_context") && second.tainted, "still someone else's text")
+    }
+
+    @Test("the same vault folder, not registered, keeps nothing (#1398)")
+    func unregisteredVaultKeepsNothing() async throws {
+        let (file, library) = try vaultNote("plain note\n", mode: nil)
+        defer { cleanup(file) }
+        #expect(try await launchAndRead(file, library: library).canaryCalls == 1)
+        #expect(!FileManager.default.fileExists(atPath: storeFile.path))
+    }
+
+    @Test("a root set to none keeps nothing, since no tier 3 judged it (#1398)")
+    func noneKeepsNothing() async throws {
+        let (file, library) = try vaultNote("plain note\n", mode: LibraryGuardMode.none)
+        defer { cleanup(file) }
+        #expect(try await launchAndRead(file, library: library).canaryCalls == 0, "none runs no canary")
+        #expect(!FileManager.default.fileExists(atPath: storeFile.path))
+    }
+
+    @Test("a garbled root list names no roots, so a vault read keeps nothing and is judged each time (#1398)")
+    func garbledListKeepsNothing() async throws {
+        let (file, library) = try vaultNote("plain note\n")
+        defer { cleanup(file) }
+        try Data("{garbled".utf8).write(to: libraryFile)
+        #expect(try await launchAndRead(file, library: library).canaryCalls == 1)
+        #expect(try await launchAndRead(file, library: library).canaryCalls == 1)
+        #expect(!FileManager.default.fileExists(atPath: storeFile.path))
+    }
+
+    @Test("a root removed from the list stops being served (#1398)")
+    func removedRootIsJudged() async throws {
+        let (file, library) = try vaultNote("plain note\n")
+        defer { cleanup(file) }
+        _ = try await launchAndRead(file, library: library)
+        library.remove(root: vault.path)
+        #expect(try await launchAndRead(file, library: library).canaryCalls == 1)
+    }
+
+    @Test("a verdict kept under one mode isn't served under another: local's isn't cloud's (#1398)")
+    func modeSwitchMisses() async throws {
+        let (file, library) = try vaultNote("plain note\n")
+        defer { cleanup(file) }
+        _ = try await launchAndRead(file, library: library)
+        library.set(root: vault.path, mode: .cloud)
+        let cloud = CountingCanary()
+        _ = try await launchAndRead(file, library: library, cloudCanary: cloud)
+        #expect(cloud.calls == 1, "a cloud read was served local's verdict")
+    }
+
+    @Test("the store's default capacity holds a vault-sized hot set (#1398)")
+    func capacityFitsAVault() {
+        #expect(GuardVerdictStore.defaultCapacity >= 5_000)
+        #expect(GuardVerdictStore(file: storeFile).capacity == GuardVerdictStore.defaultCapacity)
+    }
+
+    @Test("the store holds at most its capacity, dropping the least recently served")
     func lruCap() {
         defer { cleanup() }
-        let kept = store()
-        for i in 0..<GuardVerdictStore.capacity {
+        let kept = store(capacity: 8)
+        for i in 0..<8 {
             clock.now = clock.now.addingTimeInterval(1)
             kept.recordSafe("k\(i)", tier2Skipped: false)
         }

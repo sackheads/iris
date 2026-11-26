@@ -133,7 +133,8 @@ only chooses who runs tier 3: "On this Mac" (the default: the guard check runs o
 cloud provider sees the note), "Cloud" (the note is also sent to the canary's provider, which can differ from the chat provider, for a
 vault that is scanned there anyway), or "No check". Either way a note still goes to your chat model when Iris reads it.
 Only a `read_file` is matched to a library: a note printed by `run_command` (`cat`, `grep`) is checked by
-the global tier-3 engine. Only Settings changes it; the registry below does not. See the guard's [per-library bullet](prompt_injection_guard_design.md#tier-3-auxiliary-model-classifier-probe-implemented).
+the global tier-3 engine. A note judged safe is remembered across launches, so it isn't checked again until it
+changes, the guard's settings or this library's setting change, or 30 days pass ([verdict cache](prompt_injection_guard_design.md#verdict-cache-tier-23)). Only Settings changes it; the registry below does not. See the guard's [per-library bullet](prompt_injection_guard_design.md#tier-3-auxiliary-model-classifier-probe-implemented).
 
 ## Indexing
 
