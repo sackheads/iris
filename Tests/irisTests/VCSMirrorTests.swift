@@ -98,6 +98,8 @@ struct VCSMirrorTests {
           arguments: ["agent/other/x", "feature", "main", "-x", "a..b", "agent/pilot/../x"])
     func branchRefusals(_ branch: String) async throws {
         let w = try await world()
+        // The branch exists in the workspace, so only the name rule can refuse it.
+        if VCSTool.isBranchName(branch), branch != "main" { try await Self.sh(["branch", branch], in: w.workspace) }
         let result = await mirror(w).push(repo: "a/b", branch: branch, force: false, caller: role, workspace: w.workspace, policy: .defaults)
         #expect(result.hasPrefix("Refused"), Comment(rawValue: result))
         if branch != "main" { #expect(!(await githubHas(w, branch))) }
@@ -128,6 +130,7 @@ struct VCSMirrorTests {
         for (key, value) in [("filter.evil.clean", touch), ("filter.evil.smudge", touch), ("diff.evil.command", touch),
                              ("core.fsmonitor", touch), ("uploadpack.packObjectsHook", touch),
                              ("remote.\(w.mirrorRoot.path)/a/b.git.uploadpack", touch),
+                             ("remote.\(w.mirrorRoot.path)/a/b.git.url", w.mirrorRoot.path + "/a/b.git"),
                              ("url.ext::sh -c touch% \(w.marker).insteadOf", w.github),
                              ("receive.procReceiveRefs", "refs/heads")] {
             try await Self.sh(["config", key, value], in: w.workspace)
@@ -149,7 +152,7 @@ struct VCSMirrorTests {
         #expect(await githubHas(w, "agent/pilot/ok"), "insteadOf in the workspace didn't redirect the push")
     }
 
-    @Test("each planted program alone, a hook, a filter, a diff driver or a repo-level setting, runs nothing in push or fetch", arguments: Array(0..<10))
+    @Test("each planted program alone, a hook, a filter, a diff driver or a repo-level setting, runs nothing in push or fetch", arguments: Array(0..<11))
     func eachPlantedProgramAlone(_ which: Int) async throws {
         let w = try await world()
         try await commit(w, branch: "agent/pilot/ok", files: ["Sources/c.swift": "let c = 3\n"])
@@ -158,17 +161,23 @@ struct VCSMirrorTests {
         let settings: [(String, String)] = [("filter.evil.clean", touch), ("filter.evil.smudge", touch), ("diff.evil.command", touch),
                              ("core.fsmonitor", touch), ("uploadpack.packObjectsHook", touch),
                              ("remote.\(w.mirrorRoot.path)/a/b.git.uploadpack", touch),
+                             ("remote.\(w.mirrorRoot.path)/a/b.git.url", w.mirrorRoot.path + "/a/b.git"),
                              ("url.ext::sh -c touch% \(w.marker).insteadOf", w.github),
                              ("receive.procReceiveRefs", "refs/heads")]
-        if which < 8 { try await Self.sh(["config", settings[which].0, settings[which].1], in: w.workspace) }
-        if which == 8 {
+        if which < 9 {
+            try await Self.sh(["config", settings[which].0, settings[which].1], in: w.workspace)
+            // Measured: git never looks up an absolute path as a configured remote's name, so this row passes even
+            // without `--upload-pack`; the flag stays as a second layer.
+            if which == 5 { try await Self.sh(["config", settings[6].0, settings[6].1], in: w.workspace) }
+        }
+        if which == 9 {
             for hook in ["pre-push", "pre-receive", "update", "post-receive", "post-update", "reference-transaction", "push-to-checkout", "post-checkout"] {
                 let path = hooks + "/" + hook
                 try "#!/bin/sh\necho \(hook) >> \(w.marker)\n".write(toFile: path, atomically: true, encoding: .utf8)
                 try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: path)
             }
         }
-        if which == 9 { try "* filter=evil diff=evil\n".write(toFile: w.workspace + "/.gitattributes", atomically: true, encoding: .utf8) }
+        if which == 10 { try "* filter=evil diff=evil\n".write(toFile: w.workspace + "/.gitattributes", atomically: true, encoding: .utf8) }
         #expect(!w.pwned, "before")
         let m = mirror(w)
         let pushed = await m.push(repo: "a/b", branch: "agent/pilot/ok", force: false, caller: role, workspace: w.workspace, policy: .defaults)
