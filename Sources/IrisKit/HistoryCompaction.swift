@@ -98,8 +98,9 @@ enum HistoryCompaction {
     /// nil when the history is within budget, or when no turn boundary leaves anything new to compact.
     /// `ownerTexts` is the owner's transcript (`.user` messages): an entry counts as theirs only if it matches one.
     /// #1425 slice C: the item an Inbox answer entry answers, or nil for any other entry. Only `deliverInboxAnswerFrame`
-    /// delivers under `IrisEngine.inboxAnswerSource` (idle, or queued and drained mid-task), so a peer, a tool or an
-    /// event can't produce this prefix; the answer itself is read from the inbox, never from the entry's text.
+    /// delivers under the inbox-answer label (idle, or queued and drained mid-task), so a peer, a tool or an event can't
+    /// produce this prefix; the answer itself is read from the inbox, never from the entry's text. This only reads the
+    /// label, which `InboxRoutingTests.labelUseIsPinnedBySite` pins.
     static func inboxAnswerItemId(_ content: Content) -> String? {
         guard isTurnStart(content) else { return nil }
         let text = content.parts.compactMap(\.text).joined()
