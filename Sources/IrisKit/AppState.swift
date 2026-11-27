@@ -707,6 +707,9 @@ struct ToolApprovalRequest: Identifiable {
     /// the dialog can tell the person why there is no Always Allow button. The call still runs
     /// now, once, as approved — only the saved rule is refused.
     let secretDetectedNote: String?
+    /// #1428: set when this call is a one-off Always Allow won't save (a chain it can't generalise, or a `cd` out of
+    /// the workspace), so the dialog can say why there is only Allow once.
+    let alwaysAllowWithheldNote: String?
     /// #1397 part 2: set on the ask to read a `local` library's note with no on-device check, naming what
     /// "until Iris restarts" covers. Its card offers that button, and `resolveApproval` records it.
     let guardBypass: GuardBypassScope?
@@ -732,11 +735,13 @@ struct ToolApprovalRequest: Identifiable {
         // `run_command` usually saves only a generalized prefix (#1102), never its arguments, so a
         // secret-shaped argument that is never persisted shouldn't cost the button. An exact rule
         // (no prefix) still carries the whole text, so a real credential there is still caught.
-        let candidateRules = (offersAlwaysAllow && !humanOnly)
-            ? PermissionRule.forAlwaysAllow(toolName: toolName, details: details) : []
+        let offer = (offersAlwaysAllow && !humanOnly)
+            ? PermissionRule.alwaysAllowOffer(toolName: toolName, details: details, workspace: workspace) : (rules: [], withheld: nil)
+        let candidateRules = offer.rules
         let looksLikeSecret = candidateRules.contains { SecretLikeDetector.containsSecretLikeSubstring($0.details) }
         self.secretDetectedNote = looksLikeSecret ? Self.secretDetectedMessage : nil
-        self.offersAlwaysAllow = offersAlwaysAllow && !humanOnly && !looksLikeSecret
+        self.alwaysAllowWithheldNote = offer.withheld
+        self.offersAlwaysAllow = offersAlwaysAllow && !humanOnly && !looksLikeSecret && offer.withheld == nil
         self.alwaysAllowRules = self.offersAlwaysAllow ? candidateRules : []
         self.directoryRule = self.offersAlwaysAllow ? PermissionRule.forAlwaysAllowDirectory(toolName: toolName, details: details) : nil
         self.offersConversationAllow = offersConversationAllow

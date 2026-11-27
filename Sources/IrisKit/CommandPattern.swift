@@ -13,8 +13,8 @@ import Foundation
 /// not model (substitution, redirection to a file, subshells, globs, variables, background `&`),
 /// so the words after a prefix can only ever be plain arguments to that one program. A prefix is
 /// never made for a program where "any arguments" means "any code" (`neverGeneralized`), for a
-/// subcommand off its tool's list, or for a program spelled as a relative path (a `cd` earlier in
-/// the command would move it). Prefix rules apply to attended calls only: an unattended run keeps
+/// subcommand off its tool's list, or for a program spelled as a path other than a workspace script's
+/// (`scripts/x.sh`, matched only from the workspace's root, since a `cd` would move it). Prefix rules apply to attended calls only: an unattended run keeps
 /// its grant and exact rules (`PermissionManager.match`).
 enum CommandPattern {
     /// One simple command of a chain or pipeline. `afterPipe` when its input is the previous
@@ -234,11 +234,12 @@ enum CommandPattern {
     /// Tools with subcommands: the subcommands a prefix may be made for, and how many words the
     /// prefix keeps (2: `swift test`; 3: `npm run build`, `gh pr view`). Any other subcommand saves
     /// the exact command. Destructive or program-running git subcommands (`branch`, `checkout`,
-    /// `restore`, `stash`, `remote`, `worktree`, `reflog`, `tag`, `grep`) are left out.
+    /// `restore`, `stash`, `remote`, `reflog`, `tag`, `grep`) are left out; `rebase` is in, but never one that
+    /// can run a program (`rebaseRunsAProgram`), and of `worktree` only `add` (`prefix(for:)`), placed beside the workspace.
     private static let subcommands: [String: [String: Int]] = [
         "git": Dictionary(uniqueKeysWithValues: [
             "status", "diff", "log", "show", "add", "commit", "switch", "fetch", "pull",
-            "rev-parse", "ls-files", "blame", "merge-base", "describe", "shortlog",
+            "rev-parse", "ls-files", "blame", "merge-base", "describe", "shortlog", "rebase",
         ].map { ($0, 2) }),
         "swift": ["build": 2, "test": 2],
         "npm": ["test": 2, "run": 3, "ls": 2, "outdated": 2],
@@ -358,9 +359,21 @@ enum CommandPattern {
     /// workspace when matching).
     static func canonicalWords(_ segment: Segment, cwd: String? = nil, workspaceReal: String? = nil,
                                enforceWorkspace: Bool = false) -> [String]? {
-        let words = segment.words
+        var words = segment.words
         let program = words[0]
-        guard isRuleWord(program), !program.hasPrefix("-"), !program.contains("/") else { return nil }
+        guard isRuleWord(program), !program.hasPrefix("-") else { return nil }
+        if program.contains("/") {
+            // #1428: a script in the workspace, by its path there. Matched only from the workspace's root (a `cd`
+            // would make the same spelling another file) and only when that path is the file itself, not a link out.
+            guard let script = workspaceScript(program) else { return nil }
+            if enforceWorkspace {
+                guard let ws = workspaceReal, cwd == nil || cwd == ws else { return nil }
+                let full = ws + "/" + script
+                guard FileManager.default.fileExists(atPath: full), IrisPaths.realPath(full) == full else { return nil }
+            }
+            words[0] = script
+            return words
+        }
         guard program == "git" else { return words }
         var out = ["git"]
         var i = 1
@@ -389,7 +402,57 @@ enum CommandPattern {
             return name.count >= 3 && gitDeniedLongArgs.contains { $0.hasPrefix(name) }
         }
         if denied { return nil }
+        if out.count >= 2, out[1] == "rebase", rebaseRunsAProgram(out.dropFirst(2)) { return nil }
+        if enforceWorkspace, out.count >= 3, out[1] == "worktree", out[2] == "add" {
+            // #1428: a new worktree goes beside the workspace or inside it, never anywhere else.
+            guard let ws = workspaceReal, let path = worktreeAddPath(out.dropFirst(3)) else { return nil }
+            let parent = (ws as NSString).deletingLastPathComponent
+            guard parent != "/", resolvedInsideWorkspace(path, cwd: cwd ?? ws, workspaceReal: parent) != nil else { return nil }
+        }
         return out
+    }
+
+    /// A workspace-relative script path in its one spelling (`./scripts/x.sh` is `scripts/x.sh`), or nil for an absolute,
+    /// home-relative or `..` path, or one with an empty or `.` component.
+    static func workspaceScript(_ program: String) -> String? {
+        var path = Substring(program)
+        while path.hasPrefix("./") { path = path.dropFirst(2) }
+        guard !path.hasPrefix("/"), !path.hasPrefix("~") else { return nil }
+        let parts = path.split(separator: "/", omittingEmptySubsequences: false)
+        guard parts.count >= 2, parts.allSatisfy({ !$0.isEmpty && $0 != "." && $0 != ".." }) else { return nil }
+        return String(path)
+    }
+
+    /// #1428: whether a `git rebase` could run a program of the call's choosing: `--exec`/`-x` runs a command, a
+    /// `--strategy`/`-s` runs `git-merge-<name>` from PATH, and `--interactive`/`-i` runs the configured editor. Any
+    /// spelling git accepts (an unambiguous long abbreviation, a short-option cluster) counts; refusing too much costs a prompt.
+    private static func rebaseRunsAProgram(_ args: ArraySlice<String>) -> Bool {
+        args.contains { arg in
+            if arg.hasPrefix("--") {
+                let name = String(arg.dropFirst(2).prefix { $0 != "=" })
+                return (name.count >= 2 && "exec".hasPrefix(name)) || name.hasPrefix("exec")
+                    || (name.count >= 3 && ("strategy".hasPrefix(name) || name.hasPrefix("strategy")))
+                    || (name.count >= 3 && ("interactive".hasPrefix(name) || name.hasPrefix("interactive")))
+            }
+            return arg.hasPrefix("-") && arg.dropFirst().contains { "xsXi".contains($0) }
+        }
+    }
+
+    /// The path a `git worktree add` creates, or nil for an option this doesn't know or no path.
+    private static func worktreeAddPath(_ args: ArraySlice<String>) -> String? {
+        let valued: Set<String> = ["-b", "-B", "--reason"]
+        let plain: Set<String> = ["-f", "--force", "--detach", "-d", "--checkout", "--no-checkout", "--lock", "--orphan",
+                                  "-q", "--quiet", "--track", "--no-track", "--guess-remote", "--no-guess-remote"]
+        var i = args.startIndex
+        while i < args.endIndex {
+            let arg = args[i]
+            if arg == "--" { return i + 1 < args.endIndex ? args[i + 1] : nil }
+            if !arg.hasPrefix("-") { return arg }
+            if valued.contains(arg) { i += 2; continue }
+            if arg.hasPrefix("--reason=") || plain.contains(arg) { i += 1; continue }
+            return nil
+        }
+        return nil
     }
 
     /// The prefix an Always Allow saves for one part, or nil when this part gets none.
@@ -397,6 +460,10 @@ enum CommandPattern {
         guard let words = canonicalWords(segment) else { return nil }
         let program = words[0]
         guard !neverGeneralized.contains(program) else { return nil }
+        if program.contains("/") { return [program] }
+        if program == "git", words.count >= 3, words[1] == "worktree" {
+            return words[2] == "add" ? ["git", "worktree", "add"] : nil
+        }
         if let subs = subcommands[program] {
             guard words.count >= 2, let depth = subs[words[1]], words.count >= depth else { return nil }
             let prefix = Array(words.prefix(depth))
@@ -452,6 +519,13 @@ enum CommandPattern {
         return .success(words)
     }
 
+    /// #1428: a chain or a `cd`: more than one part that isn't a ride-along, or any `cd`. A compound's Always Allow saves
+    /// the prefixes of its parts or nothing, never its exact text (Brian: "obvious one-offs ... just collects cruft").
+    static func isCompound(_ command: String) -> Bool {
+        guard let segments = segments(command) else { return false }
+        return segments.contains { $0.words[0] == "cd" && !$0.afterPipe } || segments.filter { !isRideAlong($0) }.count > 1
+    }
+
     /// The prefixes an Always Allow on `command` saves, one per part that is not a ride-along, or
     /// nil when any such part gets none (then the exact command is saved, as before) or there is
     /// no such part.
@@ -489,7 +563,7 @@ enum CommandPattern {
                   let index = prefixes.firstIndex(where: { !$0.isEmpty && words.starts(with: $0) }) else {
                 return nil
             }
-            if prefixes[index].count == 1 {
+            if prefixes[index].count == 1, !prefixes[index][0].contains("/") {
                 guard ReadOnlyCommand.isReadOnly(words: words),
                       bareProgramStaysInWorkspace(words, cwd: currentCwd, workspaceReal: workspaceReal) else {
                     return nil

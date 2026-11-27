@@ -39,6 +39,23 @@ struct PermissionRule: Codable, Equatable, Sendable {
         }
         return [PermissionRule(toolName: toolName, details: details)]
     }
+
+    /// What Always Allow offers for this call (#1428): its rules, or none and why. A single command saves its prefix,
+    /// or its exact text when the prefix can't cover this very call (`ls /etc`). A compound (`CommandPattern.isCompound`)
+    /// saves its parts' prefixes only when it has one per part and they cover this call; otherwise nothing is offered
+    /// (Allow once only), never its exact text. The dialog shows these rules and `resolveApproval` saves them.
+    static func alwaysAllowOffer(toolName: String, details: String, workspace: String?) -> (rules: [PermissionRule], withheld: String?) {
+        let rules = forAlwaysAllow(toolName: toolName, details: details)
+        guard toolName == "run_command" else { return (rules, nil) }
+        let prefixes = rules.filter(\.isPrefix).map { $0.details.split(separator: " ").map(String.init) }
+        let coversThisCall = !prefixes.isEmpty && CommandPattern.matchedPrefixes(details, prefixes: prefixes, workspace: workspace) != nil
+        if CommandPattern.isCompound(details) {
+            guard !prefixes.isEmpty, prefixes.count == rules.count else { return ([], ToolApprovalRequest.oneOffChainMessage) }
+            return coversThisCall ? (rules, nil) : ([], ToolApprovalRequest.leavesWorkspaceMessage)
+        }
+        if !prefixes.isEmpty, !coversThisCall { return ([PermissionRule(toolName: toolName, details: details)], nil) }
+        return (rules, nil)
+    }
 }
 
 /// Which part of the allowlist let a call run (#599): Iris's own folder, or a rule, with the

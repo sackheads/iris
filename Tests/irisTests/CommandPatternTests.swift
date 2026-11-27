@@ -51,7 +51,8 @@ struct CommandPatternTests {
             "gcloud compute instances list", "terraform apply",
             // Unlisted subcommands and path-qualified programs:
             "npm install", "gh api /user", "swift package plugin x",
-            "ffmpeg -i in.mp4 out.mp4", "scripts/test-filter.sh Foo", "./build.sh",
+            // (A workspace script two or more components deep gets a prefix since #1428: AlwaysAllowGeneraliseTests.)
+            "ffmpeg -i in.mp4 out.mp4", "./build.sh",
             "/usr/bin/git status", "/tmp/evil/ls -la", "/tmp/evil/git status", "/tmp/evil/swift test",
             "FOO=1 make", "defaults write com.x y 1", "kubectl exec -it pod sh",
         ] {

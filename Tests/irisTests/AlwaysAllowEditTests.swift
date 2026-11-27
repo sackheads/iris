@@ -142,33 +142,30 @@ struct AlwaysAllowEditResolveTests {
         return (workspace, sibling)
     }
 
-    @Test("a rule that couldn't match its own call is never saved: a cd to a sibling worktree (#1428)",
-          arguments: [AppState.AlwaysAllowChoice.proposed, .edited(["swift build -c"])])
-    func ownCallMustMatch(choice: AppState.AlwaysAllowChoice) async throws {
+    @Test("a cd to a sibling worktree offers no Always Allow, says why, and a forced click saves nothing (#1428)",
+          arguments: [AppState.AlwaysAllowChoice.proposed, .edited(["swift build -c"]), .exactCommand])
+    func siblingCdOffersNothing(choice: AppState.AlwaysAllowChoice) async throws {
         let (state, root) = try rig()
         defer { try? FileManager.default.removeItem(at: root) }
         let (workspace, sibling) = try workspaces(root)
         let cid = state.createNewConversation(isBackground: false, select: false)
         let command = "cd \(sibling) && swift build -c release"
         let shown = try await resolve(state, command, .alwaysAllowGlobal, choice: choice, in: cid, workspace: workspace)
-        #expect(shown.alwaysAllowRules(for: choice) == .failure(AlwaysAllowRefusal(message: ToolApprovalRequest.leavesWorkspaceMessage)),
-                "the dialog shows why, from the same function")
+        #expect(!shown.offersAlwaysAllow && shown.alwaysAllowWithheldNote == ToolApprovalRequest.leavesWorkspaceMessage)
         let saved = (try? String(contentsOf: state.permissions.paths.permissionsJSON, encoding: .utf8)) ?? ""
         #expect(!saved.contains("swift build"), "nothing is saved: \(saved)")
-        let notes = (state.conversations.first { $0.id == cid }?.messages ?? []).map(\.content).joined(separator: "\n")
-        #expect(notes.contains(ToolApprovalRequest.leavesWorkspaceMessage) && notes.contains("This call was approved once."))
     }
 
-    @Test("the exact command still sticks for a sibling cd, and a cd inside the workspace still saves its prefix (#1428)")
-    func exactAndInsideStillSave() async throws {
+    @Test("a cd inside the workspace saves its prefix, never the exact text of the chain (#1428)")
+    func insideCdSavesPrefixOnly() async throws {
         let (state, root) = try rig()
         defer { try? FileManager.default.removeItem(at: root) }
-        let (workspace, sibling) = try workspaces(root)
+        let (workspace, _) = try workspaces(root)
         try FileManager.default.createDirectory(atPath: workspace + "/Sources", withIntermediateDirectories: true)
         let cid = state.createNewConversation(isBackground: false, select: false)
-        let outside = "cd \(sibling) && swift build"
-        _ = try await resolve(state, outside, .alwaysAllowGlobal, choice: .exactCommand, in: cid, workspace: workspace)
-        #expect(state.permissions.isAllowed(toolName: "run_command", details: outside, workspace: workspace, isOwner: true))
+        let shown = try await resolve(state, "cd Sources && swift build", .alwaysAllowGlobal, choice: .exactCommand, in: cid, workspace: workspace)
+        #expect(shown.alwaysAllowRules(for: .exactCommand) == .failure(AlwaysAllowRefusal(message: ToolApprovalRequest.exactCompoundMessage)))
+        #expect(!state.permissions.isAllowed(toolName: "run_command", details: "cd Sources && swift build", workspace: workspace, isOwner: true))
         _ = try await resolve(state, "cd Sources && swift build", .alwaysAllowGlobal, choice: .proposed, in: cid, workspace: workspace)
         #expect(state.permissions.isAllowed(toolName: "run_command", details: "cd Sources && swift build -c release", workspace: workspace, isOwner: true))
     }

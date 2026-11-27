@@ -10,6 +10,8 @@ struct AlwaysAllowRefusal: Error, Equatable {
 
 extension ToolApprovalRequest {
     static let leavesWorkspaceMessage = "This command leaves the workspace, so Always allow can't cover it. Set the conversation's workspace to that folder instead."
+    static let oneOffChainMessage = "This chain has a command Always allow can't generalise, so it's Allow once only."
+    static let exactCompoundMessage = "A chain or a cd is saved as its commands' rules, never as its exact text."
 
     /// #1428: a click never saves a rule that wouldn't match the very call it came from (a `cd` to a sibling worktree
     /// saved a `swift build` prefix that asked again every time). An exact rule always matches its own call.
@@ -30,6 +32,10 @@ extension ToolApprovalRequest {
             return .success(alwaysAllowRules)
         case .exactCommand:
             guard toolName == "run_command" else { return .success(alwaysAllowRules) }
+            // #1428: a chain or a `cd` is a one-off; its exact text would only collect cruft.
+            if CommandPattern.isCompound(details) {
+                return .failure(AlwaysAllowRefusal(message: Self.exactCompoundMessage))
+            }
             // An exact rule carries the whole command, so the credential check the proposed prefix
             // got (#1140) applies to the whole text.
             if SecretLikeDetector.containsSecretLikeSubstring(details) {
