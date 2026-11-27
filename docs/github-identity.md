@@ -31,8 +31,9 @@ happens: a repo not on the list sends nothing.
 - **`vcs(action, repo, …)`** (#1435): an agent's pull requests, under a policy the tool enforces
   rather than an approval prompt.
   - **Actions:**
-    - `fetch`: GitHub's `main` (and a `branch`, if given) into the workspace as `origin/<name>`. Nothing is
-      checked out.
+    - `fetch`: GitHub's `main` into the workspace as `origin/main`, and for a role one of its own `agent/<role>/…`
+      branches as well. Nothing is checked out. Another agent's branch or an outside PR's head isn't fetched:
+      its code would be someone else's, which is why `fetch`'s result doesn't taint.
     - `push`: the workspace's `branch` to GitHub's branch of the same name. It's never `main`, and a role pushes
       only `agent/<role>/…`. With `force`, it replaces GitHub's branch under a lease on what GitHub had a moment
       before.
