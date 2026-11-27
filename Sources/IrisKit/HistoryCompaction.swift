@@ -68,16 +68,27 @@ enum HistoryCompaction {
         let turns: Int
         let tokensBefore: Int
         let tokensCompacted: Int
-        /// The owner's own words from the replaced span, each byte for byte, oldest first.
+        /// The owner's own words no longer in the kept tail, each byte for byte, oldest first: from this span and
+        /// every earlier compaction (dev-2's #1431 review), so none is ever lost to a later summary.
         let ownerMessages: [String]
-        /// The previous compaction's summary, if the span starts with one.
+        /// The previous head's own words (its summary, or its omission notice), without its owner section.
         let priorSummary: String?
         /// Past the hard limit: if no summary can be had, the span is dropped rather than kept.
         let overHardLimit: Bool
     }
 
-    /// nil when the history is within budget, or when no turn boundary leaves anything to compact.
-    static func plan(_ history: [Content], ownerTexts: Set<String>, settings: Settings, contextWindow: Int) -> Plan? {
+    /// A head this file wrote: a summary, or an omission notice.
+    static func isHead(_ content: Content) -> Bool {
+        let text = content.parts.compactMap(\.text).joined()
+        return content.role == "user" && (text.hasPrefix(summaryLabel) || text.hasPrefix(omittedLabel))
+    }
+
+    static let ownerSectionIntro = "\n\nThe owner's own messages from those turns, verbatim, oldest first:\n"
+
+    /// nil when the history is within budget, or when no turn boundary leaves anything new to compact.
+    /// `ownerMessages` is the owner's transcript (`.user` messages, oldest first): what the head quotes is every one of
+    /// them not still in the kept tail, worked out from the transcript, never parsed back out of an earlier head.
+    static func plan(_ history: [Content], ownerMessages: [String], settings: Settings, contextWindow: Int) -> Plan? {
         let total = tokens(history)
         guard total > budget(settings, contextWindow: contextWindow) else { return nil }
         // The earliest turn start whose suffix fits the tail; the last turn stays whole even if it alone is bigger.
@@ -85,14 +96,34 @@ enum HistoryCompaction {
         guard let last = starts.last else { return nil }
         let cut = starts.first { tokens(history[$0...]) <= settings.tail } ?? last
         let span = history[..<cut]
-        let prior = span.first.flatMap { head -> String? in
+        let hasHead = span.first.map(isHead) ?? false
+        // Nothing but the previous head before the cut: compacting again would only rewrite it, every turn.
+        guard cut > (hasHead ? 1 : 0) else { return nil }
+        let prior = hasHead ? span.first.map { head -> String in
             let text = head.parts.compactMap(\.text).joined()
-            return text.hasPrefix(summaryLabel) ? text : nil
-        }
-        return Plan(cut: cut, turns: span.filter(isTurnStart).count, tokensBefore: total, tokensCompacted: tokens(span),
-                    ownerMessages: span.filter { isOwnerTyped($0, ownerTexts: ownerTexts) }.map { $0.parts.compactMap(\.text).joined() },
+            return text.range(of: ownerSectionIntro).map { String(text[..<$0.lowerBound]) } ?? text
+        } : nil
+        return Plan(cut: cut, turns: span.dropFirst(hasHead ? 1 : 0).filter(isTurnStart).count, tokensBefore: total,
+                    tokensCompacted: tokens(span),
+                    ownerMessages: ownerMessagesBeyondTail(ownerMessages, tail: history[cut...]),
                     priorSummary: prior,
                     overHardLimit: Double(total) >= Double(contextWindow) * settings.hardLimitFraction)
+    }
+
+    /// The owner's messages, oldest first, less those the tail still carries (as typed, or as a mid-task steer),
+    /// counted so a message typed twice is quoted once if one copy is still in the tail.
+    static func ownerMessagesBeyondTail(_ owner: [String], tail: ArraySlice<Content>) -> [String] {
+        var inTail: [String: Int] = [:]
+        for entry in tail where isTurnStart(entry) {
+            let text = entry.parts.compactMap(\.text).joined()
+            let words = text.hasPrefix(ownerSteerPrefix) ? String(text.dropFirst(ownerSteerPrefix.count)) : text
+            inTail[words, default: 0] += 1
+        }
+        var kept: [String] = []
+        for message in owner.reversed() {
+            if let n = inTail[message], n > 0 { inTail[message] = n - 1 } else { kept.append(message) }
+        }
+        return kept.reversed()
     }
 
     static let summaryInstruction = """
@@ -109,7 +140,8 @@ enum HistoryCompaction {
     static func summaryPrompt(_ history: [Content], plan: Plan, ownerTexts: Set<String>, settings: Settings) -> String {
         var lines: [String] = []
         var used = 0
-        for content in history[..<plan.cut].reversed() {
+        // The previous head is in `<previous_summary>` already, not repeated as a transcript line.
+        for content in history[..<plan.cut].reversed() where !isHead(content) {
             for line in transcriptLines(content, ownerTexts: ownerTexts).reversed() {
                 let neutral = TurnContext.neutralised(line)
                 guard used + neutral.utf8.count + 1 <= settings.maxSummaryInputBytes else { break }
@@ -159,6 +191,6 @@ enum HistoryCompaction {
 
     private static func ownerSection(_ messages: [String]) -> String {
         guard !messages.isEmpty else { return "" }
-        return "\n\nThe owner's own messages from those turns, verbatim, oldest first:\n" + messages.map { "\n<owner_message>\n\($0)\n</owner_message>" }.joined()
+        return ownerSectionIntro + messages.map { "\n<owner_message>\n\($0)\n</owner_message>" }.joined()
     }
 }
