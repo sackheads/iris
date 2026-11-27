@@ -120,6 +120,24 @@ struct HistoryCompactionPlanTests {
         #expect(prompt.contains("<previous_summary>") && prompt.contains("s" + HistoryCompaction.truncatedMarker))
     }
 
+    @Test("folded messages get the room a short transcript leaves, and the head says when some were cut (dev-2's #1441 review)")
+    func foldedUseUnusedRoom() throws {
+        let folded = (1...6).map { "folded-\($0) " + String(repeating: "f", count: 4_000) }
+        let plan = HistoryCompaction.Plan(cut: 2, turns: 1, tokensBefore: 0, tokensCompacted: 0, ownerParts: [],
+                                          foldedOwner: folded, priorSummary: nil, overHardLimit: false)
+        let history = [user("Loop tick 1 of 50."), model("ok"), user("Loop tick 2 of 50."), model("ok")]
+        let fits = HistoryCompaction.summaryInput(history, plan: plan, ownerTexts: [], settings: .init(maxSummaryInputBytes: 30_000))
+        #expect(fits.prompt.utf8.count <= 30_000 && fits.foldedCut == 0, "\(fits.prompt.utf8.count) bytes, \(fits.foldedCut) cut")
+        #expect(folded.allSatisfy { fits.prompt.contains(String($0.prefix(9))) }, "all six fit once the transcript's unused half is theirs")
+        #expect(fits.prompt.contains("Loop tick 1 of 50"))
+        let tight = HistoryCompaction.summaryInput(history, plan: plan, ownerTexts: [], settings: .init(maxSummaryInputBytes: 12_000))
+        #expect(tight.prompt.utf8.count <= 12_000 && tight.foldedCut > 0)
+        let note = HistoryCompaction.head(summary: "S", plan: plan, foldedCut: tight.foldedCut).parts.first?.text ?? ""
+        #expect(note.contains("6 earlier owner messages were folded") && note.contains("\(tight.foldedCut) of them were too long to fit"))
+        let whole = HistoryCompaction.head(summary: "S", plan: plan, foldedCut: 0).parts.first?.text ?? ""
+        #expect(whole.contains("6 earlier owner messages were folded") && !whole.contains("too long to fit"))
+    }
+
     @Test("the budget is capped at half the model's context")
     func budgetCap() {
         #expect(HistoryCompaction.budget(.init(budget: 500_000), contextWindow: 200_000) == 100_000)
