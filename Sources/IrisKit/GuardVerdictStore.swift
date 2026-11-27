@@ -152,20 +152,22 @@ enum GuardVersion {
 
     static func current(_ fingerprint: InjectionGuard.GuardConfigFingerprint,
                         kind: InjectionGuard.CanaryPromptKind = .external) async -> String? {
-        make(prompts: promptSource(kind), rules: PromptInjectionGuard.ruleSource, build: build,
+        make(prompts: promptSource(kind, clause: InjectionGuard.clauseConfigured(fingerprint)), rules: PromptInjectionGuard.ruleSource, build: build,
              model: await modelIdentity(fingerprint))
     }
 
     /// The canary prompts a kept read's verdict depends on, with fixed stand-ins for the tag and the text. A library
     /// or artifacts read is tool output, judged under `.external`: its source is both prompts as they were before
     /// #1356, byte for byte, so the clause kept every such verdict. A read judged under the instruction-channel
-    /// prompt hashes that prompt as rendered, clause and its place included (dev-2's #1414 review), and the
-    /// escalation that reaches its verdict (#1356 e).
-    static func promptSource(_ kind: InjectionGuard.CanaryPromptKind) -> String {
+    /// prompt hashes that prompt as rendered, and on an engine that takes the clause (`clause`, Ollama) its place
+    /// and the escalation that reaches the verdict (#1356 e, dev-2's #1414 review). Any other engine's is the
+    /// pre-#1356 bytes, as its prompt is.
+    static func promptSource(_ kind: InjectionGuard.CanaryPromptKind, clause: Bool = true) -> String {
+        let withClause = kind == .instructionChannel && clause
         let external = InjectionGuard.canaryPrompt(tag: "TAG", text: "TEXT", kind: .external)
         let channel = InjectionGuard.canaryPrompt(tag: "TAG", text: "TEXT", kind: .instructionChannel,
-                                                  impersonationClause: kind == .instructionChannel)
-        let parts = kind == .instructionChannel ? [external, channel, InjectionGuard.messageVerdictStages] : [external, channel]
+                                                  impersonationClause: withClause)
+        let parts = withClause ? [external, channel, InjectionGuard.messageVerdictStages] : [external, channel]
         return parts.joined(separator: "\u{0}")
     }
 
