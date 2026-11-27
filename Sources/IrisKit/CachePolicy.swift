@@ -20,6 +20,9 @@ struct CacheHints: Sendable, Equatable {
     var ttl: CacheTTLPolicy = .standard
     /// OpenAI's `prompt_cache_key`; capped at 64 UTF-8 bytes where it is sent.
     var promptCacheKey: String? = nil
+    /// #1437: send no `cache_control` marker at all, for a one-off request whose prefix is never sent again (a
+    /// compaction summary wrote its whole input to cache and never read it back: 1.25× for nothing).
+    var uncached: Bool = false
 }
 
 extension CacheTTLPolicy {
