@@ -97,7 +97,28 @@ enum HistoryCompaction {
 
     /// nil when the history is within budget, or when no turn boundary leaves anything new to compact.
     /// `ownerTexts` is the owner's transcript (`.user` messages): an entry counts as theirs only if it matches one.
-    static func plan(_ history: [Content], ownerTexts: Set<String>, settings: Settings, contextWindow: Int) -> Plan? {
+    /// #1425 slice C: the item an Inbox answer entry answers, or nil for any other entry. Only `deliverInboxAnswerFrame`
+    /// delivers under `IrisEngine.inboxAnswerSource` (idle, or queued and drained mid-task), so a peer, a tool or an
+    /// event can't produce this prefix; the answer itself is read from the inbox, never from the entry's text.
+    static func inboxAnswerItemId(_ content: Content) -> String? {
+        guard isTurnStart(content) else { return nil }
+        let text = content.parts.compactMap(\.text).joined()
+        let source = "System Event [\(IrisEngine.inboxAnswerSource)]"
+        let frameStart = "Inbox answer for item "
+        var rest: Substring
+        if text.hasPrefix(source + ": ") { rest = text.dropFirst(source.count + 2) }
+        else if text.hasPrefix(source + " (mid-task): ") { rest = text.dropFirst(source.count + 13) }
+        else { return nil }
+        guard rest.hasPrefix(frameStart) else { return nil }
+        rest = rest.dropFirst(frameStart.count)
+        let id = rest.prefix { $0 != " " }
+        return id.isEmpty ? nil : String(id)
+    }
+
+    /// `inboxAnswers`: item id to the owner's own words for each Inbox answer Brian gave (`IrisEngine.inboxAnswerOwnerText`).
+    /// An entry delivering one of those becomes an owner Part in its place, like a message he typed.
+    static func plan(_ history: [Content], ownerTexts: Set<String>, inboxAnswers: [String: String] = [:],
+                     settings: Settings, contextWindow: Int) -> Plan? {
         let total = tokens(history)
         guard total > budget(settings, contextWindow: contextWindow) else { return nil }
         // The earliest turn start whose suffix fits the tail; the last turn stays whole even if it alone is bigger.
@@ -111,7 +132,10 @@ enum HistoryCompaction {
         let rest = span.dropFirst(head == nil ? 0 : 1)
         // The previous head's owner Parts by position, copied as they are; then this span's, as history has them.
         var parts = (head?.parts.dropFirst().compactMap(\.text) ?? [])
-            + rest.filter { isOwnerTyped($0, ownerTexts: ownerTexts) }.map { ownerPart($0.parts.compactMap(\.text).joined()) }
+            + rest.compactMap { entry -> String? in
+                if isOwnerTyped(entry, ownerTexts: ownerTexts) { return ownerPart(entry.parts.compactMap(\.text).joined()) }
+                return inboxAnswerItemId(entry).flatMap { inboxAnswers[$0] }.map(ownerPart)
+            }
         var folded: [String] = []
         while !parts.isEmpty, parts.reduce(0, { $0 + $1.utf8.count }) / 4 > ownerSectionMaxTokens {
             let oldest = parts.removeFirst()
