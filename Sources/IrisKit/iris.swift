@@ -5572,9 +5572,17 @@ actor IrisEngine {
             await armLoopTick(for: conversationId)
         case .run(let tick):
             if !Task.isCancelled {
-                // #1425 step 0: marks the tick's tool calls for `LoopApprovalRecord`; nothing decides on it.
+                // #1425 step 0: marks the tick's tool calls for `LoopApprovalRecord`, and records what the tick spent;
+                // nothing decides on either.
+                let started = ContinuousClock.now
+                let before = await MainActor.run { localState?.conversations.first { $0.id == conversationId }?.tokenUsage }
                 await LoopApprovalProbe.$inLoopTick.withValue(true) {
                     await processInput(tick, source: Self.loopSource, conversationId: conversationId, goalFacts: .carry)
+                }
+                let elapsed = ContinuousClock.now - started
+                let seconds = Double(elapsed.components.seconds) + Double(elapsed.components.attoseconds) / 1e18
+                await MainActor.run {
+                    localState?.recordLoopTick(conversationId: conversationId, loopId: loop.id, before: before, seconds: seconds)
                 }
             }
             await MainActor.run { localState?.endEngineTurn(for: conversationId) }
