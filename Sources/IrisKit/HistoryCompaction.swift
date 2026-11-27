@@ -48,12 +48,18 @@ enum HistoryCompaction {
             && !content.parts.contains { $0.functionResponse != nil }
     }
 
-    /// A turn the owner typed: not a system event, a loop tick, or a head this file (or rotation) wrote.
-    static func isOwnerTyped(_ content: Content) -> Bool {
+    /// The steer label the owner's mid-task message carries in history (`IrisEngine.drainSteers`).
+    static let ownerSteerPrefix = "User (mid-task): "
+
+    /// A turn the owner typed, by a positive test (dev-3's #1431 review): its words are one of the owner's own
+    /// messages in this conversation's transcript (`ownerTexts`, the `.user` messages only `sendMessage` writes), or
+    /// that text as a mid-task steer. A peer's steer, an event line, a tick, a system event or a head can't match
+    /// unless it repeats the owner word for word, and an owner message a hook rewrote is summarised, not quoted.
+    static func isOwnerTyped(_ content: Content, ownerTexts: Set<String>) -> Bool {
         guard isTurnStart(content) else { return false }
         let text = content.parts.compactMap(\.text).joined()
-        return ![IrisEngine.systemEventTextPrefix, ConversationLoop.tickTextPrefix, ConversationLoop.alarmTextPrefix,
-                 summaryLabel, omittedLabel, AppState.rotationSummaryLabel].contains { text.hasPrefix($0) }
+        if ownerTexts.contains(text) { return true }
+        return text.hasPrefix(ownerSteerPrefix) && ownerTexts.contains(String(text.dropFirst(ownerSteerPrefix.count)))
     }
 
     struct Plan: Equatable {
@@ -71,7 +77,7 @@ enum HistoryCompaction {
     }
 
     /// nil when the history is within budget, or when no turn boundary leaves anything to compact.
-    static func plan(_ history: [Content], settings: Settings, contextWindow: Int) -> Plan? {
+    static func plan(_ history: [Content], ownerTexts: Set<String>, settings: Settings, contextWindow: Int) -> Plan? {
         let total = tokens(history)
         guard total > budget(settings, contextWindow: contextWindow) else { return nil }
         // The earliest turn start whose suffix fits the tail; the last turn stays whole even if it alone is bigger.
@@ -84,7 +90,7 @@ enum HistoryCompaction {
             return text.hasPrefix(summaryLabel) ? text : nil
         }
         return Plan(cut: cut, turns: span.filter(isTurnStart).count, tokensBefore: total, tokensCompacted: tokens(span),
-                    ownerMessages: span.filter(isOwnerTyped).map { $0.parts.compactMap(\.text).joined() },
+                    ownerMessages: span.filter { isOwnerTyped($0, ownerTexts: ownerTexts) }.map { $0.parts.compactMap(\.text).joined() },
                     priorSummary: prior,
                     overHardLimit: Double(total) >= Double(contextWindow) * settings.hardLimitFraction)
     }
@@ -100,11 +106,11 @@ enum HistoryCompaction {
 
     /// The summary call's one message: the previous summary, then the span as lines, newest kept when over the cap.
     /// Every line is neutralised, so nothing in it can close the transcript block.
-    static func summaryPrompt(_ history: [Content], plan: Plan, settings: Settings) -> String {
+    static func summaryPrompt(_ history: [Content], plan: Plan, ownerTexts: Set<String>, settings: Settings) -> String {
         var lines: [String] = []
         var used = 0
         for content in history[..<plan.cut].reversed() {
-            for line in transcriptLines(content).reversed() {
+            for line in transcriptLines(content, ownerTexts: ownerTexts).reversed() {
                 let neutral = TurnContext.neutralised(line)
                 guard used + neutral.utf8.count + 1 <= settings.maxSummaryInputBytes else { break }
                 lines.append(neutral)
@@ -115,10 +121,10 @@ enum HistoryCompaction {
         return summaryInstruction + prior + "\n\n<transcript>\n" + lines.reversed().joined(separator: "\n") + "\n</transcript>"
     }
 
-    private static func transcriptLines(_ content: Content) -> [String] {
+    private static func transcriptLines(_ content: Content, ownerTexts: Set<String>) -> [String] {
         content.parts.compactMap { part in
             if let text = part.text, !text.isEmpty {
-                let speaker = content.role == "user" ? (isOwnerTyped(content) ? "owner" : "event") : "agent"
+                let speaker = content.role == "user" ? (isOwnerTyped(content, ownerTexts: ownerTexts) ? "owner" : "event") : "agent"
                 return "\(speaker): \(ConversationReader.quoteContinuationLines(text))"
             }
             if let call = part.functionCall {
