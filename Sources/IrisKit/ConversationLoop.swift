@@ -1,8 +1,9 @@
 import Foundation
 
 /// A conversation's `/loop` (#190): its own prompt re-run on a cadence, in the same visible
-/// conversation, on `/goal`'s reprompt machinery. Not a job: no `Job` row, no scheduler, never
-/// unattended (`docs/specs/2026-10-19-loop.md`).
+/// conversation, on `/goal`'s reprompt machinery. Not a job: no `Job` row, no scheduler
+/// (`docs/specs/2026-10-19-loop.md`). Attended unless marked `unattended` (#1425), and even then the person's
+/// own typed turns are.
 struct ConversationLoop: Codable, Equatable, Sendable {
     /// This loop's own id: a tick scheduled for one loop never fires into a later one.
     var id: UUID
