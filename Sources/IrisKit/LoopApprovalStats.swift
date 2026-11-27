@@ -5,6 +5,8 @@ import Foundation
 /// the call's shape (never its arguments), whether the conversation had read outside text, which layer decided it,
 /// and, when the person was asked, how long the loop waited. Telemetry only: no decision reads it.
 struct LoopApprovalRecord: Codable, Equatable, Sendable {
+    /// Tells this line from a tick's (`LoopTickRecord`) in the shared log.
+    var kind = "approval"
     var at: Date
     var conversationId: UUID
     var loopId: UUID
@@ -56,6 +58,31 @@ struct LoopApprovalRecord: Codable, Equatable, Sendable {
     }
 }
 
+/// #1425 step 0 (planner, the Overseer's point): one line per loop tick with what it spent, for sizing the spend cap
+/// and for #1437's cache study. The conversation's own counters' change across the tick: a subagent's spend is on its
+/// own conversation and isn't counted. Counts only, no text.
+struct LoopTickRecord: Codable, Equatable, Sendable {
+    var kind = "tick"
+    var at: Date
+    var conversationId: UUID
+    var loopId: UUID
+    var seconds: Double
+    var inputTokens: Int
+    var outputTokens: Int
+    /// nil while the provider has reported none in this conversation (unknown isn't zero, as in `TokenUsage`).
+    var cacheReadTokens: Int?
+    var cacheWrite5mTokens: Int?
+    var cacheWrite1hTokens: Int?
+
+    static func spent(from before: TokenUsage, to after: TokenUsage) -> (input: Int, output: Int, read: Int?, write5m: Int?, write1h: Int?) {
+        func change(_ a: Int?, _ b: Int?) -> Int? { b.map { $0 - (a ?? 0) } }
+        let write = change(before.cacheWriteTokenCount, after.cacheWriteTokenCount)
+        let write1h = change(before.cacheWrite1hTokenCount, after.cacheWrite1hTokenCount)
+        return (after.promptTokenCount - before.promptTokenCount, after.candidatesTokenCount - before.candidatesTokenCount,
+                change(before.cacheReadTokenCount, after.cacheReadTokenCount), write.map { $0 - (write1h ?? 0) }, write1h)
+    }
+}
+
 /// Carries a loop tick's mark and the dialog's wait from where they're known (`runLoopTick`, `enqueueUserApproval`)
 /// to where the record is written (`requestApprovalSource`), across the awaits between, without a new parameter on
 /// every caller. Task-local, so the tool calls a tick runs in parallel each see it, and nothing else does.
@@ -76,8 +103,8 @@ final class LoopApprovalProbe: @unchecked Sendable {
     /// so a loop that runs for weeks holds at most about twice this (planner, #1425).
     static let maxLogBytes = 5 * 1024 * 1024
 
-    /// Appends one record as a JSON line to `logs/loop-approvals.jsonl` in this build's home.
-    static func appendToLog(_ record: LoopApprovalRecord, paths: IrisPaths = .default, maxBytes: Int = maxLogBytes) {
+    /// Appends one record (an approval's or a tick's) as a JSON line to `logs/loop-approvals.jsonl` in this build's home.
+    static func appendToLog<Record: Encodable>(_ record: Record, paths: IrisPaths = .default, maxBytes: Int = maxLogBytes) {
         let dir = paths.root.appendingPathComponent("logs")
         let url = dir.appendingPathComponent("loop-approvals.jsonl")
         if let size = (try? FileManager.default.attributesOfItem(atPath: url.path))?[.size] as? Int, size >= maxBytes {

@@ -119,6 +119,52 @@ struct LoopApprovalStatsTests {
         #expect(names == ["loop-approvals.1.jsonl", "loop-approvals.jsonl"], "one old file kept, never more")
     }
 
+    @Test("a tick's line is what the conversation's counters moved by: input, output, cache read, and both cache writes")
+    func tickSpend() throws {
+        let (state, _, root) = try setUp(); defer { try? FileManager.default.removeItem(at: root) }
+        var ticks: [LoopTickRecord] = []
+        state.loopTickSink = { ticks.append($0) }
+        let id = looping(state)
+        let idx = state.conversations.firstIndex { $0.id == id }!
+        let loopId = try #require(state.conversations[idx].loop?.id)
+        state.conversations[idx].tokenUsage = TokenUsage(promptTokenCount: 9_000, candidatesTokenCount: 300, totalTokenCount: 9_300,
+                                                         cacheReadTokenCount: 8_000, cacheWriteTokenCount: 1_000, cacheWrite1hTokenCount: 600)
+        let before = state.conversations[idx].tokenUsage
+        state.conversations[idx].tokenUsage = TokenUsage(promptTokenCount: 18_630, candidatesTokenCount: 500, totalTokenCount: 19_130,
+                                                         cacheReadTokenCount: 17_000, cacheWriteTokenCount: 1_400, cacheWrite1hTokenCount: 900)
+        state.recordLoopTick(conversationId: id, loopId: loopId, before: before, seconds: 4.5)
+        let t = try #require(ticks.first)
+        #expect(ticks.count == 1 && t.kind == "tick" && t.loopId == loopId && t.seconds == 4.5)
+        #expect(t.inputTokens == 9_630 && t.outputTokens == 200 && t.cacheReadTokens == 9_000)
+        #expect(t.cacheWrite1hTokens == 300 && t.cacheWrite5mTokens == 100, "the 5-minute write is the write less its 1-hour share")
+    }
+
+    @Test("a provider that never reported a cache count logs none (unknown, not zero), and a background run logs no tick")
+    func tickUnknownCacheAndBackground() throws {
+        let (state, _, root) = try setUp(); defer { try? FileManager.default.removeItem(at: root) }
+        var ticks: [LoopTickRecord] = []
+        state.loopTickSink = { ticks.append($0) }
+        let id = looping(state)
+        let idx = state.conversations.firstIndex { $0.id == id }!
+        state.conversations[idx].tokenUsage = TokenUsage(promptTokenCount: 500, candidatesTokenCount: 50, totalTokenCount: 550)
+        state.recordLoopTick(conversationId: id, loopId: UUID(), before: TokenUsage(), seconds: 1)
+        #expect(ticks.first?.cacheReadTokens == nil && ticks.first?.cacheWrite5mTokens == nil && ticks.first?.cacheWrite1hTokens == nil)
+        let background = state.createNewConversation(isBackground: true, select: false)
+        state.recordLoopTick(conversationId: background, loopId: UUID(), before: nil, seconds: 1)
+        #expect(ticks.count == 1)
+    }
+
+    /// The tick is the one call site, so this pins that it's wired there and nowhere else decides on it.
+    @Test("runLoopTick records each tick it runs")
+    func tickIsWired() throws {
+        let source = try String(contentsOf: PerfPaths.repoRoot().appendingPathComponent("Sources/IrisKit/iris.swift"), encoding: .utf8)
+        let body = try #require(source.components(separatedBy: "func runLoopTick(").dropFirst().first)
+        let runCase = try #require(body.components(separatedBy: "case .run(let tick):").dropFirst().first?.components(separatedBy: "\n    }\n").first)
+        #expect(runCase.contains("$inLoopTick.withValue(true)"))
+        #expect(runCase.contains("recordLoopTick(conversationId: conversationId"))
+        #expect(source.components(separatedBy: "recordLoopTick(").count - 1 == 1, "one caller")
+    }
+
     @Test("the default sink appends one JSON line per record to logs/loop-approvals.jsonl")
     func appendsJSONLines() throws {
         let root = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("iris-1425-log-\(UUID().uuidString)")

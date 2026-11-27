@@ -5376,6 +5376,16 @@ class AppState {
 
     /// #1425 step 0: where each `loopApprovalRecord` goes; a test hands its own.
     @ObservationIgnored var loopApprovalSink: @MainActor (LoopApprovalRecord) -> Void = { LoopApprovalProbe.appendToLog($0) }
+    @ObservationIgnored var loopTickSink: @MainActor (LoopTickRecord) -> Void = { LoopApprovalProbe.appendToLog($0) }
+
+    /// #1425 step 0: records what a loop tick spent, from the conversation's counters before it (`before`) and now.
+    func recordLoopTick(conversationId: UUID, loopId: UUID, before: TokenUsage?, seconds: Double) {
+        guard let c = conversations.first(where: { $0.id == conversationId }), !c.isBackground else { return }
+        let spent = LoopTickRecord.spent(from: before ?? TokenUsage(), to: c.tokenUsage)
+        loopTickSink(LoopTickRecord(at: Date(), conversationId: conversationId, loopId: loopId, seconds: seconds,
+                                    inputTokens: spent.input, outputTokens: spent.output, cacheReadTokens: spent.read,
+                                    cacheWrite5mTokens: spent.write5m, cacheWrite1hTokens: spent.write1h))
+    }
 
     private func decideApprovalSource(toolName: String, details: String, args: [String: JSONValue],
                                       workspace: String?, conversationId: UUID?, origin: String,
