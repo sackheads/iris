@@ -1,0 +1,1 @@
+{"name": "loop-ttl-1437", "lane": "real", "repetitions": 1, "pauseMs": 0, "rungs": [4], "scenarios": ["perf/prompts/caching/loop-ttl-1437.json"]}

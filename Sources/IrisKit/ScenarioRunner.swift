@@ -236,7 +236,7 @@ enum ScenarioRunner {
                                factStore: effectiveFactStore, sessionPeerCount: 0, requestDumpSink: requestDumpSink,
                                declareStateGatedTools: experiments.declareStateGatedTools,
                                stickyTools: experiments.stickyTools, roundStartHook: roundStartHook,
-                               cacheTTLOverride: experiments.ttlOverride)
+                               cacheTTLOverride: experiments.ttlOverride, perfSystemSalt: experiments.systemSalt)
 
         // Collect this run's finished turn profiles via a task-local sink scoped to the turn loop.
         let collector = TurnCollector()

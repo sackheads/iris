@@ -953,8 +953,11 @@ actor IrisEngine {
     /// Perf and tests: the Anthropic TTL policy for every request, instead of the one
     /// `CacheTTLPolicy.resolve` picks (5c §0.8). Nil everywhere else.
     private let cacheTTLOverride: CacheTTLPolicy?
+    /// #1437 experiment only (`IRIS_PERF_SALT`): a first system line that gives a perf arm a prefix of its own, so two
+    /// arms run side by side never read each other's cache entries. Nil everywhere else.
+    private let perfSystemSalt: String?
 
-    init(state: AppState, tier: ModelTier = .medium, principal: Principal = .main, roleLabel: String? = nil, client: any LLMClientProtocol = LLMClient(), evaluatorChecks: [String] = [], retryDelays: [TimeInterval] = [2, 4, 8], streamResponses: Bool? = nil, factStore: FactStoreManager? = nil, protectionEnabled: Bool? = nil, checkpointAutoAdvance: Bool? = nil, sessionPeerCount: Int? = nil, recentWrites: RecentWrites = .shared, guardTrust: GuardTrustStore? = nil, guardVerdicts: GuardVerdictStore? = nil, libraryGuard: LibraryGuardStore? = nil, requestDumpSink: (@Sendable (GeminiRequest, Int, Int) -> Void)? = nil, memory: MemoryManager? = nil, declareStateGatedTools: Bool = false, stickyTools: Bool = true, roundStartHook: (@Sendable (Int) async -> Void)? = nil, cacheTTLOverride: CacheTTLPolicy? = nil, hooks: HookManager = .shared, provider: String? = nil, replayThinking: Bool? = nil, subagentConfig: ConfigManager = .shared, repromptDelay: TimeInterval = 1.5,
+    init(state: AppState, tier: ModelTier = .medium, principal: Principal = .main, roleLabel: String? = nil, client: any LLMClientProtocol = LLMClient(), evaluatorChecks: [String] = [], retryDelays: [TimeInterval] = [2, 4, 8], streamResponses: Bool? = nil, factStore: FactStoreManager? = nil, protectionEnabled: Bool? = nil, checkpointAutoAdvance: Bool? = nil, sessionPeerCount: Int? = nil, recentWrites: RecentWrites = .shared, guardTrust: GuardTrustStore? = nil, guardVerdicts: GuardVerdictStore? = nil, libraryGuard: LibraryGuardStore? = nil, requestDumpSink: (@Sendable (GeminiRequest, Int, Int) -> Void)? = nil, memory: MemoryManager? = nil, declareStateGatedTools: Bool = false, stickyTools: Bool = true, roundStartHook: (@Sendable (Int) async -> Void)? = nil, cacheTTLOverride: CacheTTLPolicy? = nil, perfSystemSalt: String? = nil, hooks: HookManager = .shared, provider: String? = nil, replayThinking: Bool? = nil, subagentConfig: ConfigManager = .shared, repromptDelay: TimeInterval = 1.5,
          subagentRoute: ProviderRoute? = nil,
          primaryClient: (any LLMClientProtocol)? = nil,
          routedClient: @escaping @Sendable (ProviderRoute) -> any LLMClientProtocol = { LLMClient(route: $0) },
@@ -1004,6 +1007,7 @@ actor IrisEngine {
         self.declareStateGatedTools = declareStateGatedTools
         self.stickyToolsEnabled = stickyTools
         self.cacheTTLOverride = cacheTTLOverride
+        self.perfSystemSalt = perfSystemSalt
         // #1066: a guest's engine is handed the inert manager whatever was passed: it fires none of
         // the owner's hook commands (all events), so guest text never reaches a hook's stdin.
         self.hooks = principal == .mcpGuest ? .inert : hooks
@@ -4108,8 +4112,9 @@ actor IrisEngine {
         // turn gets back the identical `Content` it got last time, keeping the system prompt
         // byte-stable for the provider's prompt cache (5a §0.2). #962's additionalRoots feed in
         // the same way workspacePath does.
-        let currentSystemPrompt = await assembledSystemPrompt(workspacePath: workspacePath, additionalRoots: additionalRoots, agentProfile: agentProfile,
+        var currentSystemPrompt = await assembledSystemPrompt(workspacePath: workspacePath, additionalRoots: additionalRoots, agentProfile: agentProfile,
                                                                binding: turnBinding, profileId: turnProfileId, isGuestOriginTurn: turnIsGuestOrigin)
+        if let salt = perfSystemSalt { currentSystemPrompt.parts.insert(Part(text: "[perf arm: \(salt)]"), at: 0) }
         for notice in pendingGuardNotices {
             await pushToUI(role: .system, text: notice, conversationId: conversationId)
         }

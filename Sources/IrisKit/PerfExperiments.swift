@@ -6,10 +6,12 @@ struct PerfExperiments: Sendable, Equatable {
     var declareStateGatedTools = false        // IRIS_PERF_DECLARE_STATE_TOOLS=1 (5a's "declared" arm)
     var stickyTools = true                    // IRIS_PERF_STICKY_TOOLS=0 (5a's "gated" arm)
     var ttlOverride: CacheTTLPolicy? = nil    // IRIS_PERF_TTL=5m|1h|1h-prefix
+    var systemSalt: String? = nil             // IRIS_PERF_SALT=<arm>: a prefix of the arm's own (#1437)
 
     static let declareKey = "IRIS_PERF_DECLARE_STATE_TOOLS"
     static let stickyKey = "IRIS_PERF_STICKY_TOOLS"
     static let ttlKey = "IRIS_PERF_TTL"
+    static let saltKey = "IRIS_PERF_SALT"
 
     /// The `IRIS_PERF_TTL` values: `5m` is every marker at five minutes, `1h` every marker at an
     /// hour, `1h-prefix` an hour on tools and system with history at five minutes.
@@ -24,6 +26,7 @@ struct PerfExperiments: Sendable, Equatable {
         var e = PerfExperiments()
         e.declareStateGatedTools = env[declareKey] == "1"
         e.stickyTools = env[stickyKey] != "0"
+        e.systemSalt = env[saltKey].flatMap { $0.isEmpty ? nil : $0 }
         if let raw = env[ttlKey] {
             if let match = ttlValues.first(where: { $0.0 == raw }) {
                 e.ttlOverride = match.1
