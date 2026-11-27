@@ -86,8 +86,8 @@ struct CanaryEscalationTests {
         let engine = TwoStage(["MALICIOUS", "SAFE"], rejudges: false)
         #expect(!passed(await judge(engine, tag: "system_event_peer_session")))
         #expect(engine.calls.count == 1)
-        let prompt = try? #require(engine.prompts.first)
-        #expect(prompt?.contains(InjectionGuard.impersonationClause) == false, "the clause goes only where its block gets a second look")
+        #expect(engine.prompts.count == 1)
+        #expect(engine.prompts.first?.contains(InjectionGuard.impersonationClause) == false, "the clause goes only where its block gets a second look")
     }
 
     @Test("an engine that can escalate is sent the clause on a message channel, and not on tool output")
