@@ -104,6 +104,27 @@ struct HookManager {
         return await fireEvent(eventName: "PreCompress", targetMatcher: "PreCompress", payload: try? encoder.encode(history), useSandbox: useSandbox)
     }
 
+    /// #1421: after a history compaction, metadata only. The compacted span is never piped to a shell hook: it may be
+    /// outside text. A fleet can use it to snapshot its own state file. Its decision is ignored: compaction has happened.
+    func fireHistoryCompacted(_ event: HistoryCompactedEvent, useSandbox: Bool = false) async {
+        _ = await fireEvent(eventName: "HistoryCompacted", targetMatcher: "HistoryCompacted",
+                            payload: Self.historyCompactedPayload(event), useSandbox: useSandbox)
+    }
+
+    struct HistoryCompactedEvent: Codable, Equatable, Sendable {
+        let conversationId: String
+        /// "summarized", or "omitted" when the hard limit dropped turns with no summary.
+        let kind: String
+        let turns: Int
+        let tokensBefore: Int
+        let tokensAfter: Int
+        let tainted: Bool
+    }
+
+    static func historyCompactedPayload(_ event: HistoryCompactedEvent) -> Data? {
+        try? JSONEncoder().encode(event)
+    }
+
     func fireNotification(title: String, body: String, useSandbox: Bool = false) async {
         let payload = ["title": title, "body": body]
         _ = await fireEvent(eventName: "Notification", targetMatcher: "Notification", payload: try? JSONSerialization.data(withJSONObject: payload), useSandbox: useSandbox)

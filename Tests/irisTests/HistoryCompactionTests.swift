@@ -1,0 +1,207 @@
+import Testing
+import Foundation
+@testable import IrisKit
+
+/// #1421: a loop's or goal's history is compacted at the start of a turn once it's over budget: older turns become one
+/// summary, the owner's own messages and the recent tail stay verbatim, and a summary of outside text stays outside
+/// text. Pure planning rows, then real turns through `IrisEngine` on a scripted client.
+@Suite("history compaction plans its cut at a turn boundary (#1421)")
+struct HistoryCompactionPlanTests {
+    private func user(_ text: String) -> Content { Content(role: "user", parts: [Part(text: text)]) }
+    private func model(_ text: String) -> Content { Content(role: "model", parts: [Part(text: text)]) }
+    private let big = String(repeating: "x", count: 4_000)   // ~1k tokens
+
+    @Test("under budget, nothing is planned")
+    func underBudget() {
+        let history = [user("hi"), model("hello")]
+        #expect(HistoryCompaction.plan(history, settings: .init(budget: 10_000, tail: 1_000), contextWindow: 128_000) == nil)
+    }
+
+    @Test("the cut lands on a turn start, never between a tool call and its result")
+    func cutAtTurnStart() {
+        var history: [Content] = []
+        for i in 0..<12 {
+            history.append(user("Loop tick \(i + 1) of 50 (every 1m). Do this loop's task again now: check"))
+            history.append(Content(role: "model", parts: [Part(functionCall: FunctionCall(name: "read_file", args: ["path": .string("/b")]))]))
+            history.append(Content(role: "user", parts: [Part(functionResponse: FunctionResponse(name: "read_file", response: ["result": .string(big)]))]))
+            history.append(model("board unchanged"))
+        }
+        let plan = try! #require(HistoryCompaction.plan(history, settings: .init(budget: 3_000, tail: 2_500), contextWindow: 128_000))
+        #expect(plan.cut > 0 && HistoryCompaction.isTurnStart(history[plan.cut]), "cut \(plan.cut)")
+        #expect(HistoryCompaction.tokens(history[plan.cut...]) <= 2_500)
+        #expect(plan.ownerMessages.isEmpty, "a loop tick isn't the owner's words")
+        #expect(plan.turns == history[..<plan.cut].filter(HistoryCompaction.isTurnStart).count)
+    }
+
+    @Test("the budget is capped at half the model's context")
+    func budgetCap() {
+        #expect(HistoryCompaction.budget(.init(budget: 500_000), contextWindow: 200_000) == 100_000)
+        #expect(HistoryCompaction.budget(.init(budget: 48_000), contextWindow: 1_000_000) == 48_000)
+    }
+
+    @Test("only the owner's typed turns count as theirs", arguments: [
+        ("System Event [Loop]: x", false), ("Loop tick 3 of 50 (every 1m). Do it", false),
+        ("Alarm: the wait you set has ended. Carry on", false), (HistoryCompaction.summaryLabel + ", 3 turns]", false),
+        (HistoryCompaction.omittedLabel + ": 3 earlier turns", false), (AppState.rotationSummaryLabel + ", \"x\"]", false),
+        ("please also check #1414", true)])
+    func ownerTyped(_ text: String, _ owner: Bool) {
+        #expect(HistoryCompaction.isOwnerTyped(user(text)) == owner)
+    }
+}
+
+@MainActor
+@Suite("a loop's history compacts at turn start, keeping the owner's words and its taint (#1421)", .serialized,
+       .timeLimit(.minutes(1)))
+struct HistoryCompactionEngineTests {
+    /// Answers a summary request (no tools) with `summary`, and every turn with "ok". Records both.
+    private final class Client: LLMClientProtocol, @unchecked Sendable {
+        private let lock = NSLock()
+        private var recorded: [GeminiRequest] = []
+        let summary: String
+        init(summary: String) { self.summary = summary }
+        var requests: [GeminiRequest] { lock.withLock { recorded } }
+        var summaryRequests: [GeminiRequest] { requests.filter { $0.tools == nil } }
+        func generateContent(request: GeminiRequest, tier: ModelTier) async throws -> GeminiResponse {
+            lock.withLock { recorded.append(request) }
+            let text = request.tools == nil ? summary : "ok"
+            return GeminiResponse(candidates: [Candidate(content: Content(role: "model", parts: [Part(text: text)]))], usageMetadata: nil)
+        }
+    }
+
+    private final class Canary: AuxiliaryInferenceEngine, @unchecked Sendable {
+        let answer: String
+        init(_ answer: String) { self.answer = answer }
+        func loadModel(config: AuxiliaryModelConfig) async throws {}
+        func unloadModel() async {}
+        func generate(prompt: String, jsonSchema: String?) async throws -> String { answer }
+    }
+
+    private struct PassingTier2: CoreMLModelProtocol {
+        func evaluate(text: String) async throws -> Double { 0 }
+        func tokenCount(_ text: String) -> Int { max(1, text.utf8.count / 4) }
+    }
+
+    /// Owner messages with the shapes a careless copy would mangle: newlines, a tag, quotes, non-ASCII.
+    static let ownerWords = ["please keep #1414 on hold until Brian answers",
+                             "Ruling: \"(i)\" — clause only where it escalates.\nSecond line <b>bold</b> & more ✓"]
+    private let big = String(repeating: "board line ", count: 400)   // ~1.1k tokens
+
+    private func app(loop: Bool = true, tainted: Bool = false, card: Bool = false) throws -> (AppState, UUID, [Content]) {
+        let state = AppState(store: try ConversationStore.inMemory(), tier2Provisioning: .provisioned,
+                             tier3Provisioning: .provisioned, createIfEmpty: false, emitLaunchNotices: false)
+        let id = state.createNewConversation(isBackground: false, select: true)
+        var history: [Content] = []
+        for i in 0..<10 {
+            let input = i == 2 ? Self.ownerWords[0] : i == 5 ? Self.ownerWords[1]
+                : "Loop tick \(i + 1) of 50 (every 1m). Do this loop's task again now: check the board"
+            history.append(Content(role: "user", parts: [Part(text: input)]))
+            history.append(Content(role: "model", parts: [Part(text: "tick \(i): \(big)")]))
+        }
+        let idx = try #require(state.conversations.firstIndex { $0.id == id })
+        state.conversations[idx].history = history
+        if loop { state.conversations[idx].loop = ConversationLoop(prompt: "check the board", intervalSeconds: 60, cap: 50, paused: true) }
+        if card { state.conversations[idx].sessionCard = SessionCard(name: "planner", description: "loop") }
+        if tainted { state.markConversationReadUntrusted(id) }
+        return (state, id, history)
+    }
+
+    private func turn(_ state: AppState, _ id: UUID, client: Client, settings: HistoryCompaction.Settings,
+                      canary: String = "SAFE", hooks: HookManager = HookManager()) async {
+        let engine = IrisEngine(state: state, client: client, retryDelays: [], protectionEnabled: true, sessionPeerCount: 0,
+                                hooks: hooks, historyCompaction: settings)
+        let health = GuardTierHealth()
+        await GuardTierHealth.$scoped.withValue(health) {
+            await CoreMLEvaluator.$scopedModel.withValue(.init(PassingTier2())) {
+                await AuxiliaryModelManager.$scopedEngines.withValue(["canary": Canary(canary)]) {
+                    await engine.processInput("what's new?", source: "UI", conversationId: id)
+                }
+            }
+        }
+    }
+
+    private let settings = HistoryCompaction.Settings(budget: 4_000, tail: 3_000)
+    private func history(_ state: AppState, _ id: UUID) -> [Content] { state.conversations.first { $0.id == id }?.history ?? [] }
+    private func headText(_ state: AppState, _ id: UUID) -> String { history(state, id).first?.parts.compactMap(\.text).joined() ?? "" }
+
+    @Test("a clean loop compacts: one summary head, the tail verbatim, every owner message byte for byte")
+    func cleanCompaction() async throws {
+        let (state, id, before) = try app()
+        let client = Client(summary: "Open items: #1414 on hold.")
+        await turn(state, id, client: client, settings: settings)
+        let after = history(state, id)
+        let head = headText(state, id)
+        #expect(head.hasPrefix(HistoryCompaction.summaryLabel) && head.contains("Open items: #1414 on hold."), "\(head.prefix(300))")
+        #expect(!head.contains("<untrusted_context"), "a clean conversation's summary isn't wrapped")
+        for words in Self.ownerWords { #expect(head.contains("<owner_message>\n\(words)\n</owner_message>"), "lost: \(words)") }
+        let plan = try #require(HistoryCompaction.plan(before + [Content(role: "user", parts: [Part(text: "what's new?")])],
+                                                       settings: settings, contextWindow: 128_000))
+        let tailBefore = before[plan.cut...].map { $0.parts.compactMap(\.text) }
+        #expect(Array(after[1..<(1 + tailBefore.count)]).map { $0.parts.compactMap(\.text) } == tailBefore, "the tail is verbatim")
+        #expect(client.summaryRequests.count == 1)
+        #expect(state.conversations.first { $0.id == id }?.messages.contains { $0.content.hasPrefix("Compacted ") } == true)
+    }
+
+    @Test("a tainted loop's summary is guarded and wrapped, and the conversation stays tainted")
+    func taintedCompaction() async throws {
+        let (state, id, _) = try app(tainted: true)
+        await turn(state, id, client: Client(summary: "Open items: none."), settings: settings)
+        let head = headText(state, id)
+        #expect(head.contains("<untrusted_context source=\"history_summary\""), "\(head.prefix(300))")
+        #expect(state.conversations.first { $0.id == id }?.hasUntrustedToolOutput == true)
+        for words in Self.ownerWords { #expect(head.contains(words), "the owner's words stay, outside the wrap") }
+    }
+
+    @Test("a blocked summary compacts nothing below the hard limit")
+    func blockedKeepsHistory() async throws {
+        let (state, id, before) = try app(tainted: true)
+        await turn(state, id, client: Client(summary: "s"), settings: settings, canary: "MALICIOUS")
+        let after = history(state, id)
+        #expect(Array(after.prefix(before.count)).map { $0.parts.compactMap(\.text) } == before.map { $0.parts.compactMap(\.text) })
+    }
+
+    @Test("past the hard limit with no summary, the oldest turns are dropped, said in the transcript and on the card")
+    func hardLimitDrops() async throws {
+        let (state, id, _) = try app(tainted: true, card: true)
+        var hard = settings
+        hard.hardLimitFraction = 0.0001   // any over-budget history is past it
+        await turn(state, id, client: Client(summary: "s"), settings: hard, canary: "MALICIOUS")
+        let head = headText(state, id)
+        #expect(head.hasPrefix(HistoryCompaction.omittedLabel), "\(head.prefix(200))")
+        for words in Self.ownerWords { #expect(head.contains(words)) }
+        let conv = try #require(state.conversations.first { $0.id == id })
+        #expect((conv.sessionCard?.historyTurnsOmitted ?? 0) > 0)
+        #expect(conv.messages.contains { $0.content.hasPrefix("Dropped ") })
+    }
+
+    @Test("a conversation with no loop or goal is never compacted")
+    func plainConversationUntouched() async throws {
+        let (state, id, before) = try app(loop: false)
+        let client = Client(summary: "s")
+        await turn(state, id, client: client, settings: settings)
+        #expect(client.summaryRequests.isEmpty)
+        #expect(history(state, id).count == before.count + 2)
+    }
+
+    @Test("compaction runs before PreCompress, whose hook sees the compacted history; HistoryCompacted gets metadata only")
+    func hookOrderAndPayload() async throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("iris-1421-hooks-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        func entry(_ event: String) throws -> String {
+            let command = String(data: try JSONEncoder().encode("cat > '\(dir.path)/\(event).json'"), encoding: .utf8)!
+            return "\"\(event)\":[{\"matcher\":\".*\",\"hooks\":[{\"type\":\"command\",\"command\":\(command)}]}]"
+        }
+        let config = dir.appendingPathComponent("settings.json")
+        try "{\"hooks\":{\(try entry("PreCompress")),\(try entry("HistoryCompacted"))}}".write(to: config, atomically: true, encoding: .utf8)
+        var hooks = HookManager(); hooks.configPathOverride = config.path
+        let (state, id, _) = try app()
+        await turn(state, id, client: Client(summary: "S"), settings: settings, hooks: hooks)
+        let pre = try String(contentsOf: dir.appendingPathComponent("PreCompress.json"), encoding: .utf8)
+        #expect(pre.contains("Compacted history"), "PreCompress saw the history before compaction")
+        let event = try JSONDecoder().decode(HookManager.HistoryCompactedEvent.self,
+                                             from: Data(contentsOf: dir.appendingPathComponent("HistoryCompacted.json")))
+        #expect(event.conversationId == id.uuidString && event.kind == "summarized" && event.turns > 0 && !event.tainted)
+        let raw = try String(contentsOf: dir.appendingPathComponent("HistoryCompacted.json"), encoding: .utf8)
+        #expect(!raw.contains("board line") && !raw.contains(Self.ownerWords[0]), "no history text reaches the hook")
+    }
+}

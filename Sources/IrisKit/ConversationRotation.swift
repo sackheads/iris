@@ -22,7 +22,7 @@ extension AppState {
         return "\(activityConversationTitle) — until \(f.string(from: last))"
     }
 
-    static let rotationSummaryLabel = "[Summary of the previous Iris conversation"
+    nonisolated static let rotationSummaryLabel = "[Summary of the previous Iris conversation"
 
     /// Why `/new` will not rotate Iris now, as a complete sentence; nil means it may. Synchronous,
     /// so it runs before any task starts. `/archive`'s reasons, except `.pinned`, which is the
