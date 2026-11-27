@@ -160,17 +160,21 @@ enum HistoryCompaction {
         room -= prior.utf8.count
         let folded = foldedSection(plan.foldedOwner, room: max(room / 2, room - transcriptNeed))
         room -= folded.text.utf8.count
+        // The newest lines that fit, with no hole: the first that doesn't stops it, and a marker says so (dev-3's #1441 review).
         var lines: [String] = []
+        room -= transcriptOmitted.utf8.count + 1
         for line in candidates {
-            guard line.utf8.count + 1 <= room else { continue }
+            guard line.utf8.count + 1 <= room else { break }
             lines.append(line)
             room -= line.utf8.count + 1
         }
+        if lines.count < candidates.count { lines.append(transcriptOmitted) }
         let prompt = summaryInstruction + prior + folded.text + transcriptOpen + lines.reversed().joined(separator: "\n") + transcriptClose
         return (prompt, plan.foldedOwner.count - folded.whole)
     }
 
     static let truncatedMarker = " [truncated]"
+    static let transcriptOmitted = "[earlier lines omitted to fit]"
 
     private static func priorSection(_ summary: String, room: Int) -> String {
         let open = "\n\n<previous_summary>\n", close = "\n</previous_summary>"
