@@ -293,7 +293,7 @@ struct VCSFetchTaintTests {
             try await value(of: task)
         }
         let results = app.conversations[idx].history.flatMap { $0.parts }.compactMap { $0.functionResponse?.response["result"]?.stringValue }
-        #expect(results.contains { $0.hasPrefix("Fetched") }, "\(results)")
+        #expect(results.contains { $0.contains("Fetched origin/main") }, "\(results)")
         return app.conversations[idx].hasUntrustedToolOutput
     }
 
