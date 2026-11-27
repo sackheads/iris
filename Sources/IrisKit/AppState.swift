@@ -5351,6 +5351,40 @@ class AppState {
                          offersConversationAllow: Bool = false,
                          beforeToolFired: Bool = false,
                          isOwner: Bool) async -> ApprovalSource? {
+        let decide = {
+            await self.decideApprovalSource(toolName: toolName, details: details, args: args, workspace: workspace,
+                                            conversationId: conversationId, origin: origin, inSandbox: inSandbox,
+                                            callerRole: callerRole, allowedCommands: allowedCommands,
+                                            vibecopEnabled: vibecopEnabled, grantedMount: grantedMount, humanOnly: humanOnly,
+                                            graderReadWalked: graderReadWalked, offersAlwaysAllow: offersAlwaysAllow,
+                                            offersConversationAllow: offersConversationAllow,
+                                            beforeToolFired: beforeToolFired, isOwner: isOwner)
+        }
+        // #1425 step 0: a call in a looping, user-facing conversation is recorded; nothing else is, and nothing reads it.
+        guard let id = conversationId, let c = conversations.first(where: { $0.id == id }), !c.isBackground,
+              let loop = c.loop else { return await decide() }
+        let tainted = c.hasUntrustedToolOutput
+        let probe = LoopApprovalProbe()
+        let source = await LoopApprovalProbe.$current.withValue(probe) { await decide() }
+        loopApprovalSink(LoopApprovalRecord(
+            at: Date(), conversationId: id, loopId: loop.id, tick: LoopApprovalProbe.inLoopTick, ownerTurn: isOwner,
+            tool: toolName, shape: LoopApprovalRecord.shape(tool: toolName, details: details), tainted: tainted,
+            layer: LoopApprovalRecord.layer(source, asked: probe.asked), asked: probe.asked,
+            waitSeconds: probe.waitSeconds, approved: source != nil))
+        return source
+    }
+
+    /// #1425 step 0: where each `loopApprovalRecord` goes; a test hands its own.
+    @ObservationIgnored var loopApprovalSink: @MainActor (LoopApprovalRecord) -> Void = { LoopApprovalProbe.appendToLog($0) }
+
+    private func decideApprovalSource(toolName: String, details: String, args: [String: JSONValue],
+                                      workspace: String?, conversationId: UUID?, origin: String,
+                                      inSandbox: Bool, callerRole: VibecopCallerRole,
+                                      allowedCommands: [String], vibecopEnabled: Bool?,
+                                      grantedMount: ContainerMount?, humanOnly: Bool,
+                                      graderReadWalked: Bool, offersAlwaysAllow: Bool,
+                                      offersConversationAllow: Bool, beforeToolFired: Bool,
+                                      isOwner: Bool) async -> ApprovalSource? {
         // #1066: a guest's session is invisible to the person, so a dialog for it would be
         // unattributable. Nothing in its two-tool floor needs an approval; if the floor ever grows,
         // this keeps the answer no, with no UI and no recorded blocked call.
@@ -5747,6 +5781,9 @@ class AppState {
         // one request. It hops to the main actor, which this function holds until the append
         // below has run, so the request is always on the queue by the time it looks.
         let requestId = UUID()
+        // #1425 step 0: how long a loop's call waits here (a measurement, so sleep counts: the loop was stuck).
+        let asked = ContinuousClock.now
+        defer { LoopApprovalProbe.current?.noteAsked(waited: ContinuousClock.now - asked) }
         return await withTaskCancellationHandler {
             await withCheckedContinuation { continuation in
                 pendingApprovals.append(ToolApprovalRequest(
