@@ -84,13 +84,17 @@ struct LoopApprovalStatsTests {
         ("run_command", "ghp_0123456789abcdefghijklmnopqrstuvwxyzAB --help"),
         ("run_command", "/Users/someone/bin/deploy --prod"),
         ("run_command", "AWS_SECRET_ACCESS_KEY=abc123 ./deploy.sh"),
+        // These two keep a token in their Always-allow prefix (`npm run <script>`, an unknown program's second word),
+        // so only the secret-shape check keeps it out of the log.
+        ("run_command", "npm run ghp_0123456789abcdefghijklmnopqrstuvwxyzAB"),
+        ("run_command", "sk-proj-0123456789abcdefghij0123456789 status"),
         ("read_file", "/Users/someone/.ssh/id_ed25519"),
         ("write_file", "/Users/someone/Documents/taxes-2026.pdf"),
         ("mcp__drive__read", #"{"fileId":"1AbCdEf","token":"ghp_0123456789abcdefghijklmnopqrstuvwxyzAB"}"#),
     ])
     func shapeCarriesNoArguments(tool: String, details: String) {
         let shape = LoopApprovalRecord.shape(tool: tool, details: details)
-        for marker in ["ghp_", "someone", ".ssh", "taxes", "fileId", "AWS_SECRET", "abc123", "--prod", "Probe"] {
+        for marker in ["ghp_", "sk-proj", "someone", ".ssh", "taxes", "fileId", "AWS_SECRET", "abc123", "--prod", "Probe"] {
             #expect(!shape.contains(marker), "\(tool) \(details) logged shape \(shape)")
         }
         #expect(shape == tool || tool == "run_command", "a non-command tool is logged by its name alone")
