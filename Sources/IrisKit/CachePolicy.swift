@@ -13,6 +13,16 @@ struct CacheTTLPolicy: Sendable, Equatable {
     let history: CacheTTL
     init(prefix: CacheTTL, history: CacheTTL) { self.prefix = prefix; self.history = min(history, prefix) }
     static let standard = CacheTTLPolicy(prefix: .fiveMinutes, history: .fiveMinutes)
+
+    /// #1437: a loop ticking at most this often keeps its history for an hour; a slower one stays at five minutes.
+    /// 45 minutes rather than 60, so a tick that runs a little late still finds the entry (planner, from the paid runs).
+    static let hourlyHistoryMaxCadence: TimeInterval = 45 * 60
+
+    /// The gap between a loop's ticks, for `resolve`. A self-paced loop picks each delay itself, so it counts at its
+    /// default; an alarm at its delay.
+    static func cadence(of loop: ConversationLoop) -> TimeInterval {
+        loop.selfPaced ? ConversationLoop.selfPacedDefault : loop.intervalSeconds
+    }
 }
 
 /// Provider-side cache hints that ride on a `GeminiRequest` without being encoded into it.
@@ -29,11 +39,17 @@ extension CacheTTLPolicy {
     /// 5c §0.8. Iris (the pinned conversation) holds an hour everywhere: a human-paced day stays
     /// warm for one 2× write per hour of silence. A job run holds the shared prefix for an hour
     /// only when some job comes round inside one; its own history markers stay at five minutes,
-    /// because runs are short. Everything else, subagents and evaluators included, is five minutes.
+    /// because runs are short. A conversation with a loop (#1437) holds an hour when it ticks every 45 minutes or less, so
+    /// each tick reads the last one's history. A slower loop stays at five minutes: its ticks start cold either way, and
+    /// marker (d) still lets a tick's later rounds read its first (dev-2's #1445 review; dropping it cost more than it saved).
+    /// Everything else, subagents and evaluators included, is five minutes.
     static func resolve(isPinned: Bool, isUnattended: Bool, principal: Principal,
-                        backgroundFiresHourly: Bool) -> CacheTTLPolicy {
+                        backgroundFiresHourly: Bool, loopCadence: TimeInterval? = nil) -> CacheTTLPolicy {
         guard principal == .main else { return .standard }
         if isPinned { return CacheTTLPolicy(prefix: .oneHour, history: .oneHour) }
+        if let cadence = loopCadence {
+            if cadence <= hourlyHistoryMaxCadence { return CacheTTLPolicy(prefix: .oneHour, history: .oneHour) }
+        }
         if isUnattended, backgroundFiresHourly { return CacheTTLPolicy(prefix: .oneHour, history: .fiveMinutes) }
         return .standard
     }

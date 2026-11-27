@@ -4199,12 +4199,13 @@ actor IrisEngine {
         // `isPinned` reads false for it at no extra cost). The ledger reference rides the same hop
         // (fix round 1, review) rather than a second `MainActor.run` just for it — a stored
         // property read, free either way.
-        let (isUnattended, hasActiveGoal, jobProfile, isPinned, ledger, peers, storedSticky, ownTitle, ownCard, ownRole) = await MainActor.run { () -> (Bool, Bool, JobProfile?, Bool, JobLedger?, PeerLedger?, Set<String>, String, SessionCard?, String?) in
+        let (isUnattended, hasActiveGoal, jobProfile, isPinned, ledger, peers, storedSticky, ownTitle, ownCard, ownRole, loopCadence) = await MainActor.run { () -> (Bool, Bool, JobProfile?, Bool, JobLedger?, PeerLedger?, Set<String>, String, SessionCard?, String?, TimeInterval?) in
             let conversation = localState?.conversations.first(where: { $0.id == conversationId })
             return (conversation?.isBackground == true, conversation?.activeGoal != nil,
                     conversation?.jobProfile, conversation?.isPinned == true, localState?.store.ledger,
                     localState?.store.peers, localState?.stickyTools.names(for: conversationId) ?? [],
-                    conversation?.title ?? "", conversation?.sessionCard, conversation?.role)
+                    conversation?.title ?? "", conversation?.sessionCard, conversation?.role,
+                    conversation?.loop.map(CacheTTLPolicy.cadence(of:)))
         }
         // 5c §0.1 (plan note 6): attended main conversations only. A job run is one turn in a fresh
         // conversation, so a set could never help it and would leave an entry behind per fire.
@@ -4888,7 +4889,8 @@ actor IrisEngine {
             && JobCadence.anyFiresMoreOftenThanHourly((try? ledger?.jobs()) ?? [], now: Date())
         request.cacheHints = CacheHints(
             ttl: cacheTTLOverride ?? CacheTTLPolicy.resolve(isPinned: isPinned, isUnattended: isUnattended,
-                                                            principal: principal, backgroundFiresHourly: firesHourly),
+                                                            principal: principal, backgroundFiresHourly: firesHourly,
+                                                            loopCadence: loopCadence),
             promptCacheKey: Self.promptCacheKey(conversationId: conversationId, isUnattended: isUnattended,
                                                 principal: principal, jobProfile: jobProfile,
                                                 toolNames: toolsList.map(\.name), binding: turnBinding))
