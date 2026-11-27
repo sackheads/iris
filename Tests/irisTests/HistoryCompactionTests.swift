@@ -138,6 +138,15 @@ struct HistoryCompactionPlanTests {
         #expect(whole.contains("6 earlier owner messages were folded") && !whole.contains("too long to fit"))
     }
 
+    @Test("a long previous summary keeps the room the sections after it leave, uncut (#1441 review)")
+    func priorUsesUnusedRoom() throws {
+        let plan = HistoryCompaction.Plan(cut: 2, turns: 1, tokensBefore: 0, tokensCompacted: 0, ownerParts: [], foldedOwner: [],
+                                          priorSummary: "PRIOR " + String(repeating: "s", count: 20_000), overHardLimit: false)
+        let history = [user("Loop tick 1 of 50."), model("ok"), user("Loop tick 2 of 50."), model("ok")]
+        let prompt = HistoryCompaction.summaryPrompt(history, plan: plan, ownerTexts: [], settings: .init(maxSummaryInputBytes: 30_000))
+        #expect(prompt.utf8.count <= 30_000 && prompt.contains("PRIOR") && !prompt.contains(HistoryCompaction.truncatedMarker))
+    }
+
     @Test("the budget is capped at half the model's context")
     func budgetCap() {
         #expect(HistoryCompaction.budget(.init(budget: 500_000), contextWindow: 200_000) == 100_000)
