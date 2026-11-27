@@ -1371,7 +1371,11 @@ public struct InjectionGuard {
 
     /// Whether a fingerprint's canary is one that may take the clause and the escalation: Ollama, the only engine
     /// that can turn thinking on. The call decides for certain (`canRejudgeThinking`, a model that thinks); a key
-    /// that also separates an Ollama model that doesn't is only over-separated.
+    /// that also separates an Ollama model that doesn't is only over-separated. The two can also disagree the
+    /// other way for a launch (dev-1 and dev-2, #1414): while `/api/show` fails (`modelThinks` nil), or a non-Ollama
+    /// engine is still cached after a switch (#1403), a message is judged with today's prompt and no second look,
+    /// and that verdict sits under this key in the process cache until relaunch. It is today's verdict, never
+    /// kept across launches (the verdict store holds library reads only), so it's left as is.
     static func clauseConfigured(_ fingerprint: GuardConfigFingerprint) -> Bool {
         fingerprint.promptGuardEngine == AuxiliaryEngineType.ollama.rawValue
     }
