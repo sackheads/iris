@@ -126,6 +126,9 @@ final class MCPProviderRuntime {
             guestSessions = guests
             guestDriver = driver
             guests?.startReaper()
+            // #1417: an answer to a guest's Inbox item waits for this driver (the mailbox lives here, and a restart
+            // emptied it), so the pending ones are filed now rather than at the next role change.
+            if driver != nil { _ = guests?.state.redeliverInboxAnswers() }
             status = .running(port: server.boundPort ?? port)
         } catch {
             // Loopback-only, best-effort: a port already in use (another Iris process, or a

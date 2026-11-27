@@ -134,7 +134,7 @@ struct InboxFollowupAsk: Equatable, Sendable {
 struct InboxThreadEntry: Equatable, Sendable {
     let seq: Int64
     let itemId: String
-    let kind: String // "question" | "answer" | "followup"
+    let kind: String // "question" | "answer" | "followup" | "held" | "stale" | "resolved" | "undelivered"
     let author: String
     let body: String
     let at: Date
@@ -426,6 +426,14 @@ final class InboxStore: Sendable {
                                  body: "Its sender is gone and nothing has happened for \(Int(IrisEngine.inboxStaleAfter / 86_400)) days.",
                                  at: at, db: db)
             return true
+        }
+    }
+
+    /// #1417: records why an answer could not reach a recipient that will never take it (a guest whose client
+    /// is no longer registered). The caller drops that target; Brian still has the answer on the item.
+    func noteUndeliverable(itemId: String, note: String, at: Date) throws {
+        try writer.write { db in
+            try Self.appendEntry(itemId: itemId, kind: "undelivered", author: "inbox", body: note, at: at, db: db)
         }
     }
 

@@ -1,5 +1,17 @@
 import Foundation
 
+/// #1417: what filing Brian's answer to a guest-raised item in the guest's mailbox did.
+enum GuestInboxFiling: Equatable, Sendable {
+    /// In the mailbox now; delivered once a poll returns it.
+    case filed
+    /// Already in the mailbox from an earlier attempt this launch, not yet returned by a poll.
+    case alreadyFiled
+    /// The client is no longer registered: it will never take it.
+    case unknownClient
+    /// Not now (guest sessions off, the mailbox full or the provider not running): stays pending.
+    case unavailable
+}
+
 /// What `GuestSessionDriver.submit` decided about one `iris_send`.
 enum GuestSubmitResult: Equatable, Sendable {
     /// A turn was started; its reply arrives later through the mailbox, by `iris_poll`.
@@ -202,14 +214,25 @@ final class GuestSessionDriver {
     private var running: Set<String> = []
     private var turnTasks: [String: Task<Void, Never>] = [:]
 
+    /// #1417: Brian's answers filed in a guest's mailbox and not yet returned by a poll, by mailbox message id.
+    /// Memory only, like the mailbox: after a restart both are empty and the item, still pending, is filed again.
+    private var inboxFiled: [UUID: (itemId: String, target: String)] = [:]
+    /// Told when a poll returns one of them: the engine marks that target delivered.
+    private let inboxAnswerSeen: @MainActor (_ itemId: String, _ target: String) -> Void
+
     init(state: AppState, registry: GuestSessionRegistry, mailbox: ProviderMailbox, turnGate: ProviderRequestGate,
          isEnabled: @escaping @MainActor () -> Bool = { ConfigManager.shared.mcpGuestSessionsEnabled },
          turnTimeout: Double = GuestSessionDriver.turnTimeoutSeconds,
          dailyCap: Int = GuestSessionDriver.dailyTokenCap,
          spend: GuestSpendLedger = GuestSpendLedger(),
          report: @escaping @MainActor (String) -> Void = { print($0) },
-         runTurn: TurnRunner? = nil) {
+         runTurn: TurnRunner? = nil,
+         inboxAnswerSeen: (@MainActor (_ itemId: String, _ target: String) -> Void)? = nil) {
         self.report = report
+        self.inboxAnswerSeen = inboxAnswerSeen ?? { [weak state] itemId, target in
+            guard let engine = state?.engine else { return }
+            Task { await engine.guestInboxAnswerSeen(itemId: itemId, target: target) }
+        }
         self.state = state
         self.registry = registry
         self.mailbox = mailbox
@@ -234,6 +257,34 @@ final class GuestSessionDriver {
     func forget(clientId: String) async {
         registry.close(clientId: clientId)
         await turnGate.purge(clientId: clientId)
+    }
+
+    /// #1417: files Brian's answer to an item `clientId` raised as an Iris→client mailbox message, the second of
+    /// the driver's two sanctioned `deliverReply` calls (the turn's reply is the other). No turn runs, so no
+    /// guest budget is spent, and an offline guest finds it on its next `iris_poll`. One copy per item and
+    /// target is kept unreturned at a time, so a redelivery sweep doesn't stack copies.
+    func deliverInboxAnswer(clientId: String, itemId: String, target: String, text: String) async -> GuestInboxFiling {
+        guard isEnabled() else { return .unavailable }
+        if inboxFiled.values.contains(where: { $0.itemId == itemId && $0.target == target }) { return .alreadyFiled }
+        do {
+            let message = try await mailbox.deliverReply(to: clientId, text: Self.clamp(text), fileRefs: [])
+            inboxFiled[message.id] = (itemId, target)
+            return .filed
+        } catch ProviderMailbox.MailboxError.unknownRecipient {
+            return .unknownClient
+        } catch {
+            return .unavailable
+        }
+    }
+
+    /// #1417: what an `iris_poll` returned. Each of Brian's answers among them is delivered: the guest has it.
+    /// "Returned by a poll" is the ack, so a poll whose cursor skips past one doesn't count, and a later poll
+    /// returning it again (the mailbox never deletes) changes nothing, since it's no longer here.
+    func noteReturned(_ messageIds: [UUID]) {
+        for id in messageIds {
+            guard let filed = inboxFiled.removeValue(forKey: id) else { continue }
+            inboxAnswerSeen(filed.itemId, filed.target)
+        }
     }
 
     /// The turn in flight for `clientId`, if any; a test awaits it.

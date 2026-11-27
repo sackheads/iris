@@ -348,6 +348,8 @@ final class IrisMCPProviderServer: Sendable {
         case "iris_poll":
             let since = params.arguments?["sinceSequence"]?.uint64Value
             let messages = await mailbox.poll(for: clientId, sinceSequence: since)
+            // #1417: an answer to one of this guest's Inbox items, returned here, is delivered.
+            await guestDriver?.noteReturned(messages.map(\.id))
             return try CallTool.Result(structuredContent: messages)
         case "iris_discover":
             let identity = await mailbox.discover()

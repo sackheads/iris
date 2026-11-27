@@ -121,6 +121,8 @@ struct GuestDoorBindingTests {
     @Test("makeGuestEngine hands the store it resolved from to the engine, so a later read sees the same one")
     func storeIsThreaded() throws {
         let source = try String(contentsOf: PerfPaths.repoRoot().appendingPathComponent("Sources/IrisKit/iris.swift"), encoding: .utf8)
-        #expect(source.contains("guestClientId: clientId, binding: binding, accessProfileStore: store)"))
+        // #1417 put guestSessionsEnabled between the two, on the line above.
+        #expect(source.contains("guestClientId: clientId, guestSessionsEnabled: guestSessionsEnabled,"))
+        #expect(source.contains("binding: binding, accessProfileStore: store)"))
     }
 }

@@ -102,6 +102,7 @@ enum InboxUIModel {
         case "answer": return "Answered"
         case "held": return "Held at deadline"
         case "stale": return "Marked stale"
+        case "undelivered": return "Not delivered"
         default: return kind
         }
     }

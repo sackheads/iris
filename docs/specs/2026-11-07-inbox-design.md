@@ -99,7 +99,9 @@ item (Brian, 2026-11-23: "accept", since forwarding to Iris is like the Overseer
 working a `/goal` is offered it too. A job run is offered it by #920 slice 1b: a scheduled or polled
 job, not a filesystem watch, with its owner chain `job:<jobId>`, its answer handed to the job's next
 run (or to the pinned Iris when the job is deleted, paused or not due within 24 h), and its emit
-limit keyed by the job, not the run. A read-only job (the default profile) is offered both inbox tools: `JobProfile.readOnlyAllowed` names them,
+limit keyed by the job, not the run. An MCP guest is offered it on every turn while guest sessions are on
+(#1417, Brian 11-27: "2: yes"), with owner chain `guest:<clientId>`; its answer goes to that guest's mailbox
+alone, and it can't name `route_back` or `notify` ([details](../mcp_provider.md#security-posture)). A read-only job (the default profile) is offered both inbox tools: `JobProfile.readOnlyAllowed` names them,
 the one write such a run makes (planner ruling, 2026-11-23, for Brian's morning batch; reversible in
 one line). The answer reaches the next run as its input, framed as Brian's decision, and the run's
 tools stay its profile's. Within those sessions, curation is **not** enforced at the inbox — it is a convention of the
