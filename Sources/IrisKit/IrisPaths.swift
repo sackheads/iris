@@ -216,7 +216,10 @@ struct IrisPaths: Sendable {
     /// Session artifacts (#469 §7): content-addressed, written only by the harness.
     var exchangeDir: URL { root.appendingPathComponent("exchange") }
 
-    var protectedWriteDirs: [URL] { [configDir, pluginsDir, exchangeDir, profilesDir] }
+    /// #1435: `vcs`'s bare mirrors, one per repository: only the broker writes them.
+    var vcsDir: URL { root.appendingPathComponent("vcs") }
+
+    var protectedWriteDirs: [URL] { [configDir, pluginsDir, exchangeDir, profilesDir, vcsDir] }
 
     /// The protected directories as a phrase for a refusal, from `protectedWriteDirs` itself so a text
     /// that names them cannot drift from the check that refuses (#889): "`config/`, `plugins/`,

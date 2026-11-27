@@ -165,6 +165,10 @@ extension GitHubProxyClient {
         }
     }
 
+    /// #1435: whether `repo` passes the allowlist and the owner/name shape, as every call here checks first. `vcs`'s
+    /// fetch and push ask before the mirror's git touches the network.
+    func allows(_ repo: String) -> Bool { isRepoAllowed(repo) && Self.isOwnerName(repo) }
+
     /// #1435: the files `head` changes against `base` (`GET /compare/{base}...{head}`), every rename's source
     /// included, or why they couldn't all be listed. Branch names reach the path only after `VCSTool.isBranchName`.
     func changedFiles(repo: String, base: String, head: String) async -> Result<[String], CompareRefusal> {
