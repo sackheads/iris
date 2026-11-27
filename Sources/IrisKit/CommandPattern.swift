@@ -441,7 +441,7 @@ enum CommandPattern {
     /// first, so a `..` or an existing link can't lead elsewhere. `home` is injectable so a test needs no real home.
     static func worktreeTargetAllowed(_ path: String, cwd: String, workspaceReal: String,
                                       home: String = IrisPaths.realPath(NSHomeDirectory())) -> Bool {
-        let target = IrisPaths.realPath((ToolExecutor.resolvePath(path, cwd: cwd) as NSString).standardizingPath)
+        let target = IrisPaths.realPath(ToolExecutor.resolvePath(path, cwd: cwd))
         let name = (target as NSString).lastPathComponent
         let container = (target as NSString).deletingLastPathComponent
         let parent = (workspaceReal as NSString).deletingLastPathComponent

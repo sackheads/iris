@@ -205,7 +205,8 @@ struct AlwaysAllowGeneraliseTests {
             #expect(CommandPattern.worktreeTargetAllowed(ok, cwd: ws, workspaceReal: ws, home: home), Comment(rawValue: ok))
         }
         for bad in ["../other", "../iris-x/deeper", "../iris-", "../iris", "../.vim/pack/evil/start/p", "../.hidden", ".git/wt",
-                    "build/.cache/wt", "../../iris-x", "/tmp/x", "~/iris-x", "../iris-link", "../iris-link/x"] {
+                    "build/.cache/wt", "../../iris-x", "/tmp/x", "~/iris-x", "../iris-link", "../iris-link/x",
+                    "\(rig.root.path)/iris-link", "\(rig.root.path)/iris-link/x"] {
             #expect(!CommandPattern.worktreeTargetAllowed(bad, cwd: ws, workspaceReal: ws, home: home), Comment(rawValue: bad))
         }
         // A workspace directly in home: its siblings are home's own folders. And one that is home: its parent is above it.
