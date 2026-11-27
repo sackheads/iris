@@ -285,6 +285,7 @@ struct HistoryCompactionEngineTests {
         let tailBefore = before[plan.cut...].map { $0.parts.compactMap(\.text) }
         #expect(Array(after[1..<(1 + tailBefore.count)]).map { $0.parts.compactMap(\.text) } == tailBefore, "the tail is verbatim")
         #expect(client.summaryRequests.count == 1)
+        #expect(client.summaryRequests.first?.cacheHints?.uncached == true, "the summary call sends no cache marker (#1437)")
         #expect(state.conversations.first { $0.id == id }?.messages.contains { $0.content.hasPrefix("Compacted ") } == true)
     }
 

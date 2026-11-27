@@ -3792,7 +3792,9 @@ actor IrisEngine {
     private func compactionSummary(_ history: [Content], plan: HistoryCompaction.Plan, ownerTexts: Set<String>,
                                    settings: HistoryCompaction.Settings, tainted: Bool) async -> String? {
         let prompt = HistoryCompaction.summaryPrompt(history, plan: plan, ownerTexts: ownerTexts, settings: settings)
-        let request = GeminiRequest(contents: [Content(role: "user", parts: [Part(text: prompt)])], systemInstruction: nil, tools: nil)
+        var request = GeminiRequest(contents: [Content(role: "user", parts: [Part(text: prompt)])], systemInstruction: nil, tools: nil)
+        // #1437: its prefix is never sent again, so a cache write is 1.25× for nothing.
+        request.cacheHints = CacheHints(uncached: true)
         guard let response = try? await client.generateContent(request: request, tier: .easy) else { return nil }
         let text = (response.candidates?.first?.content?.parts.compactMap(\.text).joined() ?? "")
             .trimmingCharacters(in: .whitespacesAndNewlines)

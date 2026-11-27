@@ -220,6 +220,7 @@ struct AnthropicClient {
         // five minutes everywhere, byte-identical to pre-5c. Longer TTLs must precede shorter
         // ones; `CacheTTLPolicy` clamps history to the prefix, so this order always holds.
         let ttl = request.cacheHints?.ttl ?? .standard
+        let uncached = request.cacheHints?.uncached == true
         let ephemeral: [String: Any] = ["cache_control": Self.cacheControl(ttl.history)]
         func markLastContentBlock(_ messages: inout [[String: Any]], at index: Int) {
             var msg = messages[index]
@@ -235,13 +236,13 @@ struct AnthropicClient {
             return content.contains { $0["type"] as? String != "tool_result" }
         }
         var marked = Set<Int>()
-        if turnEntries.count >= 2, turnEntries[turnEntries.count - 2] > 0 {
+        if !uncached, turnEntries.count >= 2, turnEntries[turnEntries.count - 2] > 0 {
             marked.insert(turnEntries[turnEntries.count - 2] - 1)   // (b)
         }
-        if let current = turnEntries.last, current > 0 {
+        if !uncached, let current = turnEntries.last, current > 0 {
             marked.insert(current - 1)                              // (c)
         }
-        if !anthropicMessages.isEmpty {
+        if !uncached, !anthropicMessages.isEmpty {
             marked.insert(anthropicMessages.count - 1)              // (d)
         }
         var markedEchoes = Set<Int>()
@@ -260,7 +261,9 @@ struct AnthropicClient {
         }
         
         if !systemPrompt.isEmpty {
-            body["system"] = [["type": "text", "text": systemPrompt, "cache_control": Self.cacheControl(ttl.prefix)]]
+            var block: [String: Any] = ["type": "text", "text": systemPrompt]
+            if !uncached { block["cache_control"] = Self.cacheControl(ttl.prefix) }
+            body["system"] = [block]
         }
         
         if let tools = request.tools, let fds = tools.first?.functionDeclarations {
@@ -304,7 +307,7 @@ struct AnthropicClient {
             if !anthropicTools.isEmpty {
                 // Marker (a) sits on system, which covers the tools; only without one do the
                 // tools need their own.
-                if systemPrompt.isEmpty {
+                if systemPrompt.isEmpty, !uncached {
                     anthropicTools[anthropicTools.count - 1]["cache_control"] = Self.cacheControl(ttl.prefix)
                 }
                 body["tools"] = anthropicTools
