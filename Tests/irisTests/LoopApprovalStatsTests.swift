@@ -70,6 +70,9 @@ struct LoopApprovalStatsTests {
         state.permissions.allowGlobally([PermissionRule(toolName: "run_command", details: "swift build", match: .prefix)])
         let plain = state.createNewConversation(isBackground: false, select: false)
         let background = state.createNewConversation(isBackground: true, select: false)
+        // A loop on it too (dev-1's #1439 review), so only the background guard keeps it out of the log.
+        let bIdx = state.conversations.firstIndex { $0.id == background }!
+        state.conversations[bIdx].loop = ConversationLoop(prompt: "x", intervalSeconds: 60, cap: 5)
         for id in [plain, background] {
             _ = await state.requestApprovalSource(toolName: "run_command", details: "swift build", workspace: root.path,
                                                   conversationId: id, vibecopEnabled: false, isOwner: true)
@@ -150,6 +153,8 @@ struct LoopApprovalStatsTests {
         state.recordLoopTick(conversationId: id, loopId: UUID(), before: TokenUsage(), seconds: 1)
         #expect(ticks.first?.cacheReadTokens == nil && ticks.first?.cacheWrite5mTokens == nil && ticks.first?.cacheWrite1hTokens == nil)
         let background = state.createNewConversation(isBackground: true, select: false)
+        let bIdx = state.conversations.firstIndex { $0.id == background }!
+        state.conversations[bIdx].loop = ConversationLoop(prompt: "x", intervalSeconds: 60, cap: 5)
         state.recordLoopTick(conversationId: background, loopId: UUID(), before: nil, seconds: 1)
         #expect(ticks.count == 1)
     }
