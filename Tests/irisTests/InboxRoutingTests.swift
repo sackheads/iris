@@ -531,8 +531,10 @@ struct InboxAnswerNoForgeTests {
         // code use is a new way to produce the label and must be looked at, so this count changes
         // only with a review.
         #expect(try occurrences(of: "Self.inboxAnswerSource") == ["iris.swift": 3])
-        #expect(try occurrences(of: "IrisEngine.inboxAnswerSource") == [:])
-        #expect(try occurrences(of: "inboxAnswerSource") == ["iris.swift": 5])
+        // #1425 slice C: `HistoryCompaction.inboxAnswerItemId` reads the label to recognise a delivered answer at
+        // compaction; it only matches history text and never produces a turn under it.
+        #expect(try occurrences(of: "IrisEngine.inboxAnswerSource") == ["HistoryCompaction.swift": 1])
+        #expect(try occurrences(of: "inboxAnswerSource") == ["iris.swift": 5, "HistoryCompaction.swift": 1])
     }
 
     @Test("only the answer paths call the inbox delivery, and only the UI-facing entry points call them")
