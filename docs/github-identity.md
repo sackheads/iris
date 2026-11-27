@@ -21,21 +21,35 @@ refuses to even submit an approval on anything else, as defence in depth on top 
 rename *out of* `plans/`/`specs/` specifically, CODEOWNERS is not that guarantee (see "The three
 tools" below) — `github_approve`'s own check is the only thing standing there, not a second layer.
 
-## The three tools
+## The tools
 
-Three host-side tools, declared to the model only when a token, the account's username and a
+Two host-side tools, declared to the model only when a token, the account's username and a
 non-empty allowed-repos list are all configured and GitHub confirms the token is that account's (see
-"Setup" below), and only on an attended, non-guest-origin main
-conversation — a subagent, evaluator, MCP guest, unattended job run, or a turn a guest's message
-started or steered loses them even if one somehow reaches the dispatcher. Every call is bound to
-the user-configured allowed-repos list before anything else happens — a repo not on the list sends
-nothing.
+"Setup" below). Every call is bound to the user-configured allowed-repos list before anything else
+happens: a repo not on the list sends nothing.
 
-- **`github_create_pr(repo, head, base, title, body, draft?)`** — opens a pull request as
-  the account, from a branch already pushed. `draft` defaults to `true` unless the model says
-  otherwise.
-- **`github_comment(repo, pr, body)`** — posts a PR comment as the account.
-- **`github_approve(repo, pr)`** — submits an `APPROVE` review as the account, but only if the PR
+- **`vcs(action, repo, …)`** (#1435): an agent's pull requests, under a policy the tool enforces
+  rather than an approval prompt.
+  - **Actions:**
+    - `pr_create`: a draft into `main`, from a branch already pushed. `draft` defaults to `true`.
+    - `pr_comment`
+    - `pr_view`: state, branches and description.
+    - `pr_checks`: the CI checks on the head.
+  - **Who gets it:**
+    - A `.main` session with a `/role`, attended or not. It opens PRs only from branches starting
+      `agent/<role>/`.
+    - Your own attended conversation, from any branch but `main`.
+    - Never a subagent, evaluator, MCP guest, or a turn a guest's message started or steered.
+  - **Protected paths:** `pr_create` first lists the branch's changed files (a rename's source
+    included). It refuses one under a protected path:
+    - `.github/workflows/`, `CODEOWNERS`, `docs/plans/`, `docs/specs/` and `.gitmodules`;
+    - the list lives in `~/.iris/config/vcs-policy.json`, a protected file, and an unreadable one
+      refuses every `pr_create`.
+  - **The taint gate:** on a conversation that has read outside text, `pr_create` and `pr_comment`
+    run only on your own attended turn, where you see the call. Unattended, or on a turn a peer
+    started, they're refused and the result says it needs you. `pr_view` and `pr_checks` are reads
+    and always run, and what they return taints the conversation.
+- **`github_approve(repo, pr)`**: attended, non-guest-origin main conversation only. It submits an `APPROVE` review as the account, but only if the PR
   is open and every changed file (including a rename's source path) is under `docs/` or `assets/`
   and not inside a `plans/` or `specs/` folder of `docs/` at any depth (those are instructions that
   sessions read and execute, so a human approves them); anything else is refused outright, never submitted. The approval is bound to the exact commit
@@ -55,8 +69,9 @@ as the control — see "What the credential is," below).
 
 ## The account as a git contributor
 
-Beyond the three tools, `run_command`'s own host git also acts as the account when it touches an
-allowed repo — this is what lets Iris push the branch `github_create_pr` then opens a PR from.
+Beyond the two tools, `run_command`'s own host git also acts as the account when it touches an
+allowed repo. This is what lets Iris push the branch `vcs`'s `pr_create` then opens a PR from. #1435
+moves pushing into `vcs` too, and later takes the credential off agent git.
 
 - **Identity.** Commits attribute to the account (`user.name` is its username, `user.email` GitHub's
   `<id>+<account>@users.noreply.github.com` noreply address — no separate email to configure). The
@@ -81,7 +96,7 @@ nothing. What actually bounds the account is **not** a withheld token scope: the
 The bound is branch protection (a PR plus a code-owner review to merge) and CODEOWNERS (her
 approval only counts for `/docs/` and `/assets/`, minus `plans/` and `specs/`), with the in-Swift allowlist and the
 `github_approve` gate on top — except a rename out of `plans/`/`specs/`, where CODEOWNERS does not
-see the old path and only the `github_approve` check stands (see "The three tools" above).
+see the old path and only the `github_approve` check stands (see "The tools" above).
 
 ## Setup
 
@@ -156,7 +171,7 @@ it works without anything further.
 
 `CODEOWNERS` names `@bnaylor`, `@<account>` and `@sackheads-bot` as owners of `/docs/` and `/assets/`.
 The account approving *other* routine PRs works today. Its *own* authored PRs
-(`github_create_pr`) can't be self-approved — GitHub blocks an author approving their own PR —
+(`vcs`'s `pr_create`) can't be self-approved — GitHub blocks an author approving their own PR —
 so an Iris-authored routine PR still needs a second code owner's approval: either you approve it
 yourself (you are an owner there), or a second proxy giving `sackheads-bot` the same tooling (tracked as
 a follow-up, #1170, not part of this slice).
