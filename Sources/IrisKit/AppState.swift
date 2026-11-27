@@ -5492,7 +5492,11 @@ class AppState {
         // thing YOLO already exists to skip for the session -- so it keeps its pre-existing YOLO
         // escape (below) rather than being folded into Brian's own reserved approvals.
         let yoloMayBypass = humanOnly && offersConversationAllow
+        // #1425: an unattended loop's turn asks nobody: what would need the person is recorded, not run.
+        let loopUnattended = UnattendedLoop.turn
         if irisWrite || policyWrite || (humanOnly && !yoloMayBypass) {
+            if loopUnattended { recordUnattendedLoopDenial(toolName: toolName, details: details, args: args, workspace: workspace,
+                                                           conversationId: conversationId); return nil }
             return await enqueueUserApproval(toolName: toolName, details: details, workspace: workspace,
                                              conversationId: conversationId, origin: origin, humanOnly: true,
                                              offersConversationAllow: offersConversationAllow) ? .person : nil
@@ -5511,7 +5515,7 @@ class AppState {
             : toolName == "run_command" && HostRunFiles.commandWrites(details)
         let grantsPermission = gitWrite || plantsRunFile
             || permissions.isProtectedWrite(toolName: toolName, path: resolvedTarget)
-        if isYoloMode(conversationId), isOwner, !grantsPermission {
+        if !loopUnattended, isYoloMode(conversationId), isOwner, !grantsPermission {
             return .yolo
         }
         // `humanOnly`: straight to the prompt, bypassing the allowlist below (a standing "yes"
@@ -5522,14 +5526,19 @@ class AppState {
         // reachable here: it is folded into the pre-YOLO check above (#1115/#1221), so a
         // policy-store write never even reaches the YOLO check.
         if humanOnly || irisWrite {
+            if loopUnattended { recordUnattendedLoopDenial(toolName: toolName, details: details, args: args, workspace: workspace,
+                                                           conversationId: conversationId); return nil }
             return await enqueueUserApproval(toolName: toolName, details: details, workspace: workspace,
                                              conversationId: conversationId, origin: origin, humanOnly: true,
                                              offersConversationAllow: offersConversationAllow) ? .person : nil
         }
         // Fast path: deterministic permissions.
         let guestOrigin = conversationId.map { isGuestOriginTurn($0) || isGuestOriginTurn(delegationRoot(of: $0)) } ?? false
-        if let match = permissions.match(toolName: toolName, details: details, workspace: workspace, isGuestOrigin: guestOrigin,
-                                         isOwner: isOwner) {
+        // #1425 fork 2: on an unattended loop's turn, Always-allow prefixes and directory rules count only while the
+        // conversation hasn't read outside text; once it has, only exact rules do, as for a job run.
+        let exactRulesOnly = loopUnattended && (conversationId.flatMap { id in conversations.first { $0.id == id } }?.hasUntrustedToolOutput ?? true)
+        if let match = permissions.match(toolName: toolName, details: details, workspace: workspace, isBackground: exactRulesOnly,
+                                         isGuestOrigin: guestOrigin, isOwner: isOwner) {
             return .allowlist(match)
         }
         // Deterministic too, and only for the grader, never the agent or subagents: exactly a check
@@ -5586,9 +5595,27 @@ class AppState {
         }
         // nil — Vibecop off, failed or timed out — decides nothing: the user prompt does (#334).
 
+        if loopUnattended { recordUnattendedLoopDenial(toolName: toolName, details: details, args: args, workspace: workspace,
+                                                       conversationId: conversationId); return nil }
         return await enqueueUserApproval(toolName: toolName, details: details, workspace: workspace,
                                          conversationId: conversationId, origin: origin,
                                          offersAlwaysAllow: offersAlwaysAllow) ? .person : nil
+    }
+
+    /// #1425: the calls an unattended loop's turns couldn't run, once each, per conversation and for the loop's life
+    /// (`UnattendedLoop`); slice A2 offers them in the Inbox. Transient, like `pendingApprovals`.
+    @ObservationIgnored var unattendedLoopDenials: [UUID: (loopId: UUID, calls: [BlockedCall])] = [:]
+
+    /// Records a call an unattended loop's turn may not run, and notes it in the transcript the first time.
+    func recordUnattendedLoopDenial(toolName: String, details: String, args: [String: JSONValue], workspace: String?,
+                                    conversationId: UUID?) {
+        guard let id = conversationId, let loop = conversations.first(where: { $0.id == id })?.loop else { return }
+        var entry = unattendedLoopDenials[id].flatMap { $0.loopId == loop.id ? $0 : nil } ?? (loopId: loop.id, calls: [])
+        let call = BlockedCall(toolName: toolName, args: args, cwd: workspace, reason: .approval)
+        guard !entry.calls.contains(where: { $0.toolName == call.toolName && $0.args == call.args && $0.cwd == call.cwd }) else { return }
+        entry.calls.append(call)
+        unattendedLoopDenials[id] = entry
+        appendMessage(role: .system, content: UnattendedLoop.notice(tool: toolName, details: details), to: id)
     }
 
     /// The guidance the person typed for exactly this conversation (#1005). Not the delegation
@@ -5789,6 +5816,9 @@ class AppState {
         // in the Vibecop/timeout window), do NOT enqueue a request nobody will resolve — the
         // teardown's denyPendingApprovals already ran and would miss a late append.
         if Task.isCancelled { return false }
+        // #1425: an unattended loop's turn never shows a dialog, whichever gate asked. The ladder records its own
+        // refusals first; this is the backstop for any other caller.
+        if UnattendedLoop.turn { return false }
         // A bare `withCheckedContinuation` ignores cancellation, so Stop (which cancels the turn's
         // task, a grader's included) left the turn blocked on the dialog. The handler denies this
         // one request. It hops to the main actor, which this function holds until the append
@@ -7302,21 +7332,29 @@ class AppState {
         case .resume:
             guard conv.loop != nil else { appendMessage(role: .system, content: "No loop is running here. " + ConversationLoop.usage, to: convId); return }
             resumeLoop(for: convId)
-        case .start(let interval, let prompt):
+        case .start(let interval, let prompt, let unattended):
             if let refusal = loopRefusal(conv) {
                 appendMessage(role: .system, content: refusal, to: convId)
                 return
             }
-            let loop = ConversationLoop(prompt: prompt, intervalSeconds: interval, cap: max(1, ConfigManager.shared.loopTickCap))
+            let loop = ConversationLoop(prompt: prompt, intervalSeconds: interval, cap: max(1, ConfigManager.shared.loopTickCap),
+                                        unattended: unattended)
             startLoop(loop, in: convId)
-        case .startSelfPaced(let prompt):
+        case .startSelfPaced(let prompt, let unattended):
             if let refusal = loopRefusal(conv) {
                 appendMessage(role: .system, content: refusal, to: convId)
                 return
             }
             let loop = ConversationLoop(prompt: prompt, intervalSeconds: ConversationLoop.selfPacedMinimum,
-                                        cap: max(1, ConfigManager.shared.loopTickCap), selfPaced: true)
+                                        cap: max(1, ConfigManager.shared.loopTickCap), selfPaced: true, unattended: unattended)
             startLoop(loop, in: convId)
+        case .setUnattended(let on):
+            guard conversations[idx].loop?.isAlarm == false else {
+                appendMessage(role: .system, content: "No loop is running here. " + ConversationLoop.usage, to: convId); return
+            }
+            conversations[idx].loop?.unattended = on
+            markChanged(convId, .metadata)
+            appendMessage(role: .system, content: on ? UnattendedLoop.turnedOnNotice : UnattendedLoop.turnedOffNotice, to: convId)
         }
     }
 
@@ -7458,7 +7496,7 @@ class AppState {
     private func loopStatus(_ loop: ConversationLoop?) -> String {
         guard let loop else { return "No loop is running here. " + ConversationLoop.usage }
         if loop.isAlarm { return "⏰ \(loop.cadence.prefix(1).uppercased() + loop.cadence.dropFirst())\(loop.paused ? " (paused)" : ""): \(loop.prompt)" }
-        return "↻ \(loop.cadence.prefix(1).uppercased() + loop.cadence.dropFirst()), \(loop.ticksLeft) of \(loop.cap) ticks left\(loop.paused ? ", paused" : ""): \(loop.prompt)"
+        return "↻ \(loop.cadence.prefix(1).uppercased() + loop.cadence.dropFirst()), \(loop.ticksLeft) of \(loop.cap) ticks left\(loop.paused ? ", paused" : "")\(loop.unattended ? ", unattended" : ""): \(loop.prompt)"
     }
 
     /// The tier `id` runs on, and why (#667): its own (`/model`), else its agent profile's, else

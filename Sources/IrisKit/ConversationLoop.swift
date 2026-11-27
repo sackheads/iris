@@ -20,9 +20,15 @@ struct ConversationLoop: Codable, Equatable, Sendable {
     /// A one-shot wait the model set with `set_alarm` (#1022): one tick, `prompt` is its note,
     /// `intervalSeconds` its delay. Not a loop the person started.
     var isAlarm: Bool
+    /// #1425 (Brian, 11-27): every turn in this conversation that the person didn't type (a tick, an alarm, a peer's
+    /// message, an event) runs unattended: it never shows an approval dialog, and a call that needs one isn't run
+    /// (`UnattendedLoop`). The person's own typed turns stay attended.
+    var unattended: Bool
 
-    init(prompt: String, intervalSeconds: Double, cap: Int, paused: Bool = false, selfPaced: Bool = false, isAlarm: Bool = false) {
+    init(prompt: String, intervalSeconds: Double, cap: Int, paused: Bool = false, selfPaced: Bool = false, isAlarm: Bool = false,
+         unattended: Bool = false) {
         self.id = UUID()
+        self.unattended = unattended
         self.selfPaced = selfPaced
         self.isAlarm = isAlarm
         self.prompt = prompt
@@ -42,6 +48,7 @@ struct ConversationLoop: Codable, Equatable, Sendable {
         paused = try c.decodeIfPresent(Bool.self, forKey: .paused) ?? true
         selfPaced = try c.decodeIfPresent(Bool.self, forKey: .selfPaced) ?? false
         isAlarm = try c.decodeIfPresent(Bool.self, forKey: .isAlarm) ?? false
+        unattended = try c.decodeIfPresent(Bool.self, forKey: .unattended) ?? false
     }
 
     static func alarm(note: String, delaySeconds: Double) -> ConversationLoop {
@@ -80,16 +87,31 @@ struct ConversationLoop: Codable, Equatable, Sendable {
     /// `/loop`'s arguments: an interval (`30s`, `5m`, `2h`, `1d`) then the prompt, or the prompt
     /// alone for a self-paced loop.
     enum Parsed: Equatable {
-        case start(intervalSeconds: Double, prompt: String)
-        case startSelfPaced(prompt: String)
+        case start(intervalSeconds: Double, prompt: String, unattended: Bool = false)
+        case startSelfPaced(prompt: String, unattended: Bool = false)
         case stop, pause, resume, status
+        case setUnattended(Bool)
         case invalid(String)
     }
 
-    static let usage = "Usage: `/loop <interval> <prompt>`, for example `/loop 10m check my open PRs`, or `/loop <prompt>` to let Iris pick each next tick. Also `/loop stop`, `/loop pause`, `/loop resume`, and `/loop` alone for its status."
+    static let usage = "Usage: `/loop <interval> <prompt>`, for example `/loop 10m check my open PRs`, or `/loop <prompt>` to let Iris pick each next tick. Put `--unattended` first to run its ticks without approval dialogs. Also `/loop stop`, `/loop pause`, `/loop resume`, `/loop unattended on|off`, and `/loop` alone for its status."
+
+    /// #1425: the word that starts a loop unattended (`/loop --unattended 10m check the board`).
+    static let unattendedFlag = "--unattended"
 
     static func parse(_ arguments: String) -> Parsed {
-        let trimmed = arguments.trimmingCharacters(in: .whitespacesAndNewlines)
+        var trimmed = arguments.trimmingCharacters(in: .whitespacesAndNewlines)
+        switch trimmed.lowercased() {
+        case "unattended on": return .setUnattended(true)
+        case "unattended off": return .setUnattended(false)
+        default: break
+        }
+        var unattended = false
+        if trimmed.lowercased() == unattendedFlag || trimmed.lowercased().hasPrefix(unattendedFlag + " ") {
+            unattended = true
+            trimmed = String(trimmed.dropFirst(unattendedFlag.count)).trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { return .invalid("Say what the loop should do after `\(unattendedFlag)`. " + usage) }
+        }
         // `Stop.` and `stop!` are the command with punctuation (#684 review).
         switch trimmed.lowercased().trimmingCharacters(in: CharacterSet(charactersIn: ".!?,;:")) {
         case "", "status": return .status
@@ -111,7 +133,7 @@ struct ConversationLoop: Codable, Equatable, Sendable {
             if stopWords.contains(first) || (parts.count == 1 && controlWords.contains(first)) {
                 return .invalid("`/loop \(trimmed)` reads as a command, so no loop was started. `/loop stop` ends a loop and `/loop pause` pauses it. " + usage)
             }
-            return .startSelfPaced(prompt: trimmed)
+            return .startSelfPaced(prompt: trimmed, unattended: unattended)
         }
         guard parts.count == 2, !parts[1].trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             return .invalid("Say what each tick should do after the interval. " + usage)
@@ -119,7 +141,7 @@ struct ConversationLoop: Codable, Equatable, Sendable {
         guard seconds >= minimumInterval, seconds <= maximumInterval else {
             return .invalid("A loop runs at most once a minute and at least once a day; \(parts[0]) is outside that.")
         }
-        return .start(intervalSeconds: seconds, prompt: parts[1].trimmingCharacters(in: .whitespacesAndNewlines))
+        return .start(intervalSeconds: seconds, prompt: parts[1].trimmingCharacters(in: .whitespacesAndNewlines), unattended: unattended)
     }
 
     /// `5m` as seconds, or nil.
