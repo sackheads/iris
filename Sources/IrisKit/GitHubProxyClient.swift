@@ -191,6 +191,68 @@ extension GitHubProxyClient {
         init(_ message: String) { self.message = message }
     }
 
+    /// #1435 F4 (Brian): marks a draft PR ready for review, which arms its auto-merge, so only one `mayReady` accepts:
+    /// the head branch decides (every agent's PR is the same account's, so its author can't). REST has no endpoint
+    /// for this; it is the GraphQL `markPullRequestReadyForReview` on the PR's node id from `GET /pulls/{pr}`.
+    func ready(repo: String, pr: Int, mayReady: (_ head: String) -> String?) async -> String {
+        guard pr > 0 else { return "Refused: a pull request number must be positive." }
+        let nodeId: String
+        switch await perform(method: "GET", repo: repo, path: "pulls/\(pr)") {
+        case .refused(let message): return message
+        case .done(let json, _):
+            guard (json["state"] as? String) == "open" else { return "Refused: pull request #\(pr) is not open." }
+            guard json["draft"] as? Bool == true else { return "Pull request #\(pr) is already ready for review." }
+            let head = ((json["head"] as? [String: Any])?["ref"] as? String) ?? ""
+            if let refusal = mayReady(head) { return refusal }
+            guard let id = json["node_id"] as? String, !id.isEmpty, id.utf8.count <= 100,
+                  id.unicodeScalars.allSatisfy({ CharacterSet.alphanumerics.contains($0) || $0 == "_" || $0 == "-" }) else {
+                return "Refused: GitHub did not report the pull request's id in a form I can use."
+            }
+            nodeId = id
+        }
+        let query = "mutation($id: ID!) { markPullRequestReadyForReview(input: {pullRequestId: $id}) { pullRequest { isDraft } } }"
+        switch await graphQL(repo: repo, query: query, variables: ["id": nodeId]) {
+        case .refused(let message): return message
+        case .done(let json, _):
+            if let errors = json["errors"] as? [[String: Any]], let first = errors.first?["message"] as? String {
+                return sanitize("Refused: GitHub said: \(first)", token: Self.token(keychain: keychain))
+            }
+            return "Marked pull request #\(pr) ready for review."
+        }
+    }
+
+    /// `POST /graphql`, behind the same allowlist, shape and token checks as every other call: `repo` is the one the
+    /// query acts on, checked first.
+    private func graphQL(repo: String, query: String, variables: [String: Any]) async -> Outcome {
+        guard isRepoAllowed(repo) else {
+            return .refused("Refused: repository \"\(Self.shown(repo))\" is not allowed for the GitHub tools.")
+        }
+        guard Self.isOwnerName(repo) else { return .refused("Refused: \"\(Self.shown(repo))\" is not an owner/name repository.") }
+        guard let token = Self.token(keychain: keychain) else { return .refused("GitHub is not configured: no token is set.") }
+        guard let url = URL(string: "\(Self.apiBase)/graphql"),
+              let data = try? JSONSerialization.data(withJSONObject: ["query": query, "variables": variables], options: [.sortedKeys]) else {
+            return .refused("Refused: the request could not be built.")
+        }
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.httpBody = data
+        request.timeoutInterval = 30
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("iris", forHTTPHeaderField: "User-Agent")
+        do {
+            let (responseData, response) = try await transport.send(request, bearer: token)
+            let json = (try? JSONSerialization.jsonObject(with: responseData)) as? [String: Any] ?? [:]
+            guard (200..<300).contains(response.statusCode) else {
+                return .refused(sanitize("GitHub returned HTTP \(response.statusCode)", token: token))
+            }
+            return .done(json, link: nil)
+        } catch is CancellationError {
+            return .refused("The GitHub request was cancelled.")
+        } catch {
+            return .refused(sanitize("The GitHub request failed: \(error.localizedDescription)", token: token))
+        }
+    }
+
     static let maxPRBodyShown = 4_000
 
     /// #1435: `GET /pulls/{pr}`: number, state, branches, title and the description (others' words: the caller

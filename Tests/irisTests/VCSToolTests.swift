@@ -106,7 +106,8 @@ struct VCSToolTests {
         private var _sent: [Sent] = []
         var sent: [Sent] { lock.withLock { _sent } }
         let files: [[String: Any]]
-        init(files: [[String: Any]] = [["filename": "Sources/x.swift"]]) { self.files = files }
+        let draft: Bool
+        init(files: [[String: Any]] = [["filename": "Sources/x.swift"]], draft: Bool = true) { self.files = files; self.draft = draft }
         func send(_ request: URLRequest, bearer: String) async throws -> (Data, HTTPURLResponse) {
             let body = (try? JSONSerialization.jsonObject(with: request.httpBody ?? Data())) as? [String: Any] ?? [:]
             let path = request.url?.path ?? ""
@@ -118,7 +119,8 @@ struct VCSToolTests {
             } else if path.hasSuffix("/check-runs") {
                 reply = ["check-runs": [["name": "test", "status": "completed", "conclusion": "success"]]]
             } else if request.httpMethod == "GET" {
-                reply = ["number": 9, "title": "A title", "state": "open", "draft": true, "body": "line one\nline two",
+                reply = ["number": 9, "title": "A title", "state": "open", "draft": draft, "body": "line one\nline two",
+                         "node_id": "PR_kwDOTest9",
                          "html_url": "https://github.com/sackheads/iris/pull/9",
                          "head": ["ref": "agent/pilot/x", "sha": sha], "base": ["ref": "main", "sha": sha]]
             } else {
@@ -198,6 +200,45 @@ struct VCSToolTests {
         guard case .policy(let custom) = try policy(#"{"protectedPaths":["secret/"]}"#).load() else { Issue.record("didn't decode"); return }
         #expect(custom.protects("secret/a") && !custom.protects(".github/workflows/x.yml"))
         #expect(try policy(#"{"protectedPaths":"nope"}"#).load() == .unreadable)
+    }
+
+    @Test("pr_ready: a role never readies its own PR, by its head branch; it readies a peer's, and the owner any (Brian, #1435 F4)")
+    func readyRule() {
+        #expect(VCSTool.readyRefusal(head: "agent/pilot/x", caller: .role("pilot")) != nil)
+        #expect(VCSTool.readyRefusal(head: "agent/author/x", caller: .role("pilot")) == nil)
+        #expect(VCSTool.readyRefusal(head: "feature", caller: .role("pilot")) == nil)
+        #expect(VCSTool.readyRefusal(head: "agent/pilot/x", caller: .owner) == nil)
+    }
+
+    private func ready(_ caller: VCSTool.Caller, recorder: Recorder) async -> String {
+        let c = client(recorder)
+        return await VCSTool.$caller.withValue(caller) {
+            await VCSTool.execute(args: ["action": .string("pr_ready"), "repo": .string("sackheads/iris"), "pr": .int(9)], client: c)
+        }
+    }
+
+    @Test("pr_ready on the session's own PR sends no write; on a peer's it marks it ready through GraphQL with the PR's id")
+    func readyThroughTheClient() async throws {
+        let own = Recorder()
+        let refused = await ready(.role("pilot"), recorder: own)   // the stub PR's head is agent/pilot/x
+        #expect(refused.contains("this session's own"), Comment(rawValue: refused))
+        #expect(own.sent.allSatisfy { $0.method == "GET" })
+
+        let peer = Recorder()
+        let done = await ready(.role("reviewer"), recorder: peer)
+        #expect(done.contains("ready for review"), Comment(rawValue: done))
+        let post = try #require(peer.sent.last)
+        #expect(post.method == "POST" && post.path == "/graphql")
+        #expect((post.body["variables"] as? [String: Any])?["id"] as? String == "PR_kwDOTest9")
+        #expect((post.body["query"] as? String)?.contains("markPullRequestReadyForReview") == true)
+    }
+
+    @Test("pr_ready on a PR that's already ready writes nothing")
+    func readyAlready() async {
+        let recorder = Recorder(draft: false)
+        let result = await ready(.owner, recorder: recorder)
+        #expect(result.contains("already ready"), Comment(rawValue: result))
+        #expect(recorder.sent.allSatisfy { $0.method == "GET" })
     }
 
     @Test("pr_view shows the PR and its description; pr_checks one line per check")

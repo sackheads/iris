@@ -41,6 +41,9 @@ happens: a repo not on the list sends nothing.
       before.
     - `pr_create`: a draft into `main`, from a branch already pushed. `draft` defaults to `true`.
     - `pr_comment`
+    - `pr_ready`: marks a draft PR ready for review, which is a reviewer's lgtm and arms its auto-merge. A role
+      may ready only a PR whose branch isn't its own `agent/<role>/…` (rule 25, by the head branch, since every
+      agent's PR is the same account's). Your own typed turn may ready any.
     - `pr_view`: state, branches and description.
     - `pr_checks`: the CI checks on the head.
   - **Who gets it:**
@@ -63,8 +66,8 @@ happens: a repo not on the list sends nothing.
       way (host git, while it still holds the credential) isn't checked;
     - the list lives in `~/.iris/config/vcs-policy.json`, a protected file, and an unreadable one
       refuses every `pr_create`.
-  - **The taint gate:** on a conversation that has read outside text, `push`, `pr_create` and `pr_comment`
-    run only on your own attended turn, where you see the call. Unattended, or on a turn a peer
+  - **The taint gate:** on a conversation that has read outside text, `push`, `pr_create`, `pr_comment` and
+    `pr_ready` run only on your own attended turn, where you see the call. Unattended, or on a turn a peer
     started, they're refused and the result says it needs you. `fetch`, `pr_view` and `pr_checks` are reads
     and always run. What `pr_view` and `pr_checks` return taints the conversation, and so does a `fetch` of
     someone else's code (above).
