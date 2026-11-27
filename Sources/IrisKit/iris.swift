@@ -830,6 +830,12 @@ actor IrisEngine {
     let roleLabel: String?
     /// The external MCP client a `.mcpGuest` engine serves; nil for every other principal (#1066).
     nonisolated let guestClientId: String?
+    /// #1417: whether a guest turn is offered `inbox_item` (guest sessions on). Injectable so a test reads no
+    /// process-global setting.
+    let guestSessionsEnabled: @MainActor @Sendable () -> Bool
+    /// #1417: files Brian's answer to a guest-raised item in the guest's mailbox. Injectable for tests.
+    private(set) var guestInboxDeliver: GuestInboxDeliver = IrisEngine.realGuestInboxDeliver
+    func setGuestInboxDeliver(_ deliver: @escaping GuestInboxDeliver) { guestInboxDeliver = deliver }
     let evaluatorChecks: [String]
     /// Backoff schedule for transient provider errors (429/503/529); one wait per retry.
     let retryDelays: [TimeInterval]
@@ -955,6 +961,7 @@ actor IrisEngine {
          mutatingJobsAvailable: @escaping @Sendable () -> Bool = { SandboxPolicy.mutatingJobCanRun() },
          skillCheckWillClaim: (@Sendable (UUID) async -> Void)? = nil,
          guestClientId: String? = nil,
+         guestSessionsEnabled: @escaping @MainActor @Sendable () -> Bool = { ConfigManager.shared.mcpGuestSessionsEnabled },
          githubToolsEnabled: Bool? = nil,
          binding: AccessBinding? = nil,
          accessProfileStore: AccessProfileStore? = nil,
@@ -962,6 +969,7 @@ actor IrisEngine {
         self.githubToolsOverride = githubToolsEnabled
         self.state = state
         self.guestClientId = guestClientId
+        self.guestSessionsEnabled = guestSessionsEnabled
         self.accessProfileStore = accessProfileStore ?? AccessProfileStore(paths: .default)
         self.knownSecrets = knownSecrets ?? { await MainActor.run { ConfigManager.shared.knownSecretValues } }
         self.binding = binding ?? (principal == .main
@@ -1693,6 +1701,9 @@ actor IrisEngine {
 
     nonisolated static let resolveInboxItemTool = "resolve_inbox_item"
 
+    /// #1417: a guest's inbox call while guest sessions are off (only reachable by a forged call or a race).
+    nonisolated static let guestInboxOffRefusal = "Refused — guest sessions are off, so this session can't use the Inbox."
+
     nonisolated static let resolveInboxItemDeclaration = FunctionDeclaration(
         name: resolveInboxItemTool,
         description: "Close an inbox item you raised once its decision is consumed (you acted on Brian's answer, the PR merged, the question went away). It leaves Brian's open items. Only the chain that raised it can close it; an item whose answer is still being delivered to you cannot be closed until it arrives.",
@@ -1785,6 +1796,10 @@ actor IrisEngine {
         // title/situation/response_mode checks above.
         // An emitter names itself or roles, not other sessions (see `isAllowedInboxRoute`): refused
         // here, before a rate token is spent, so the model learns the rule from the reply.
+        // #1417: a guest names neither (dispatch refuses the arguments; this is the same rule where it acts).
+        if principal == .mcpGuest, !(routeBack + notify).isEmpty {
+            return GuestToolset.inboxArgumentRefusal(routeBack.isEmpty ? "notify" : "route_back")
+        }
         guard (routeBack + notify).allSatisfy({ Self.isAllowedInboxRoute($0, emitter: conversationId) }) else {
             return "route_back and notify may name only role:<name> entries (whoever holds the role when Brian answers) or yourself; another session by id or name is refused."
         }
@@ -1910,6 +1925,15 @@ actor IrisEngine {
     /// Hands one framed message to one session: (target, text, the item's emitter had read outside
     /// content). The real one is `deliverInboxAnswerFrame`; tests pass a stub.
     typealias InboxDeliver = @Sendable (UUID, String, Bool) async -> PeerDeliveryOutcome
+
+    /// #1417: files Brian's answer to a guest-raised item in that guest's mailbox: (clientId, itemId, target,
+    /// text). The real one is `GuestSessionDriver.deliverInboxAnswer`; tests pass a stub.
+    typealias GuestInboxDeliver = @Sendable (_ clientId: String, _ itemId: String, _ target: String, _ text: String) async -> GuestInboxFiling
+
+    nonisolated static let realGuestInboxDeliver: GuestInboxDeliver = { clientId, itemId, target, text in
+        guard let driver = await MainActor.run(body: { MCPProviderRuntime.shared.guestDriver }) else { return .unavailable }
+        return await driver.deliverInboxAnswer(clientId: clientId, itemId: itemId, target: target, text: text)
+    }
 
     /// The label an inbox answer arrives under. A CONSTANT, and set only by
     /// `deliverInboxAnswerFrame`, which only `submitInboxAnswer` and `redeliverAwaitingInbox` reach:
@@ -2157,6 +2181,25 @@ actor IrisEngine {
     /// Items whose delivery is running now, so a launch redelivery and a session-appeared one (or a
     /// submit) cannot send one answer twice. Checked and set before the first await.
     private var inboxDelivering: Set<String> = []
+    /// #1417: guest targets a poll returned while their item's delivery was running, applied when it ends.
+    private var guestSeenDuringDelivery: [String: Set<String>] = [:]
+
+    /// #1417: a guest's poll returned Brian's answer to `itemId`, so its `target` is delivered. Applied
+    /// straight away, or by the delivery running now when there is one (which would otherwise write the
+    /// target back as pending). The item is `.answered` once nothing is pending.
+    func guestInboxAnswerSeen(itemId: String, target: String) async {
+        if inboxDelivering.contains(itemId) {
+            guestSeenDuringDelivery[itemId, default: []].insert(target)
+            return
+        }
+        let localState = state
+        guard let store = await MainActor.run(body: { localState?.store }),
+              let item = (try? store.inbox.item(id: itemId)) ?? nil, item.state == .awaitingDelivery else { return }
+        let left = item.pendingTargets.filter { $0.caseInsensitiveCompare(target) != .orderedSame }
+        guard left.count < item.pendingTargets.count else { return }
+        _ = try? store.inbox.setPendingTargets(itemId: itemId, left)
+        await MainActor.run { localState?.bumpInboxRevision() }
+    }
 
     /// Tries every target of `item` once. Returns how many were reached and which are still pending.
     private func deliverInboxAnswer(item: InboxItem, answer: InboxAnswer, targets: [String],
@@ -2181,6 +2224,22 @@ actor IrisEngine {
         // Two entries that resolve to one session (`role:dev` and ` ROLE:Dev `) are one recipient.
         var reached = Set<UUID>()
         for target in targets {
+            // #1417: a guest's answer is a message in its mailbox, never a turn, so no guest budget is spent and an
+            // offline guest finds it on its next `iris_poll`. It stays pending until a poll returns it
+            // (`guestInboxAnswerSeen`), since the mailbox is memory only and a restart files it again.
+            if let clientId = AppState.guestClientId(ofInboxChain: target) {
+                switch await guestInboxDeliver(clientId, item.id, target, body) {
+                case .filed, .alreadyFiled, .unavailable:
+                    remaining.append(target)
+                case .unknownClient:
+                    // A revoked client never takes it, and nobody else gets a guest's answer: noted on the item,
+                    // naming the client, and dropped.
+                    let store = await MainActor.run { localState?.store }
+                    _ = try? store?.inbox.noteUndeliverable(
+                        itemId: item.id, note: "Not delivered: guest client \(Self.flattenCardField(clientId, cap: 80)) is no longer registered.", at: Date())
+                }
+                continue
+            }
             // #920 slice 1b: a job's answer waits for its next run (`takeJobInboxAnswers`), unless the job
             // cannot take it in time; then it goes to the pinned Iris, with the job named.
             if let jobId = Self.jobChainId(target) {
@@ -2213,6 +2272,10 @@ actor IrisEngine {
             case .refused: remaining.append(target)
             }
         }
+        // #1417: a poll that returned a guest's answer while this ran is applied now, so the write below
+        // cannot put a target a guest already has back as pending.
+        let seenNow = guestSeenDuringDelivery.removeValue(forKey: item.id) ?? []
+        remaining.removeAll { seenNow.contains($0) }
         if let sweepStore { _ = try? sweepStore.inbox.setPendingTargets(itemId: item.id, remaining) }
         return (delivered, remaining)
     }
@@ -2321,6 +2384,9 @@ actor IrisEngine {
     /// ending, and a paused job can still be unpaused to take its answer.
     nonisolated static func inboxChainGone(_ ownerChain: String, in conversations: [Conversation],
                                            deletedJobs: Set<UUID> = []) -> Bool {
+        // #1417: a guest's conversation is reaped with every session, so it says nothing about the guest. A guest
+        // chain is never gone to the sweep; Brian archives a revoked guest's item himself.
+        if AppState.guestClientId(ofInboxChain: ownerChain) != nil { return false }
         if ownerChain.hasPrefix("job:") { return jobChainId(ownerChain).map(deletedJobs.contains) ?? false }
         if let id = UUID(uuidString: ownerChain) {
             guard let c = conversations.first(where: { $0.id == id }) else { return true }
@@ -2437,6 +2503,9 @@ actor IrisEngine {
     /// out) has no human behind it, so it goes only to the emitter or its owner chain, and `notify`
     /// is not used.
     nonisolated static func inboxRouteTargets(item: InboxItem, answer: InboxAnswer) -> [String] {
+        // #1417: a guest's item is answered to the guest alone (its mailbox), whatever its row says: a guest
+        // never routes Brian's decision into a host session.
+        if AppState.guestClientId(ofInboxChain: item.ownerChain) != nil { return [item.ownerChain] }
         // #920 slice 1b: a job run's item is answered to its job (`job:<id>`), not the run that raised it,
         // which has ended by the time Brian answers: the job's next run gets it, or the pinned Iris.
         let selfTarget = jobChainId(item.ownerChain) != nil ? item.ownerChain : item.emitter.uuidString
@@ -2543,7 +2612,9 @@ actor IrisEngine {
 
     /// The `notify` targets an answer will tell (same rule as `inboxHumanRouteTargets`).
     nonisolated static func inboxNotifyTargets(item: InboxItem) -> [String] {
-        item.notify.filter { isAllowedInboxRoute($0, emitter: item.emitter) }
+        // #1417: nobody is told of an answer to a guest's item but the guest.
+        guard AppState.guestClientId(ofInboxChain: item.ownerChain) == nil else { return [] }
+        return item.notify.filter { isAllowedInboxRoute($0, emitter: item.emitter) }
     }
 
     /// #920 slice 4: how late past its deadline a veto may fire and still be on time. The watcher ticks every
@@ -2599,6 +2670,12 @@ actor IrisEngine {
         let body = Self.inboxVetoHeldFrame(item: item, echoed: await echoedInboxText(Self.inboxOriginalItemText(item)))
         var reached = Set<UUID>()
         for target in targets {
+            // #1417: a guest hears its default was held through its mailbox, best effort like any hold notice.
+            // Filed under its own key, so it never stands in for the answer the item still waits on.
+            if let clientId = AppState.guestClientId(ofInboxChain: target) {
+                _ = await guestInboxDeliver(clientId, item.id, "held:" + target, body)
+                continue
+            }
             let id: UUID? = await MainActor.run {
                 Self.resolveInboxTarget(target, ownerChain: item.ownerChain, in: localState?.conversations ?? [])
             }
@@ -4479,7 +4556,10 @@ actor IrisEngine {
             (localState?.inboxOwnerChain(for: conversationId) ?? (ownRole ?? conversationId.uuidString),
              localState?.isInboxEmittingJobRun(conversationId) ?? false)
         }
-        let inboxReachable = principal == .main && (!isUnattended || isEmittingJobRun)
+        // #1417 (planner ruling (a)): a guest turn is offered inbox_item while guest sessions are on, and
+        // resolve_inbox_item while the guest has an item of its own to close. Its own chain is `guest:<clientId>`.
+        let guestInbox = principal == .mcpGuest ? await MainActor.run { guestSessionsEnabled() } : false
+        let inboxReachable = (principal == .main && (!isUnattended || isEmittingJobRun)) || guestInbox
         let ownsUnfinishedInboxItem = inboxReachable
             ? ((try? await MainActor.run(body: { localState?.store.inbox })?.hasUnfinishedItems(ownerChain: inboxChain)) ?? false)
             : false
@@ -4671,7 +4751,7 @@ actor IrisEngine {
         // The last write to `toolsList` before it is sent, kept last defensively: a guest's (or
         // broker's) list is the floor whatever any gate above appended.
         if principal == .mcpGuest {
-            toolsList = GuestToolset.restrict(toolsList)
+            toolsList = GuestToolset.restrict(toolsList, inbox: guestInbox, resolve: guestInbox && ownsUnfinishedInboxItem)
         } else if principal == .broker {
             toolsList = toolsList.filter { PrincipalFloor.brokerTools.contains($0.name) }
         }
@@ -6148,11 +6228,13 @@ actor IrisEngine {
     static func makeGuestEngine(state: AppState, clientId: String, client: any LLMClientProtocol = LLMClient(),
                                 factStore: FactStoreManager? = nil, protectionEnabled: Bool? = nil,
                                 memory: MemoryManager? = nil,
-                                store: AccessProfileStore = AccessProfileStore(paths: .default)) -> IrisEngine {
+                                store: AccessProfileStore = AccessProfileStore(paths: .default),
+                                guestSessionsEnabled: @escaping @MainActor @Sendable () -> Bool = { ConfigManager.shared.mcpGuestSessionsEnabled }) -> IrisEngine {
         let binding = providerGuestBinding(clientId: clientId, store: store)
         return IrisEngine(state: state, tier: .easy, principal: .mcpGuest, roleLabel: "guest:\(clientId)", client: client,
                           factStore: factStore, protectionEnabled: protectionEnabled, memory: memory,
-                          guestClientId: clientId, binding: binding, accessProfileStore: store)
+                          guestClientId: clientId, guestSessionsEnabled: guestSessionsEnabled,
+                          binding: binding, accessProfileStore: store)
     }
 
     /// The binding a provider guest runs under. A guest with a mapping to a live, non-owner profile gets
@@ -6198,8 +6280,11 @@ actor IrisEngine {
     }
 
     /// #1066: the guest's declared tools: exactly its floor.
-    nonisolated static func guestToolDeclarations() -> [FunctionDeclaration] {
+    /// #1417: plus `inbox_item` on a guest turn while guest sessions are on, and `resolve_inbox_item` while the
+    /// guest has an item of its own to close.
+    nonisolated static func guestToolDeclarations(inbox: Bool = false, resolve: Bool = false) -> [FunctionDeclaration] {
         [GuestToolset.listSessions, GuestToolset.sendToSession]
+            + (inbox ? [GuestToolset.inboxItem] : []) + (resolve ? [resolveInboxItemDeclaration] : [])
     }
 
     /// The two inbox tools a scheduled or polled job's run keeps through the unattended strip (#920 slice 1b).
@@ -6828,6 +6913,12 @@ actor IrisEngine {
            let extra = functionCall.args.keys.sorted().first(where: { !GuestToolset.sendArguments.contains($0) }) {
             return GuestToolset.argumentRefusal(extra)
         }
+        // #1417: nor does a guest's `inbox_item` take `route_back`, `notify` or anything else its schema lacks: its
+        // answer goes to the guest alone (planner ruling), refused here before a rate token is spent.
+        if principal == .mcpGuest, functionCall.name == "inbox_item",
+           let extra = functionCall.args.keys.sorted().first(where: { !GuestToolset.inboxArguments.contains($0) }) {
+            return GuestToolset.inboxArgumentRefusal(extra)
+        }
 
         // One hop for the gates below and the grant the executor mounts (they ask the same
         // conversation five questions now), rather than one per tool call per gate: an ordinary
@@ -7417,8 +7508,12 @@ actor IrisEngine {
             // Defense in depth, same reasoning as the other session tools above: declaration
             // gating only stops a well-behaved model from being offered this, not from naming it
             // in a forged call, so both checks are repeated here, where the call actually acts.
-            guard principal == .main else {
-                result = "Refused — a subagent is not a session."
+            // #1417: a guest raises items while guest sessions are on; its turn is driven by its client, so the
+            // attended state gate below is the main path's alone.
+            let isGuest = principal == .mcpGuest
+            let guestAllowed = isGuest ? await MainActor.run { guestSessionsEnabled() } : false
+            guard principal == .main || guestAllowed else {
+                result = isGuest ? Self.guestInboxOffRefusal : "Refused — a subagent is not a session."
                 return result
             }
             guard let (store, role, isPinned, hasGoal, chain, jobRun) = await MainActor.run(body: { () -> (ConversationStore, String?, Bool, Bool, String, Bool)? in
@@ -7431,21 +7526,23 @@ actor IrisEngine {
                 return result
             }
             // #920 slice 1b: an unattended turn raises an item only as a scheduled or polled job's run.
-            guard !isUnattended || jobRun else {
+            guard isGuest || !isUnattended || jobRun else {
                 result = Self.unattendedSessionMessageRefusal
                 return result
             }
             // #920 slice 1: the declaration's gate, again where the call acts (a sticky declaration
             // outlives its state, and a model can name a tool it saw elsewhere).
             let owns = (try? store.inbox.hasUnfinishedItems(ownerChain: chain)) ?? false
-            guard jobRun || Self.inboxItemStateOn(role: role, isPinned: isPinned, hasActiveGoal: hasGoal, ownsUnfinishedItem: owns) else {
+            guard isGuest || jobRun || Self.inboxItemStateOn(role: role, isPinned: isPinned, hasActiveGoal: hasGoal, ownsUnfinishedItem: owns) else {
                 result = Self.inboxItemOffStateRefusal
                 return result
             }
             result = await emitToInbox(args: functionCall.args, from: conversationId, store: store)
         } else if functionCall.name == Self.resolveInboxItemTool {
-            guard principal == .main else {
-                result = "Refused — a subagent is not a session."
+            let isGuest = principal == .mcpGuest
+            let guestAllowed = isGuest ? await MainActor.run { guestSessionsEnabled() } : false
+            guard principal == .main || guestAllowed else {
+                result = isGuest ? Self.guestInboxOffRefusal : "Refused — a subagent is not a session."
                 return result
             }
             guard let (store, jobRun) = await MainActor.run(body: { () -> (ConversationStore, Bool)? in
@@ -7455,7 +7552,7 @@ actor IrisEngine {
                 result = "The inbox is unavailable."
                 return result
             }
-            guard !isUnattended || jobRun else {
+            guard isGuest || !isUnattended || jobRun else {
                 result = Self.unattendedSessionMessageRefusal
                 return result
             }

@@ -47,7 +47,7 @@ nothing on the Iris side drains a sent message, so `iris_poll`/`iris_status` sta
 never receives a reply. Turning on the guarded `MCP_GUEST_SESSIONS_ENABLED` setting (off by default,
 no Settings toggle yet, a `"true"` written from outside the app does not count, #678) changes that:
 `iris_send` also starts one model turn in that client's own guest session, on the cheapest model
-tier with the two-tool guest floor, and the final answer comes back through `iris_poll`. Only the message text reaches that session: file references are stored and granted as before, but are not shown to it. A client
+tier with the guest's tool floor, and the final answer comes back through `iris_poll`. Only the message text reaches that session: file references are stored and granted as before, but are not shown to it. A client
 gets at most 12 such turns an hour (one more every 5 minutes), one turn at a time, and a turn that
 cannot start (every guest slot taken, or the hourly limit) is a tool error, not a queued message.
 A turn that fails or runs out of time is answered with a short failure message rather than silence.
@@ -80,9 +80,20 @@ it: a guest never gets an address a role session could message first.
   engine under the `mcpGuest` principal. It is never persisted (a restart starts with none), never
   listed by `list_sessions`, and its prompt is the guest prompt alone: no `SOUL.md`, `USER.md`,
   workspace `AGENTS.md`, skills, facts or memory. It runs on the cheapest model tier.
-- **The two-tool floor.** A guest declares and can call exactly `list_sessions` and `send_to_session`.
-  Every other tool, and any argument those two do not take (no `attachments`, no `to` other than a
-  role), is refused at dispatch. Its YOLO mode is never on, and a role session's turn that a guest
+- **The tool floor.** A guest declares and can call exactly `list_sessions` and `send_to_session`, plus,
+  since #1417, `inbox_item` and `resolve_inbox_item` (below). Every other tool, and any argument those do
+  not take (no `attachments`, no `to` other than a role, no `route_back` or `notify`), is refused at dispatch.
+- **Inbox items (#1417).** While guest sessions are on, a guest turn is offered `inbox_item` (about 330
+  tokens of declaration a turn), and `resolve_inbox_item` once the guest has an item of its own to close. An
+  item a guest raises is its client's (owner chain `guest:<clientId>`, so its sessions share it), shows
+  `guest:<clientId>` as its source, and counts as having read outside content: a guest's timed veto is held
+  for Brian at its deadline and never applies its default on its own. Its rate limit is the client's. Brian's
+  answer goes to that guest alone, as a message from Iris in its mailbox, read with `iris_poll`, so it
+  arrives even if the guest has disconnected, and no turn or budget is spent. A guest can't route it to a role
+  or notify anyone. It counts as delivered once a poll returns it; the mailbox is memory only, so an answer
+  not yet returned is filed again after a restart. A revoked client's answer is noted on the item, naming the
+  client, and sent nowhere else. The stale sweep never marks a guest's item stale, since its conversation
+  is reaped with every session. Its YOLO mode is never on, and a role session's turn that a guest
   message started or steered asks for approvals as usual for that turn (#1119): no saved Always Allow rule, exact or prefix, answers for it either (#1141).
   Neither the `~/.iris` file carve-out nor a Vibecop approval answers for such a turn either: the call asks
   the person (#1150, #1151).

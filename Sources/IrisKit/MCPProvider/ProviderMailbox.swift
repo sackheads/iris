@@ -27,8 +27,9 @@ struct ProviderIdentity: Sendable, Codable, Equatable {
 /// Client<->Iris messaging for the loopback MCP provider (#1067). Deliberately client<->Iris
 /// only: `send` always addresses Iris (no recipient argument exists to get wrong), and
 /// `deliverReply` — the only API that ever addresses a client — is never wired to any MCP tool;
-/// only `GuestSessionDriver` calls it (#1066), with the id of the client whose turn just ended, so
-/// no MCP client can write into another client's inbox, directly or by naming it.
+/// only `GuestSessionDriver` calls it (#1066), with the id of the client whose turn just ended, or (#1417) of
+/// the client that raised the Inbox item Brian just answered, taken from the item's own chain. So no MCP client
+/// can write into another client's inbox, directly or by naming it.
 actor ProviderMailbox {
     enum MailboxError: Error, Equatable {
         case senderNoLongerRegistered
@@ -101,8 +102,9 @@ actor ProviderMailbox {
     }
 
     /// The Iris-side half of the mailbox: stores `from: .iris, to: .client(clientId)`. Not wired
-    /// to any MCP tool (an MCP client has no business writing "from Iris" messages): its one
-    /// production caller is `GuestSessionDriver`, pinned by a source-scan test.
+    /// to any MCP tool (an MCP client has no business writing "from Iris" messages): its production
+    /// callers are `GuestSessionDriver`'s two (a turn's reply, and #1417's Inbox answer), pinned by a
+    /// source-scan test.
     func deliverReply(to clientId: String, text: String, fileRefs: [String]) throws -> Message {
         guard registry.isRegistered(clientId: clientId) else { throw MailboxError.unknownRecipient }
         try Self.validate(text: text, fileRefs: fileRefs)

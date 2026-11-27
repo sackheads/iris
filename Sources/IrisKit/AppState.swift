@@ -1,4 +1,5 @@
 import Combine
+import CryptoKit
 import Foundation
 import SwiftUI
 
@@ -3032,7 +3033,39 @@ class AppState {
     /// derivation for emit, follow-up, resolve and the tools' gate.
     func inboxOwnerChain(for conversationId: UUID) -> String {
         if let stamp = jobRunStamps[conversationId] { return "job:" + stamp.jobId.uuidString }
-        return conversations.first(where: { $0.id == conversationId })?.role ?? conversationId.uuidString
+        let c = conversations.first(where: { $0.id == conversationId })
+        // #1417: a guest's chain is its client, not its conversation, which is reaped with its session.
+        if let c, c.isGuest, let clientId = c.guestClientId { return Self.guestInboxChain(clientId) }
+        return c?.role ?? conversationId.uuidString
+    }
+
+    /// #1417: the inbox chain of an MCP guest, `guest:<clientId>`.
+    nonisolated static func guestInboxChain(_ clientId: String) -> String { "guest:" + clientId }
+
+    /// The guest client an inbox chain names, or nil when it isn't a guest's.
+    nonisolated static func guestClientId(ofInboxChain chain: String) -> String? {
+        guard chain.hasPrefix("guest:") else { return nil }
+        let id = String(chain.dropFirst("guest:".count))
+        return id.isEmpty ? nil : id
+    }
+
+    /// The key an emit's rate token is taken under: a job's, so a schedule's runs share one budget; a guest's
+    /// client, so its sessions do and one guest can't spend another's (#1417); else the conversation.
+    private func inboxRateKey(_ sender: UUID) -> UUID {
+        if let jobId = jobRunStamps[sender]?.jobId { return jobId }
+        if let c = conversations.first(where: { $0.id == sender }), c.isGuest, let clientId = c.guestClientId {
+            return Self.stableKey("guest-inbox:" + clientId)
+        }
+        return sender
+    }
+
+    /// A UUID derived from `text`, the same every launch.
+    nonisolated static func stableKey(_ text: String) -> UUID {
+        var bytes = Array(SHA256.hash(data: Data(text.utf8)).prefix(16))
+        bytes[6] = (bytes[6] & 0x0F) | 0x50
+        bytes[8] = (bytes[8] & 0x3F) | 0x80
+        return UUID(uuid: (bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
+                           bytes[8], bytes[9], bytes[10], bytes[11], bytes[12], bytes[13], bytes[14], bytes[15]))
     }
 
     /// Whether a run's conversation may use the inbox tools though nobody is watching it: a scheduled
@@ -3658,11 +3691,13 @@ class AppState {
         }
         // #920 slice 1b: a job's runs share one budget, keyed by the job, so a per-minute schedule
         // cannot raise a fresh 20 items every fire.
-        if let wait = inboxEmitRateLimiter.take(for: jobRunStamps[sender]?.jobId ?? sender) {
+        if let wait = inboxEmitRateLimiter.take(for: inboxRateKey(sender)) {
             return .refused("Not raised: rate limit — this session has raised \(PeerRateLimiter.capacity) inbox items in quick succession. The next is allowed in about \(Int(wait.rounded(.up)))s.")
         }
         let ownerChain = inboxOwnerChain(for: sender)
-        return .allowed(ownerChain: ownerChain, emitterLabel: Self.inboxEmitterLabel(for: c), tainted: c.hasUntrustedToolOutput)
+        // #1417: a guest's item is always tainted, so its timed veto holds at the deadline (#813) and taint flows
+        // to whoever reads the answer.
+        return .allowed(ownerChain: ownerChain, emitterLabel: Self.inboxEmitterLabel(for: c), tainted: c.isGuest || c.hasUntrustedToolOutput)
     }
 
     /// The name an inbox item is raised under (#1027): the session's card name, else its role, else
@@ -3670,6 +3705,8 @@ class AppState {
     /// noise in the list. Each is something the session or its user chose, so it is still only a
     /// display label (the caller flattens and caps it), never an identity.
     static func inboxEmitterLabel(for c: Conversation) -> String {
+        // #1417: a guest-raised item shows the guest as its source, never a label the guest's model chose.
+        if c.isGuest, let clientId = c.guestClientId { return guestInboxChain(clientId) }
         if let name = c.sessionCard?.name, !name.trimmingCharacters(in: .whitespaces).isEmpty { return name }
         if let role = c.role, !role.isEmpty { return role }
         if !c.hasDefaultTitle { return c.title }
@@ -3680,7 +3717,7 @@ class AppState {
     /// could not be recorded — it reached nobody, so it must not cost the sender its budget
     /// (dev-2's #924 "guard-block refund path" review focus, carried into Task 2).
     func refundInboxEmit(from sender: UUID) {
-        inboxEmitRateLimiter.refund(for: jobRunStamps[sender]?.jobId ?? sender, count: 1)
+        inboxEmitRateLimiter.refund(for: inboxRateKey(sender), count: 1)
     }
 
     /// #469 §7.5: removes artifacts no conversation has referenced for the grace period. At launch,

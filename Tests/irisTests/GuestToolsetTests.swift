@@ -154,7 +154,8 @@ struct GuestToolsetTests {
         #expect(send?.parameters?.properties?["to"]?.description?.contains("session_id") == false)
         #expect(Set(GuestToolset.sendArguments) == Set(send?.parameters?.properties?.keys.map { $0 } ?? []),
                 "the dispatch allowlist and the declared schema are the same set")
-        #expect(GuestToolset.allowedNames == floor)
+        // #1417: the two inbox tools are in the floor too, declared per turn while guest sessions are on.
+        #expect(GuestToolset.allowedNames == floor.union(["inbox_item", IrisEngine.resolveInboxItemTool]))
     }
 
     // MARK: dispatch
@@ -178,7 +179,7 @@ struct GuestToolsetTests {
     }
 
     @Test("a guest's call to any tool outside the floor is refused before a handler runs",
-          arguments: ["run_command", "read_file", "write_file", "search_web", "inbox_item", "describe_session",
+          arguments: ["run_command", "read_file", "write_file", "search_web", "describe_session",
                       "invoke_subagent", "schedule_job", "register_directory_watcher", "manage_fact",
                       "set_workspace", "propose_goal_contract", "goal_complete", "set_alarm", "set_session_card",
                       "close_request", "list_jobs", "read_conversation", "search_conversations"])

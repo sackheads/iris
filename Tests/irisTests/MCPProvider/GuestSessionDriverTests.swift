@@ -524,6 +524,10 @@ struct GuestSessionDriverTests {
             }
         }
         #expect(callers == ["GuestSessionDriver.swift", "ProviderMailbox.swift"])
+        // #1417 sanctions a second call in the driver, for Brian's answer to a guest's Inbox item; any third is new.
+        let driver = try String(contentsOf: sources.appendingPathComponent("IrisKit/MCPProvider/GuestSessionDriver.swift"), encoding: .utf8)
+        #expect(driver.components(separatedBy: "mailbox.deliverReply(").count - 1 == 2,
+                "the driver calls deliverReply for a turn's reply and for an Inbox answer, nowhere else")
         for file in ["GuestSessionDriver.swift", "GuestSessionRegistry.swift"] {
             let url = sources.appendingPathComponent("IrisKit/MCPProvider/\(file)")
             #expect(!(try String(contentsOf: url, encoding: .utf8)).contains("reservedClientId"), "\(file)")
