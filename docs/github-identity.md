@@ -42,7 +42,8 @@ happens: a repo not on the list sends nothing.
     - Never a subagent, evaluator, MCP guest, or a turn a guest's message started or steered.
   - **Protected paths:** `pr_create` first lists the branch's changed files (a rename's source
     included). It refuses one under a protected path:
-    - `.github/workflows/`, `CODEOWNERS`, `docs/plans/`, `docs/specs/` and `.gitmodules`;
+    - `.github/workflows/`, `.github/actions/`, `CODEOWNERS`, `docs/plans/`, `docs/specs/` and `.gitmodules`;
+    - it's checked when the PR is opened only, so a later push to the branch isn't re-checked until slice 2's `vcs push`;
     - the list lives in `~/.iris/config/vcs-policy.json`, a protected file, and an unreadable one
       refuses every `pr_create`.
   - **The taint gate:** on a conversation that has read outside text, `pr_create` and `pr_comment`

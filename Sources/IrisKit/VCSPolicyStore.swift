@@ -13,7 +13,7 @@ final class VCSPolicyStore: @unchecked Sendable {
         var protectedPaths: [String]
 
         static let defaults = Policy(protectedPaths: [
-            ".github/workflows/", ".github/CODEOWNERS", "CODEOWNERS", "docs/CODEOWNERS",
+            ".github/workflows/", ".github/actions/", ".github/CODEOWNERS", "CODEOWNERS", "docs/CODEOWNERS",
             "docs/plans/", "docs/specs/", ".gitmodules",
         ])
 
