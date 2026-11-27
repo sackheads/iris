@@ -68,27 +68,36 @@ enum HistoryCompaction {
         let turns: Int
         let tokensBefore: Int
         let tokensCompacted: Int
-        /// The owner's own words no longer in the kept tail, each byte for byte, oldest first: from this span and
-        /// every earlier compaction (dev-2's #1431 review), so none is ever lost to a later summary.
-        let ownerMessages: [String]
-        /// The previous head's own words (its summary, or its omission notice), without its owner section.
+        /// The head's owner Parts, oldest first: the previous head's, copied unchanged, then each owner entry of this
+        /// span as it is in history (after any `BeforeAgent` hook). Each is one Part of its own, never parsed back.
+        let ownerParts: [String]
+        /// The oldest owner messages folded into the summary because the Parts passed `ownerSectionMaxTokens`.
+        let foldedOwner: [String]
+        /// The previous head's first Part (its summary or omission notice), never its owner Parts.
         let priorSummary: String?
         /// Past the hard limit: if no summary can be had, the span is dropped rather than kept.
         let overHardLimit: Bool
     }
 
-    /// A head this file wrote: a summary, or an omission notice.
+    /// Owner Parts past this many tokens fold their oldest into the summary (planner, #1431): a single long paste
+    /// would otherwise keep the history over budget for good. A constant, not a setting.
+    static let ownerSectionMaxTokens = 8_000
+
+    /// A head this file wrote: a summary, or an omission notice. Known by its first Part only.
     static func isHead(_ content: Content) -> Bool {
-        let text = content.parts.compactMap(\.text).joined()
-        return content.role == "user" && (text.hasPrefix(summaryLabel) || text.hasPrefix(omittedLabel))
+        guard content.role == "user", let first = content.parts.first?.text else { return false }
+        return first.hasPrefix(summaryLabel) || first.hasPrefix(omittedLabel)
     }
 
-    static let ownerSectionIntro = "\n\nThe owner's own messages from those turns, verbatim, oldest first:\n"
+    static let ownerSectionIntro = "\n\nThe owner's own messages from those turns follow, verbatim, oldest first, each in its own block."
+    static let ownerPartOpen = "<owner_message>\n"
+    static let ownerPartClose = "\n</owner_message>"
+
+    static func ownerPart(_ words: String) -> String { ownerPartOpen + words + ownerPartClose }
 
     /// nil when the history is within budget, or when no turn boundary leaves anything new to compact.
-    /// `ownerMessages` is the owner's transcript (`.user` messages, oldest first): what the head quotes is every one of
-    /// them not still in the kept tail, worked out from the transcript, never parsed back out of an earlier head.
-    static func plan(_ history: [Content], ownerMessages: [String], settings: Settings, contextWindow: Int) -> Plan? {
+    /// `ownerTexts` is the owner's transcript (`.user` messages): an entry counts as theirs only if it matches one.
+    static func plan(_ history: [Content], ownerTexts: Set<String>, settings: Settings, contextWindow: Int) -> Plan? {
         let total = tokens(history)
         guard total > budget(settings, contextWindow: contextWindow) else { return nil }
         // The earliest turn start whose suffix fits the tail; the last turn stays whole even if it alone is bigger.
@@ -96,34 +105,21 @@ enum HistoryCompaction {
         guard let last = starts.last else { return nil }
         let cut = starts.first { tokens(history[$0...]) <= settings.tail } ?? last
         let span = history[..<cut]
-        let hasHead = span.first.map(isHead) ?? false
+        let head = span.first.flatMap { isHead($0) ? $0 : nil }
         // Nothing but the previous head before the cut: compacting again would only rewrite it, every turn.
-        guard cut > (hasHead ? 1 : 0) else { return nil }
-        let prior = hasHead ? span.first.map { head -> String in
-            let text = head.parts.compactMap(\.text).joined()
-            return text.range(of: ownerSectionIntro).map { String(text[..<$0.lowerBound]) } ?? text
-        } : nil
-        return Plan(cut: cut, turns: span.dropFirst(hasHead ? 1 : 0).filter(isTurnStart).count, tokensBefore: total,
-                    tokensCompacted: tokens(span),
-                    ownerMessages: ownerMessagesBeyondTail(ownerMessages, tail: history[cut...]),
-                    priorSummary: prior,
+        guard cut > (head == nil ? 0 : 1) else { return nil }
+        let rest = span.dropFirst(head == nil ? 0 : 1)
+        // The previous head's owner Parts by position, copied as they are; then this span's, as history has them.
+        var parts = (head?.parts.dropFirst().compactMap(\.text) ?? [])
+            + rest.filter { isOwnerTyped($0, ownerTexts: ownerTexts) }.map { ownerPart($0.parts.compactMap(\.text).joined()) }
+        var folded: [String] = []
+        while !parts.isEmpty, parts.reduce(0, { $0 + $1.utf8.count }) / 4 > ownerSectionMaxTokens {
+            let oldest = parts.removeFirst()
+            folded.append(String(oldest.dropFirst(ownerPartOpen.count).dropLast(ownerPartClose.count)))
+        }
+        return Plan(cut: cut, turns: rest.filter(isTurnStart).count, tokensBefore: total, tokensCompacted: tokens(span),
+                    ownerParts: parts, foldedOwner: folded, priorSummary: head?.parts.first?.text,
                     overHardLimit: Double(total) >= Double(contextWindow) * settings.hardLimitFraction)
-    }
-
-    /// The owner's messages, oldest first, less those the tail still carries (as typed, or as a mid-task steer),
-    /// counted so a message typed twice is quoted once if one copy is still in the tail.
-    static func ownerMessagesBeyondTail(_ owner: [String], tail: ArraySlice<Content>) -> [String] {
-        var inTail: [String: Int] = [:]
-        for entry in tail where isTurnStart(entry) {
-            let text = entry.parts.compactMap(\.text).joined()
-            let words = text.hasPrefix(ownerSteerPrefix) ? String(text.dropFirst(ownerSteerPrefix.count)) : text
-            inTail[words, default: 0] += 1
-        }
-        var kept: [String] = []
-        for message in owner.reversed() {
-            if let n = inTail[message], n > 0 { inTail[message] = n - 1 } else { kept.append(message) }
-        }
-        return kept.reversed()
     }
 
     static let summaryInstruction = """
@@ -150,7 +146,10 @@ enum HistoryCompaction {
             }
         }
         let prior = plan.priorSummary.map { "\n\n<previous_summary>\n\(TurnContext.neutralised($0))\n</previous_summary>" } ?? ""
-        return summaryInstruction + prior + "\n\n<transcript>\n" + lines.reversed().joined(separator: "\n") + "\n</transcript>"
+        let folded = plan.foldedOwner.isEmpty ? "" : "\n\nThe owner's oldest messages, folded here to save room; keep what they decided:\n<folded_owner_messages>\n"
+            + plan.foldedOwner.map { "owner: " + TurnContext.neutralised(ConversationReader.quoteContinuationLines($0)) }.joined(separator: "\n")
+            + "\n</folded_owner_messages>"
+        return summaryInstruction + prior + folded + "\n\n<transcript>\n" + lines.reversed().joined(separator: "\n") + "\n</transcript>"
     }
 
     private static func transcriptLines(_ content: Content, ownerTexts: Set<String>) -> [String] {
@@ -171,26 +170,27 @@ enum HistoryCompaction {
         }
     }
 
-    /// The entry that replaces the span. The owner's messages follow the summary, each whole and in its own block.
-    /// A tainted conversation's summary arrives already guarded and wrapped (`<untrusted_context>`).
+    /// The entry that replaces the span: the summary in the first Part, then each owner message as a Part of its own
+    /// (dev-3's #1431 review), so a later compaction copies them by position and the summary, which may be wrapped
+    /// outside text, can never pass as one. A tainted conversation's summary arrives already guarded and wrapped.
     static func head(summary: String, plan: Plan) -> Content {
-        var text = "\(summaryLabel), \(plan.turns) turns, compacted to save context. It replaces them; what follows it is verbatim.]\n\n\(summary)"
-        text += ownerSection(plan.ownerMessages)
-        return Content(role: "user", parts: [Part(text: text)])
+        let first = "\(summaryLabel), \(plan.turns) turns, compacted to save context. It replaces them; what follows it is verbatim.]\n\n\(summary)"
+            + foldNote(plan) + (plan.ownerParts.isEmpty ? "" : ownerSectionIntro)
+        return Content(role: "user", parts: [Part(text: first)] + plan.ownerParts.map { Part(text: $0) })
     }
 
     /// The entry that replaces a span no summary could be had for, past the hard limit: says state was lost.
     static func omittedHead(plan: Plan, priorOmitted: Int) -> Content {
         let total = priorOmitted + plan.turns
-        var text = "\(omittedLabel): \(plan.turns) earlier turns (\(total) in all) were dropped without a summary to keep this "
+        var first = "\(omittedLabel): \(plan.turns) earlier turns (\(total) in all) were dropped without a summary to keep this "
             + "conversation within the model's context. Anything decided in them that isn't repeated below is lost; ask if it matters.]"
-        if let prior = plan.priorSummary { text += "\n\n\(prior)" }
-        text += ownerSection(plan.ownerMessages)
-        return Content(role: "user", parts: [Part(text: text)])
+        if let prior = plan.priorSummary { first += "\n\n\(prior)" }
+        if !plan.foldedOwner.isEmpty { first += "\n\n\(plan.foldedOwner.count) of the owner's oldest messages were dropped with them." }
+        first += plan.ownerParts.isEmpty ? "" : ownerSectionIntro
+        return Content(role: "user", parts: [Part(text: first)] + plan.ownerParts.map { Part(text: $0) })
     }
 
-    private static func ownerSection(_ messages: [String]) -> String {
-        guard !messages.isEmpty else { return "" }
-        return ownerSectionIntro + messages.map { "\n<owner_message>\n\($0)\n</owner_message>" }.joined()
+    private static func foldNote(_ plan: Plan) -> String {
+        plan.foldedOwner.isEmpty ? "" : "\n\n\(plan.foldedOwner.count) earlier owner messages were folded into the summary to save room."
     }
 }

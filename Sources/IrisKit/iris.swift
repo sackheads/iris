@@ -3746,20 +3746,20 @@ actor IrisEngine {
         guard principal == .main, let localState = state else { return }
         let provider = providerOverride ?? ConfigManager.shared.primaryProvider
         let model = turnModel()
-        let snapshot = await MainActor.run { () -> (history: [Content], tainted: Bool, omitted: Int, owner: [String])? in
+        let snapshot = await MainActor.run { () -> (history: [Content], tainted: Bool, omitted: Int, owner: Set<String>)? in
             guard let c = localState.conversations.first(where: { $0.id == conversationId }),
                   c.loop != nil || c.activeGoal != nil else { return nil }
             return (c.history, c.hasUntrustedToolOutput, c.sessionCard?.historyTurnsOmitted ?? 0,
-                    c.messages.filter { $0.role == .user }.map(\.content))
+                    Set(c.messages.filter { $0.role == .user }.map(\.content)))
         }
         guard let snapshot else { return }
         var settings = compactionOverride ?? HistoryCompaction.Settings()
         if compactionOverride == nil { settings.budget = ConfigManager.shared.historyCompactionBudget }
         let window = HistoryCompaction.contextWindow(provider: provider, model: model)
-        guard let plan = HistoryCompaction.plan(snapshot.history, ownerMessages: snapshot.owner, settings: settings,
+        guard let plan = HistoryCompaction.plan(snapshot.history, ownerTexts: snapshot.owner, settings: settings,
                                                 contextWindow: window) else { return }
 
-        let summary = await compactionSummary(snapshot.history, plan: plan, ownerTexts: Set(snapshot.owner),
+        let summary = await compactionSummary(snapshot.history, plan: plan, ownerTexts: snapshot.owner,
                                               settings: settings, tainted: snapshot.tainted)
         let head: Content, kind: String
         if let summary {
