@@ -116,9 +116,22 @@ enum HistoryCompaction {
         return id.isEmpty ? nil : String(id)
     }
 
-    /// `inboxAnswers`: item id to the owner's own words for each Inbox answer Brian gave (`IrisEngine.inboxAnswerOwnerText`).
-    /// An entry delivering one of those becomes an owner Part in its place, like a message he typed.
-    static func plan(_ history: [Content], ownerTexts: Set<String>, inboxAnswers: [String: String] = [:],
+    /// Brian's decision as one Inbox answer entry delivered it: the lines Iris wrote between the frame's decision header
+    /// and its original-item header, which come before any of the emitter's text. nil for an automatic answer (its
+    /// frame has no such header: nobody decided) and for any entry `inboxAnswerItemId` doesn't accept.
+    static func inboxDecision(_ content: Content) -> String? {
+        guard let id = inboxAnswerItemId(content) else { return nil }
+        let text = content.parts.compactMap(\.text).joined()
+        guard let header = text.range(of: IrisEngine.inboxDecisionHeader + "\n"),
+              let end = text.range(of: "\n\n" + IrisEngine.inboxOriginalItemHeader, range: header.upperBound..<text.endIndex)
+        else { return nil }
+        let decision = text[header.upperBound..<end.lowerBound].trimmingCharacters(in: .whitespacesAndNewlines)
+        return decision.isEmpty ? nil : "Brian's Inbox answer to item \(id):\n" + decision
+    }
+
+    /// `inboxItems`: the items whose delivered answers may be the owner's words (`IrisEngine.inboxAnswersMayBeOwnersWords`).
+    /// Each entry delivering one becomes an owner Part in its place, with that delivery's decision, like a message he typed.
+    static func plan(_ history: [Content], ownerTexts: Set<String>, inboxItems: Set<String> = [],
                      settings: Settings, contextWindow: Int) -> Plan? {
         let total = tokens(history)
         guard total > budget(settings, contextWindow: contextWindow) else { return nil }
@@ -135,7 +148,8 @@ enum HistoryCompaction {
         var parts = (head?.parts.dropFirst().compactMap(\.text) ?? [])
             + rest.compactMap { entry -> String? in
                 if isOwnerTyped(entry, ownerTexts: ownerTexts) { return ownerPart(entry.parts.compactMap(\.text).joined()) }
-                return inboxAnswerItemId(entry).flatMap { inboxAnswers[$0] }.map(ownerPart)
+                guard let id = inboxAnswerItemId(entry), inboxItems.contains(id) else { return nil }
+                return inboxDecision(entry).map(ownerPart)
             }
         var folded: [String] = []
         while !parts.isEmpty, parts.reduce(0, { $0 + $1.utf8.count }) / 4 > ownerSectionMaxTokens {
