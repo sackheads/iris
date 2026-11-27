@@ -1186,8 +1186,9 @@ then an overlap (skipped or queued by `policy.overlap`), then the breaker, then 
   its gate reports a change, a watch is bursty, and a built-in spends nothing, so none of them keeps
   a prefix warm on a predictable cadence. A run's own history stays at five minutes, because runs
   are short. To keep one job's prefix the same from fire to fire, a run's tools don't depend on
-  what the turn surfaced: a mutating run always declares `manage_fact`, a read-only run never does. The pinned conversation holds an hour on every marker; everything else holds five
-  minutes.
+  what the turn surfaced: a mutating run always declares `manage_fact`, a read-only run never does. The pinned conversation holds an hour on every marker. So does a conversation with a loop or alarm
+  that ticks every 45 minutes or less (a self-paced loop counts at its 20-minute default), so each
+  tick reads the last one's history (#1437). Everything else holds five minutes.
 
   Output × 5 is a floor; real output prices run 4× to 8× input. Each run is priced at the
   provider and model it ran on, which its row records, never at whatever is configured now, and the
