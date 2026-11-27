@@ -83,8 +83,8 @@ it: a guest never gets an address a role session could message first.
 - **The tool floor.** A guest declares and can call exactly `list_sessions` and `send_to_session`, plus,
   since #1417, `inbox_item` and `resolve_inbox_item` (below). Every other tool, and any argument those do
   not take (no `attachments`, no `to` other than a role, no `route_back` or `notify`), is refused at dispatch.
-- **Inbox items (#1417).** While guest sessions are on, a guest turn is offered `inbox_item` (about 330
-  tokens of declaration a turn), and `resolve_inbox_item` once the guest has an item of its own to close. An
+- **Inbox items (#1417).** While guest sessions are on, a guest turn is offered `inbox_item` (about 550
+  more tokens of declaration a turn, 2,190 bytes on a 1,139-byte floor, and about 700 with `resolve_inbox_item`), and `resolve_inbox_item` once the guest has an item of its own to close. An
   item a guest raises is its client's (owner chain `guest:<clientId>`, so its sessions share it), shows
   `guest:<clientId>` as its source, and counts as having read outside content: a guest's timed veto is held
   for Brian at its deadline and never applies its default on its own. Its rate limit is the client's. Brian's
