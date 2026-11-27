@@ -234,8 +234,8 @@ enum CommandPattern {
     /// Tools with subcommands: the subcommands a prefix may be made for, and how many words the
     /// prefix keeps (2: `swift test`; 3: `npm run build`, `gh pr view`). Any other subcommand saves
     /// the exact command. Destructive or program-running git subcommands (`branch`, `checkout`,
-    /// `restore`, `stash`, `remote`, `reflog`, `tag`, `grep`) are left out; `rebase` is in, but never one that
-    /// can run a program (`rebaseRunsAProgram`), and of `worktree` only `add` (`prefix(for:)`), placed beside the workspace.
+    /// `restore`, `stash`, `remote`, `reflog`, `tag`, `grep`) are left out; `rebase` is in, with only the options in
+    /// `rebaseAllowedOptions`, and of `worktree` only `add` (`prefix(for:)`), placed beside the workspace.
     private static let subcommands: [String: [String: Int]] = [
         "git": Dictionary(uniqueKeysWithValues: [
             "status", "diff", "log", "show", "add", "commit", "switch", "fetch", "pull",
@@ -405,9 +405,8 @@ enum CommandPattern {
         if out.count >= 2, out[1] == "rebase", rebaseRunsAProgram(out.dropFirst(2)) { return nil }
         if enforceWorkspace, out.count >= 3, out[1] == "worktree", out[2] == "add" {
             // #1428: a new worktree goes beside the workspace or inside it, never anywhere else.
-            guard let ws = workspaceReal, let path = worktreeAddPath(out.dropFirst(3)) else { return nil }
-            let parent = (ws as NSString).deletingLastPathComponent
-            guard parent != "/", resolvedInsideWorkspace(path, cwd: cwd ?? ws, workspaceReal: parent) != nil else { return nil }
+            guard let ws = workspaceReal, let path = worktreeAddPath(out.dropFirst(3)),
+                  worktreeTargetAllowed(path, cwd: cwd ?? ws, workspaceReal: ws) else { return nil }
         }
         return out
     }
@@ -423,36 +422,56 @@ enum CommandPattern {
         return String(path)
     }
 
-    /// #1428: whether a `git rebase` could run a program of the call's choosing: `--exec`/`-x` runs a command, a
-    /// `--strategy`/`-s` runs `git-merge-<name>` from PATH, and `--interactive`/`-i` runs the configured editor. Any
-    /// spelling git accepts (an unambiguous long abbreviation, a short-option cluster) counts; refusing too much costs a prompt.
+    /// #1428 (planner's ruling on dev-1's #1434 review): the only options a covered `git rebase` may carry, each a whole
+    /// token as written here. Everything else can run a program
+    /// (`--exec`/`-x`, `--interactive`/`-i`, `--edit-todo` run a command or the sequence editor; `--strategy`/`-s` runs
+    /// `git-merge-<name>` from PATH; `-S` runs the configured gpg) or might, and git accepts any unambiguous long
+    /// abbreviation (`--in`), so a list of hazards can't be complete: an option off this list gets no prefix.
+    static let rebaseAllowedOptions: Set<String> = ["--onto", "--continue", "--abort", "--skip"]
+
     private static func rebaseRunsAProgram(_ args: ArraySlice<String>) -> Bool {
         args.contains { arg in
-            if arg.hasPrefix("--") {
-                let name = String(arg.dropFirst(2).prefix { $0 != "=" })
-                return (name.count >= 2 && "exec".hasPrefix(name)) || name.hasPrefix("exec")
-                    || (name.count >= 3 && ("strategy".hasPrefix(name) || name.hasPrefix("strategy")))
-                    || (name.count >= 3 && ("interactive".hasPrefix(name) || name.hasPrefix("interactive")))
-            }
-            return arg.hasPrefix("-") && arg.dropFirst().contains { "xsXi".contains($0) }
+            arg.hasPrefix("-") && !rebaseAllowedOptions.contains(arg)
         }
     }
 
-    /// The path a `git worktree add` creates, or nil for an option this doesn't know or no path.
+    /// The planner's ruling on dev-2's #1434 review: a new worktree is a direct child of the workspace's parent named
+    /// `<workspace's name>-…` (`~/src/iris-1434` beside `~/src/iris`), never when that parent is the home folder or above
+    /// it; or a folder inside the workspace with no component starting with `.`. The target is resolved with `realPath`
+    /// first, so a `..` or an existing link can't lead elsewhere. `home` is injectable so a test needs no real home.
+    static func worktreeTargetAllowed(_ path: String, cwd: String, workspaceReal: String,
+                                      home: String = IrisPaths.realPath(NSHomeDirectory())) -> Bool {
+        let target = IrisPaths.realPath((ToolExecutor.resolvePath(path, cwd: cwd) as NSString).standardizingPath)
+        let name = (target as NSString).lastPathComponent
+        let container = (target as NSString).deletingLastPathComponent
+        let parent = (workspaceReal as NSString).deletingLastPathComponent
+        if container == parent {
+            let sibling = (workspaceReal as NSString).lastPathComponent + "-"
+            return name.hasPrefix(sibling) && name.count > sibling.count
+                && parent != "/" && parent != home && !home.hasPrefix(parent + "/")
+        }
+        guard target.hasPrefix(workspaceReal + "/") else { return false }
+        return !target.dropFirst(workspaceReal.count).split(separator: "/").contains { $0.hasPrefix(".") }
+    }
+
+    /// The path a covered `git worktree add` creates: only `[-b <name>] [--detach] <path> [<commit-ish>]` (planner's
+    /// ruling, #1434), so nil for any other option, a value or positional starting with `-`, or more than two positionals.
     private static func worktreeAddPath(_ args: ArraySlice<String>) -> String? {
-        let valued: Set<String> = ["-b", "-B", "--reason"]
-        let plain: Set<String> = ["-f", "--force", "--detach", "-d", "--checkout", "--no-checkout", "--lock", "--orphan",
-                                  "-q", "--quiet", "--track", "--no-track", "--guess-remote", "--no-guess-remote"]
+        var positionals: [String] = []
         var i = args.startIndex
         while i < args.endIndex {
             let arg = args[i]
-            if arg == "--" { return i + 1 < args.endIndex ? args[i + 1] : nil }
-            if !arg.hasPrefix("-") { return arg }
-            if valued.contains(arg) { i += 2; continue }
-            if arg.hasPrefix("--reason=") || plain.contains(arg) { i += 1; continue }
-            return nil
+            if arg == "-b" {
+                guard i + 1 < args.endIndex, !args[i + 1].hasPrefix("-") else { return nil }
+                i += 2
+                continue
+            }
+            if arg == "--detach" { i += 1; continue }
+            guard !arg.hasPrefix("-") else { return nil }
+            positionals.append(arg)
+            i += 1
         }
-        return nil
+        return (1...2).contains(positionals.count) ? positionals[0] : nil
     }
 
     /// The prefix an Always Allow saves for one part, or nil when this part gets none.

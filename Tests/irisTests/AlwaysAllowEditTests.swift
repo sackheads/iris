@@ -170,6 +170,25 @@ struct AlwaysAllowEditResolveTests {
         #expect(state.permissions.isAllowed(toolName: "run_command", details: "cd Sources && swift build -c release", workspace: workspace, isOwner: true))
     }
 
+    @Test("a script's Always Allow (Global) saves nothing and says use the project; in project it saves (#1434)")
+    func scriptGlobalRefused() async throws {
+        let (state, root) = try rig()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let (workspace, _) = try workspaces(root)
+        try FileManager.default.createDirectory(atPath: workspace + "/scripts", withIntermediateDirectories: true)
+        try "#!/bin/sh\n".write(toFile: workspace + "/scripts/test-filter.sh", atomically: true, encoding: .utf8)
+        let cid = state.createNewConversation(isBackground: false, select: false)
+        func allowed() -> Bool {
+            state.permissions.isAllowed(toolName: "run_command", details: "scripts/test-filter.sh Bar", workspace: workspace, isOwner: true)
+        }
+        _ = try await resolve(state, "scripts/test-filter.sh Foo", .alwaysAllowGlobal, choice: .proposed, in: cid, workspace: workspace)
+        #expect(!allowed())
+        let notes = (state.conversations.first { $0.id == cid }?.messages ?? []).map(\.content).joined(separator: "\n")
+        #expect(notes.contains(ToolApprovalRequest.scriptGlobalMessage))
+        _ = try await resolve(state, "scripts/test-filter.sh Foo", .alwaysAllowProject, choice: .proposed, in: cid, workspace: workspace)
+        #expect(allowed())
+    }
+
     @Test("a narrowed rule is saved and matches only what it names")
     func narrowedSaved() async throws {
         let (state, root) = try rig()

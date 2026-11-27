@@ -28,6 +28,9 @@ struct PermissionRule: Codable, Equatable, Sendable {
     var match: Match? = nil
 
     var isPrefix: Bool { match == .prefix }
+    /// #1434: a prefix for a workspace script (`scripts/test-filter.sh`), a different program in every repo, so it is
+    /// saved and matched only as a project rule.
+    var isScriptPrefix: Bool { isPrefix && details.split(separator: " ").first?.contains("/") == true }
     var isDirectory: Bool { match == .directory }
     var isExact: Bool { match == nil || match == .exact }
 
@@ -47,6 +50,8 @@ struct PermissionRule: Codable, Equatable, Sendable {
     static func alwaysAllowOffer(toolName: String, details: String, workspace: String?) -> (rules: [PermissionRule], withheld: String?) {
         let rules = forAlwaysAllow(toolName: toolName, details: details)
         guard toolName == "run_command" else { return (rules, nil) }
+        // A script rule is a project rule, and with no workspace there is no project to save it in.
+        if workspace == nil, rules.contains(where: \.isScriptPrefix) { return ([], ToolApprovalRequest.scriptNeedsWorkspaceMessage) }
         let prefixes = rules.filter(\.isPrefix).map { $0.details.split(separator: " ").map(String.init) }
         let coversThisCall = !prefixes.isEmpty && CommandPattern.matchedPrefixes(details, prefixes: prefixes, workspace: workspace) != nil
         if CommandPattern.isCompound(details) {
@@ -167,7 +172,8 @@ struct PermissionManager: Sendable {
         // an unattended run has its grant, and a standing rule widened for a person's convenience is
         // not one to read unwatched.
         if toolName == "run_command", !isBackground {
-            let prefixRules = (globalRules.map { ($0, AllowMatch.Scope.global) } + projectRules.map { ($0, AllowMatch.Scope.project) })
+            let prefixRules = (globalRules.filter { !$0.isScriptPrefix }.map { ($0, AllowMatch.Scope.global) }
+                               + projectRules.map { ($0, AllowMatch.Scope.project) })
                 .filter { $0.0.toolName == toolName && $0.0.isPrefix }
             let prefixes = prefixRules.map { $0.0.details.split(separator: " ").map(String.init) }
             if let used = CommandPattern.matchedPrefixes(details, prefixes: prefixes, workspace: workspace) {

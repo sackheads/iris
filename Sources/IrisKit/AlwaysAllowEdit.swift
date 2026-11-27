@@ -11,6 +11,8 @@ struct AlwaysAllowRefusal: Error, Equatable {
 extension ToolApprovalRequest {
     static let leavesWorkspaceMessage = "This command leaves the workspace, so Always allow can't cover it. Set the conversation's workspace to that folder instead."
     static let oneOffChainMessage = "This chain has a command Always allow can't generalise, so it's Allow once only."
+    static let scriptGlobalMessage = "A workspace script's rule is saved per project: use Always allow in project."
+    static let scriptNeedsWorkspaceMessage = "A workspace script's rule is saved per project, and this conversation has no workspace, so it's Allow once only."
     static let exactCompoundMessage = "A chain or a cd is saved as its commands' rules, never as its exact text."
 
     /// #1428: a click never saves a rule that wouldn't match the very call it came from (a `cd` to a sibling worktree

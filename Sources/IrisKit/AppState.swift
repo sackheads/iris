@@ -6094,7 +6094,14 @@ class AppState {
             // did approve it — only the standing rule is refused. The same for a gate script
             // (#648): `offersAlwaysAllow` is off for both.
             if pending.offersAlwaysAllow, let rules = alwaysAllowRulesToSave(pending, choice) {
-                permissions.allowGlobally(rules)
+                // #1434: a script rule names a different program in every repo, so it is never global.
+                if rules.contains(where: \.isScriptPrefix) {
+                    if let id = pending.conversationId {
+                        appendMessage(role: .system, content: "Always Allow wasn't saved: \(ToolApprovalRequest.scriptGlobalMessage) This call was approved once.", to: id)
+                    }
+                } else {
+                    permissions.allowGlobally(rules)
+                }
             }
             approved = true
         case .alwaysAllowProject:
