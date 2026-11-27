@@ -143,6 +143,19 @@ struct GuestInboxTests {
         #expect(try app.store.inbox.openItems().isEmpty)
     }
 
+    /// Dispatch refuses these first, so this calls the emit step directly: the same rule where the item is made.
+    @Test("past dispatch, the emit step refuses a guest's route_back or notify too", arguments: ["route_back", "notify"])
+    func emitLayerRefusesRouting(argument: String) async throws {
+        let app = try await app()
+        let id = guest(app)
+        let e = await engine(app, client: FakeLLMClient(responses: []))
+        var args = basic
+        args[argument] = .array([.string("role:reviewer")])
+        let text = await e.emitToInboxForTesting(args: args, from: id, store: app.store)
+        #expect(text == GuestToolset.inboxArgumentRefusal(argument))
+        #expect(try app.store.inbox.openItems().isEmpty)
+    }
+
     /// Only the dispatch layer reads arguments outside the schema; the emit layer checks routing alone, so this row
     /// is what a dropped dispatch check fails.
     @Test("a guest's inbox_item with an argument outside its schema is refused at dispatch")

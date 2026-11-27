@@ -1741,6 +1741,11 @@ actor IrisEngine {
         }
     }
 
+    /// The emit step alone, past dispatch, so a test can reach the layer dispatch would refuse first (#1430 review).
+    func emitToInboxForTesting(args: [String: JSONValue], from conversationId: UUID, store: ConversationStore) async -> String {
+        await emitToInbox(args: args, from: conversationId, store: store)
+    }
+
     private func emitToInbox(args: [String: JSONValue], from conversationId: UUID, store: ConversationStore) async -> String {
         guard let title = args["title"]?.stringValue.trimmingCharacters(in: .whitespaces), !title.isEmpty else {
             return "A title is required."
