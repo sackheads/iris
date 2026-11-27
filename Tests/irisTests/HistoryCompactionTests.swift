@@ -76,6 +76,49 @@ struct HistoryCompactionPlanTests {
         #expect(HistoryCompaction.summaryPrompt(history, plan: plan, ownerTexts: [], settings: .init()).contains("<folded_owner_messages>"))
     }
 
+    /// dev-2's #1431 probe: one 40 KB owner paste and 12 ticks under a 20 KB cap made a 57 KB prompt.
+    private func pasteHistory() -> (history: [Content], paste: String) {
+        let paste = "PASTE-START " + String(repeating: "log line\n", count: 4_500)   // ~40 KB, folded alone
+        var history = [user(paste), model("ok")]
+        for n in 1...12 { history += [user("Loop tick \(n) of 50. \(String(repeating: "t", count: 600))"), model(String(repeating: "m", count: 600))] }
+        return (history, paste)
+    }
+
+    @Test("the cap covers the whole summary prompt: the folded section is cut with a marker (#1432)")
+    func summaryPromptWithinCap() throws {
+        let (history, paste) = pasteHistory()
+        let plan = try #require(HistoryCompaction.plan(history, ownerTexts: [paste], settings: .init(budget: 100, tail: 10), contextWindow: 128_000))
+        #expect(plan.foldedOwner == [paste])
+        let prompt = HistoryCompaction.summaryPrompt(history, plan: plan, ownerTexts: [paste], settings: .init(maxSummaryInputBytes: 20_000))
+        #expect(prompt.utf8.count <= 20_000, "\(prompt.utf8.count) bytes")
+        #expect(prompt.contains("PASTE-START") && prompt.contains(HistoryCompaction.truncatedMarker))
+        #expect(prompt.contains("Loop tick 11 of 50"), "the newest transcript lines still fit")
+    }
+
+    @Test("a folded message is never also an owner: transcript line (#1432)")
+    func foldedNotRepeated() throws {
+        let (history, paste) = pasteHistory()
+        let plan = try #require(HistoryCompaction.plan(history, ownerTexts: [paste], settings: .init(budget: 100, tail: 10), contextWindow: 128_000))
+        let prompt = HistoryCompaction.summaryPrompt(history, plan: plan, ownerTexts: [paste], settings: .init())
+        #expect(prompt.components(separatedBy: "PASTE-START").count == 2, "once, in the folded section")
+        #expect(!prompt.contains(HistoryCompaction.truncatedMarker), "under the default cap nothing is cut")
+    }
+
+    @Test("past the cap the oldest folded messages go first, counted; a long previous summary is cut, marked (#1432)")
+    func oldestFoldedGoFirst() throws {
+        let older = (1...3).map { "older-\($0) " + String(repeating: "o", count: 3_000) }
+        let newest = "newest " + String(repeating: "n", count: 1_000)
+        let plan = HistoryCompaction.Plan(cut: 2, turns: 1, tokensBefore: 0, tokensCompacted: 0, ownerParts: [],
+                                          foldedOwner: older + [newest], priorSummary: String(repeating: "s", count: 30_000),
+                                          overHardLimit: false)
+        let history = [user("Loop tick 1 of 50."), model("ok"), user("Loop tick 2 of 50."), model("ok")]
+        let prompt = HistoryCompaction.summaryPrompt(history, plan: plan, ownerTexts: [], settings: .init(maxSummaryInputBytes: 12_000))
+        #expect(prompt.utf8.count <= 12_000, "\(prompt.utf8.count) bytes")
+        #expect(prompt.contains("newest") && !prompt.contains("older-1"))
+        #expect(prompt.contains("older folded owner messages truncated]"))
+        #expect(prompt.contains("<previous_summary>") && prompt.contains("s" + HistoryCompaction.truncatedMarker))
+    }
+
     @Test("the budget is capped at half the model's context")
     func budgetCap() {
         #expect(HistoryCompaction.budget(.init(budget: 500_000), contextWindow: 200_000) == 100_000)
