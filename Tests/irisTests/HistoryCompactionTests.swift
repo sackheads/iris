@@ -99,9 +99,10 @@ struct HistoryCompactionPlanTests {
     func foldedNotRepeated() throws {
         let (history, paste) = pasteHistory()
         let plan = try #require(HistoryCompaction.plan(history, ownerTexts: [paste], settings: .init(budget: 100, tail: 10), contextWindow: 128_000))
-        let prompt = HistoryCompaction.summaryPrompt(history, plan: plan, ownerTexts: [paste], settings: .init())
+        // A cap with room for the paste twice, so only the skip keeps it out of the transcript.
+        let prompt = HistoryCompaction.summaryPrompt(history, plan: plan, ownerTexts: [paste], settings: .init(maxSummaryInputBytes: 400_000))
         #expect(prompt.components(separatedBy: "PASTE-START").count == 2, "once, in the folded section")
-        #expect(!prompt.contains(HistoryCompaction.truncatedMarker), "under the default cap nothing is cut")
+        #expect(!prompt.contains(HistoryCompaction.truncatedMarker), "nothing is cut when it fits")
     }
 
     @Test("past the cap the oldest folded messages go first, counted; a long previous summary is cut, marked (#1432)")
