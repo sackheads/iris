@@ -89,6 +89,9 @@ enum VCSTool {
     /// executor knows whose policy applies. Nil means no caller, and every action refuses.
     @TaskLocal static var caller: Caller?
 
+    /// Set where every turn starts (`IrisEngine.processInput`): whether the owner typed this one (source `UI`).
+    @TaskLocal static var ownerTypedTurn = false
+
     static func execute(args: [String: JSONValue], client: GitHubProxyClient,
                         policy: VCSPolicyStore = .shared) async -> String {
         guard let caller else { return noCallerRefusal }

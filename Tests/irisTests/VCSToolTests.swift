@@ -139,7 +139,7 @@ struct VCSToolTests {
     }
 
     @Test("a protected path in the branch, or a rename out of one, refuses the PR before it's opened", arguments: [
-        ["filename": ".github/workflows/test.yml"], ["filename": "CODEOWNERS"], ["filename": "docs/specs/x.md"],
+        ["filename": ".github/workflows/test.yml"], ["filename": ".github/actions/setup/action.yml"], ["filename": "CODEOWNERS"], ["filename": "docs/specs/x.md"],
         ["filename": ".GitHub/Workflows/x.yml"], ["filename": "docs/x.md", "previous_filename": "docs/plans/x.md"],
     ])
     func protectedPathRefuses(_ file: [String: String]) async throws {
@@ -200,6 +200,7 @@ struct VCSToolDispatchTests {
         var peerInput = false
         var guestOrigin = false
         var principal: Principal = .main
+        var source = "UI"
     }
 
     private func app(_ shape: Shape) -> (AppState, UUID) {
@@ -230,7 +231,7 @@ struct VCSToolDispatchTests {
         ])
         let engine = IrisEngine(state: app, tier: .medium, principal: shape.principal, client: client, retryDelays: [],
                                 protectionEnabled: false, sessionPeerCount: 0, githubToolsEnabled: true)
-        let turn = Task { await engine.processInput("go", source: "UI", conversationId: id) }
+        let turn = Task { await engine.processInput("go", source: shape.source, conversationId: id) }
         try await value(of: turn)
         let responses = app.conversations.first { $0.id == id }?.history.flatMap { $0.parts }.compactMap { $0.functionResponse } ?? []
         return responses.compactMap { $0.response["result"]?.stringValue }.joined(separator: "\n")
@@ -264,6 +265,23 @@ struct VCSToolDispatchTests {
         #expect(refusedForTaint(result), Comment(rawValue: result))
     }
 
+    @Test("a loop tick, an alarm or an answer in a tainted conversation isn't the owner's turn: its writes are refused, in the owner's own conversation and in a role's (dev-2's and dev-3's reviews)",
+          arguments: [IrisEngine.loopSource, IrisEngine.systemSource, IrisEngine.inboxAnswerSource], ["pr_comment", "pr_create"])
+    func nonTypedTurnTaintedRefused(_ source: String, _ action: String) async throws {
+        let result = try await dispatch(action, Shape(tainted: true, source: source))
+        #expect(!reachedClient(result), Comment(rawValue: result))
+        let roleResult = try await dispatch(action, Shape(role: "pilot", tainted: true, source: source))
+        #expect(refusedForTaint(roleResult), Comment(rawValue: roleResult))
+    }
+
+    @Test("a tick in the owner's own clean conversation with no role has no caller: the owner policy is for typed turns")
+    func tickHasNoOwnerCaller() async throws {
+        let result = try await dispatch("pr_view", Shape(source: IrisEngine.loopSource))
+        #expect(!reachedClient(result), Comment(rawValue: result))
+        #expect(!(await offered(Shape(source: IrisEngine.loopSource))).contains(VCSTool.name))
+        #expect(await offered(Shape(role: "pilot", source: IrisEngine.loopSource)).contains(VCSTool.name))
+    }
+
     @Test("an unattended tainted pr_view still runs: it's a read")
     func taintedReadRuns() async throws {
         let result = try await dispatch("pr_view", Shape(role: "pilot", background: true, tainted: true))
@@ -282,7 +300,7 @@ struct VCSToolDispatchTests {
         let client = CapturingLLMClient(reply: "ok")
         let engine = IrisEngine(state: app, tier: .medium, principal: shape.principal, client: client, retryDelays: [],
                                 sessionPeerCount: 0, githubToolsEnabled: true)
-        await engine.processInput("hello", source: "UI", conversationId: id)
+        await engine.processInput("hello", source: shape.source, conversationId: id)
         return client.requests.first?.tools?.flatMap { $0.functionDeclarations.map(\.name) } ?? []
     }
 

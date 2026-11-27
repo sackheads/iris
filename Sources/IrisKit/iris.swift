@@ -3893,7 +3893,11 @@ actor IrisEngine {
                 await Self.$turnTier.withValue(tier) {
                 await Self.$agentToolScope.withValue(scope) {
                     await PerformanceProfiler.$currentTurnID.withValue(turnID) {
-                        await processInputBody(input, source: source, conversationId: conversationId, inlineParts: inlineParts, restrictToGoalComplete: restrictToGoalComplete, turnBudget: turnBudget, usageSink: usageSink, goalFacts: goalFacts, agentProfile: agentProfile)
+                        // #1435 (dev-2's review): only a turn the owner typed is the owner's; a tick, an alarm,
+                        // an event or an answer in their own conversation isn't.
+                        await VCSTool.$ownerTypedTurn.withValue(source == "UI") {
+                            await processInputBody(input, source: source, conversationId: conversationId, inlineParts: inlineParts, restrictToGoalComplete: restrictToGoalComplete, turnBudget: turnBudget, usageSink: usageSink, goalFacts: goalFacts, agentProfile: agentProfile)
+                        }
                     }
                 }
                 }
@@ -6603,15 +6607,18 @@ actor IrisEngine {
     }
 
     /// #1435: whose `vcs` policy a call on this conversation's current turn acts under, whether the conversation has
-    /// read outside text, and whether the owner is attending the turn (`AppState.isOwnerAttended`, which a peer- or
-    /// guest-started turn never is, and a background run isn't either).
+    /// read outside text, and whether the owner is attending the turn: one they typed (`VCSTool.ownerTypedTurn`, so
+    /// never a loop tick, an alarm or an event), in a conversation `AppState.isOwnerAttended` says is theirs (never
+    /// peer- or guest-started, never a background run).
     func vcsTurn(_ conversationId: UUID) async -> (caller: VCSTool.Caller?, tainted: Bool, ownerAttended: Bool) {
         let guestOrigin = await isGuestOriginConversation(conversationId)
         let localState = state
         let principal = self.principal
+        let ownerTypedTurn = VCSTool.ownerTypedTurn
         return await MainActor.run {
             let conversation = localState?.conversations.first { $0.id == conversationId }
-            let ownerAttended = conversation?.isBackground == false && localState?.isOwnerAttended(conversationId) == true
+            let ownerAttended = ownerTypedTurn && conversation?.isBackground == false
+                && localState?.isOwnerAttended(conversationId) == true
             let caller = VCSTool.caller(principal: principal, guestOrigin: guestOrigin, role: conversation?.role,
                                         ownerAttended: ownerAttended)
             return (caller, conversation?.hasUntrustedToolOutput == true, ownerAttended)
