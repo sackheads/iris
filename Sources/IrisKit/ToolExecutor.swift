@@ -445,7 +445,7 @@ struct ToolExecutor {
             guard let name = args["name"]?.stringValue else { return "Error: Missing name for delete_skill" }
             return await deleteSkill(name: name)
         case VCSTool.name:
-            return await VCSTool.execute(args: args, client: githubClient ?? GitHubProxyClient())
+            return await VCSTool.execute(args: args, client: githubClient ?? GitHubProxyClient(), workspace: cwd)
         case "github_approve":
             guard let repo = args["repo"]?.stringValue else { return "Error: github_approve needs repo and pr" }
             guard let pr = Self.positiveInt(args["pr"]) else { return "Error: github_approve needs a positive pr number" }

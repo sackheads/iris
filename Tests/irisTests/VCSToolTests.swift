@@ -223,6 +223,7 @@ struct VCSToolDispatchTests {
         let (app, id) = app(shape)
         var args: [String: JSONValue] = ["action": .string(action), "repo": .string("sackheads/iris"), "pr": .int(5), "body": .string("hi")]
         if action == "pr_create" { args["head"] = .string("agent/pilot/x"); args["title"] = .string("t") }
+        if action == "push" { args["branch"] = .string("agent/pilot/x") }
         let call = FunctionCall(name: VCSTool.name, args: args)
         let part = Part(text: nil, functionCall: call, functionResponse: nil, thought_signature: nil, thoughtSignature: nil)
         let client = FakeLLMClient(responses: [
@@ -280,6 +281,18 @@ struct VCSToolDispatchTests {
         #expect(!reachedClient(result), Comment(rawValue: result))
         #expect(!(await offered(Shape(source: IrisEngine.loopSource))).contains(VCSTool.name))
         #expect(await offered(Shape(role: "pilot", source: IrisEngine.loopSource)).contains(VCSTool.name))
+    }
+
+    @Test("push is under the taint gate: refused unattended or peer-started on a tainted conversation, run on the owner's typed turn (planner, #1435 slice 2)")
+    func pushUnderTaintGate() async throws {
+        let unattended = try await dispatch("push", Shape(role: "pilot", background: true, tainted: true))
+        #expect(refusedForTaint(unattended), Comment(rawValue: unattended))
+        let peer = try await dispatch("push", Shape(role: "pilot", tainted: true, peerInput: true))
+        #expect(refusedForTaint(peer), Comment(rawValue: peer))
+        let tick = try await dispatch("push", Shape(role: "pilot", tainted: true, source: IrisEngine.loopSource))
+        #expect(refusedForTaint(tick), Comment(rawValue: tick))
+        let typed = try await dispatch("push", Shape(tainted: true))
+        #expect(!refusedForTaint(typed) && reachedClient(typed), Comment(rawValue: typed))
     }
 
     @Test("an unattended tainted pr_view still runs: it's a read")
