@@ -6041,9 +6041,9 @@ actor IrisEngine {
     /// `sanitizeArrival`, which taints then.
     nonisolated static func resultCarriesOutsideContent(_ name: String, args: [String: JSONValue]) -> Bool {
         if resultIsIrisOwnWords.contains(name) { return false }
-        // #1435: a `vcs` write returns a fixed sentence, a PR number and a checked github.com link, or a refusal
-        // (GitHub's own short error included), never another person's text; `pr_view` and `pr_checks` do.
-        if name == VCSTool.name, (args["action"]?.stringValue).flatMap(VCSTool.Action.init(rawValue:))?.writes == true { return false }
+        // #1435: only `vcs`'s `pr_view` and `pr_checks` return another person's text (`returnsOthersWords`); an unknown
+        // action taints, the safe side.
+        if name == VCSTool.name, (args["action"]?.stringValue).flatMap(VCSTool.Action.init(rawValue:))?.returnsOthersWords == false { return false }
         if name == "read_file" {
             let path = args["path"]?.stringValue.trimmingCharacters(in: .whitespaces).lowercased() ?? ""
             return path.hasPrefix(ArtifactURI.scheme)

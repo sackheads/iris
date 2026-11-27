@@ -223,7 +223,7 @@ struct IrisPaths: Sendable {
 
     /// The protected directories as a phrase for a refusal, from `protectedWriteDirs` itself so a text
     /// that names them cannot drift from the check that refuses (#889): "`config/`, `plugins/`,
-    /// `exchange/` or `profiles/`". `prefix` goes before each name (`~/.iris/`), and `slash` is
+    /// `exchange/`, `profiles/` or `vcs/`". `prefix` goes before each name (`~/.iris/`), and `slash` is
     /// the trailing "/".
     static func protectedWriteDirPhrase(prefix: String = "", slash: Bool = true) -> String {
         let names = Self.default.protectedWriteDirs.map { "`\(prefix)\($0.lastPathComponent)\(slash ? "/" : "")`" }

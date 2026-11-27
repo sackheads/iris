@@ -19,6 +19,11 @@ enum VCSTool {
         /// the owner didn't type (`taintRefusal`). `push` is one (planner, #1435; `VCSToolTests` pins every action
         /// but the reads).
         var writes: Bool { self == .push || self == .prCreate || self == .prComment }
+
+        /// What brings others' words back: `pr_view` and `pr_checks`. Every other action returns Iris's own sentence,
+        /// a ref name, a commit id or GitHub's short error, so its result doesn't taint (a fetched commit's contents
+        /// taint when a tool reads them).
+        var returnsOthersWords: Bool { self == .prView || self == .prChecks }
     }
 
     enum Caller: Equatable, Sendable {

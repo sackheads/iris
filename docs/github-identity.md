@@ -31,6 +31,11 @@ happens: a repo not on the list sends nothing.
 - **`vcs(action, repo, …)`** (#1435): an agent's pull requests, under a policy the tool enforces
   rather than an approval prompt.
   - **Actions:**
+    - `fetch`: GitHub's `main` (and a `branch`, if given) into the workspace as `origin/<name>`. Nothing is
+      checked out.
+    - `push`: the workspace's `branch` to GitHub's branch of the same name. It's never `main`, and a role pushes
+      only `agent/<role>/…`. With `force`, it replaces GitHub's branch under a lease on what GitHub had a moment
+      before.
     - `pr_create`: a draft into `main`, from a branch already pushed. `draft` defaults to `true`.
     - `pr_comment`
     - `pr_view`: state, branches and description.
@@ -40,16 +45,25 @@ happens: a repo not on the list sends nothing.
       `agent/<role>/`.
     - Your own attended conversation, from any branch but `main`.
     - Never a subagent, evaluator, MCP guest, or a turn a guest's message started or steered.
+  - **Through a mirror** (#1435 slice 2): `fetch` and `push` go through a bare mirror Iris owns under
+    `~/.iris/vcs/`, a protected folder. The workspace never talks to the network. The mirror fetches the branch
+    out of it, and `fetch` writes refs into it with a fetch that runs in it with Iris's settings forced.
+    Neither step runs the workspace's hooks, filters, diff drivers, `core.fsmonitor` or `url.insteadOf`. A
+    symlinked `.git`, or one pointing into Iris's folder, is refused.
+  - **`push`'s checks, in the mirror:** no protected path in any of the branch's commits (one added and then
+    removed still counts), at most 300 files and 5 MB of new content, and no symbolic link pointing outside the
+    repository.
   - **Protected paths:** `pr_create` first lists the branch's changed files (a rename's source
     included). It refuses one under a protected path:
     - `.github/workflows/`, `.github/actions/`, `CODEOWNERS`, `docs/plans/`, `docs/specs/` and `.gitmodules`;
-    - it's checked when the PR is opened only, so a later push to the branch isn't re-checked until slice 2's `vcs push`;
+    - `pr_create` checks it when the PR is opened, and `vcs push` checks it on every push. A push made some other
+      way (host git, while it still holds the credential) isn't checked;
     - the list lives in `~/.iris/config/vcs-policy.json`, a protected file, and an unreadable one
       refuses every `pr_create`.
-  - **The taint gate:** on a conversation that has read outside text, `pr_create` and `pr_comment`
+  - **The taint gate:** on a conversation that has read outside text, `push`, `pr_create` and `pr_comment`
     run only on your own attended turn, where you see the call. Unattended, or on a turn a peer
-    started, they're refused and the result says it needs you. `pr_view` and `pr_checks` are reads
-    and always run, and what they return taints the conversation.
+    started, they're refused and the result says it needs you. `fetch`, `pr_view` and `pr_checks` are reads
+    and always run. What `pr_view` and `pr_checks` return taints the conversation; `fetch` returns only commit ids.
 - **`github_approve(repo, pr)`**: attended, non-guest-origin main conversation only. It submits an `APPROVE` review as the account, but only if the PR
   is open and every changed file (including a rename's source path) is under `docs/` or `assets/`
   and not inside a `plans/` or `specs/` folder of `docs/` at any depth (those are instructions that
@@ -71,8 +85,7 @@ as the control — see "What the credential is," below).
 ## The account as a git contributor
 
 Beyond the two tools, `run_command`'s own host git also acts as the account when it touches an
-allowed repo. This is what lets Iris push the branch `vcs`'s `pr_create` then opens a PR from. #1435
-moves pushing into `vcs` too, and later takes the credential off agent git.
+allowed repo. #1435 moved pushing into `vcs push`, and a later slice takes the credential off agent git.
 
 - **Identity.** Commits attribute to the account (`user.name` is its username, `user.email` GitHub's
   `<id>+<account>@users.noreply.github.com` noreply address — no separate email to configure). The
