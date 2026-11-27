@@ -278,6 +278,16 @@ struct GuestInboxTests {
         #expect(host.calls.isEmpty)
     }
 
+    @Test("a poll returning the hold notice acks only that notice: the item stays open for Brian")
+    func heldNoticeAckIsInert() async throws {
+        let app = try await app()
+        let item = try guestItem(app)
+        let engine = await hostEngine(app, sink: GuestSink())
+        await engine.guestInboxAnswerSeen(itemId: item.id, target: "held:guest:dev-1")
+        let after = try #require(try app.store.inbox.item(id: item.id))
+        #expect(after.state == .open && after.answer == nil && after.pendingTargets.isEmpty)
+    }
+
     @Test("a guest's chain is never gone to the stale sweep: its conversation is reaped with every session")
     func guestChainNeverGone() {
         #expect(!IrisEngine.inboxChainGone("guest:dev-1", in: []))
