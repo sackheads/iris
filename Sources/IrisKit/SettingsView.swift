@@ -1111,7 +1111,11 @@ struct SettingsView: View {
                     Stepper("Loop tick limit: \(config.loopTickCap)",
                             value: Binding(get: { config.loopTickCap },
                                            set: { config.loopTickCap = max(1, $0) }), in: 1...500)
-                        .help("How many times a /loop runs before it stops. Each tick sends the whole conversation so far, so each one costs a little more than the last. Running /loop again renews it.")
+                        .help("How many times a /loop runs before it stops. Each tick sends the conversation so far, so each one costs a little more than the last, until the history is compacted (below). Running /loop again renews it.")
+                    Stepper("Compact loop history past: \(config.historyCompactionBudget / 1000)k tokens",
+                            value: Binding(get: { config.historyCompactionBudget },
+                                           set: { config.historyCompactionBudget = max(8_000, $0) }), in: 8_000...500_000, step: 8_000)
+                        .help("Once a loop's or goal's history passes this (estimated), its next turn replaces the older turns with a summary, keeping the recent ones and every message you typed verbatim. At most half the model's context.")
                     // Steps a minute at a time over the stored seconds, so a hand-edited 90 stays 90.
                     Stepper("Subagent turn timeout: \(SubagentManager.describe(seconds: Double(config.subagentTurnTimeoutSeconds)))",
                             value: Binding(get: { config.subagentTurnTimeoutSeconds },

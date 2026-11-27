@@ -564,6 +564,12 @@ class ConfigManager: @unchecked Sendable {
     }
     /// How many ticks a `/loop` runs before it stops (#190): its spend bound, since every tick
     /// resends the whole conversation. Re-running `/loop` renews it.
+    /// #1421: estimated history tokens past which a loop or goal conversation compacts at its next turn. Capped at
+    /// half the model's context by `HistoryCompaction.budget`.
+    var historyCompactionBudget: Int {
+        didSet { store.set(historyCompactionBudget, forKey: "HISTORY_COMPACTION_BUDGET") }
+    }
+
     var loopTickCap: Int {
         didSet { persistGuarded(.loopTickCap) { $0.set(loopTickCap, forKey: "LOOP_TICK_CAP") } }
     }
@@ -962,6 +968,8 @@ class ConfigManager: @unchecked Sendable {
         self.maxSubagentIterations = savedSubagentIters <= 0 ? Self.defaultMaxSubagentIterations : savedSubagentIters
         let savedLoopCap = guardedInt(.loopTickCap, "LOOP_TICK_CAP")
         self.loopTickCap = savedLoopCap <= 0 ? Self.defaultLoopTickCap : savedLoopCap
+        let savedCompaction = saved.integer(forKey: "HISTORY_COMPACTION_BUDGET")
+        self.historyCompactionBudget = savedCompaction <= 0 ? HistoryCompaction.defaultBudget : savedCompaction
         let savedTurnTimeout = guardedInt(.subagentTurnTimeoutSeconds, "SUBAGENT_TURN_TIMEOUT_SECONDS")
         self.subagentTurnTimeoutSeconds = savedTurnTimeout <= 0 ? Self.defaultSubagentTurnTimeoutSeconds : savedTurnTimeout
         let savedLoop = saved.integer(forKey: "LOOP_DETECTION_THRESHOLD")

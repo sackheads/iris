@@ -308,14 +308,17 @@ struct SessionCard: Codable, Equatable, Sendable {
     var skills: [AgentSkill] = []
     /// #696: the topics this session subscribes to, normalised names (`Topics.normalize`).
     var topics: [String] = []
+    /// #1421: turns of this session's history dropped without a summary (the hard limit), so a peer or the owner
+    /// reading the card knows state was lost. Zero for nearly every session.
+    var historyTurnsOmitted: Int = 0
 
     init(name: String, description: String, updatedAt: Date = Date(), lane: String? = nil,
-         skills: [AgentSkill] = [], topics: [String] = []) {
+         skills: [AgentSkill] = [], topics: [String] = [], historyTurnsOmitted: Int = 0) {
         self.name = name; self.description = description; self.updatedAt = updatedAt
-        self.lane = lane; self.skills = skills; self.topics = topics
+        self.lane = lane; self.skills = skills; self.topics = topics; self.historyTurnsOmitted = historyTurnsOmitted
     }
 
-    enum CodingKeys: String, CodingKey { case name, description, updatedAt, lane, skills, topics }
+    enum CodingKeys: String, CodingKey { case name, description, updatedAt, lane, skills, topics, historyTurnsOmitted }
 
     // Invariant 1: every card stored before #469 lacks lane and skills.
     init(from decoder: Decoder) throws {
@@ -326,6 +329,7 @@ struct SessionCard: Codable, Equatable, Sendable {
         lane = try c.decodeIfPresent(String.self, forKey: .lane)
         skills = try c.decodeIfPresent([AgentSkill].self, forKey: .skills) ?? []
         topics = try c.decodeIfPresent([String].self, forKey: .topics) ?? []
+        historyTurnsOmitted = try c.decodeIfPresent(Int.self, forKey: .historyTurnsOmitted) ?? 0
     }
 }
 
@@ -4593,6 +4597,35 @@ class AppState {
         }
     }
     
+    /// #1421: replaces `history[..<cut]` with `head`, if the history still starts as it did when the compaction was
+    /// planned (`expected` entries, the first `cut` unchanged). Only appends happen at a turn's start, so it nearly
+    /// always does; anything else and nothing is replaced. True when it was. `omitted` turns are counted on the card.
+    @discardableResult
+    func applyHistoryCompaction(for conversationId: UUID, cut: Int, head: Content, expected: [Content], omitted: Int = 0) -> Bool {
+        guard let idx = conversations.firstIndex(where: { $0.id == conversationId }) else { return false }
+        let history = conversations[idx].history
+        guard history.count >= expected.count, cut <= expected.count,
+              Self.sameEntries(history[..<cut], expected[..<cut]) else { return false }
+        conversations[idx].history = [head] + history[cut...]
+        markChanged(conversationId, .historyReplaced)
+        if omitted > 0, var card = conversations[idx].sessionCard {
+            card.historyTurnsOmitted += omitted
+            conversations[idx].sessionCard = card
+            markChanged(conversationId, .metadata)
+        }
+        return true
+    }
+
+    /// The same entries by role, shape and words: not by encoding, whose dictionary key order isn't stable.
+    private static func sameEntries(_ a: ArraySlice<Content>, _ b: ArraySlice<Content>) -> Bool {
+        a.count == b.count && zip(a, b).allSatisfy { x, y in
+            x.role == y.role && x.parts.count == y.parts.count
+                && x.parts.map(\.text) == y.parts.map(\.text)
+                && x.parts.map { $0.functionCall?.name } == y.parts.map { $0.functionCall?.name }
+                && x.parts.map { $0.functionResponse?.name } == y.parts.map { $0.functionResponse?.name }
+        }
+    }
+
     func appendContentsToHistory(for conversationId: UUID, contents: [Content]) {
         if let idx = conversations.firstIndex(where: { $0.id == conversationId }) {
             conversations[idx].history.append(contentsOf: contents)
