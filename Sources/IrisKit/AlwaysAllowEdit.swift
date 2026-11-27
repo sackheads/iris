@@ -9,7 +9,21 @@ struct AlwaysAllowRefusal: Error, Equatable {
 }
 
 extension ToolApprovalRequest {
+    static let leavesWorkspaceMessage = "This command leaves the workspace, so Always allow can't cover it. Set the conversation's workspace to that folder instead."
+
+    /// #1428: a click never saves a rule that wouldn't match the very call it came from (a `cd` to a sibling worktree
+    /// saved a `swift build` prefix that asked again every time). An exact rule always matches its own call.
     func alwaysAllowRules(for choice: AppState.AlwaysAllowChoice) -> Result<[PermissionRule], AlwaysAllowRefusal> {
+        let result = derivedAlwaysAllowRules(for: choice)
+        guard case .success(let rules) = result, toolName == "run_command", rules.contains(where: \.isPrefix) else { return result }
+        let prefixes = rules.filter(\.isPrefix).map { $0.details.split(separator: " ").map(String.init) }
+        guard CommandPattern.matchedPrefixes(details, prefixes: prefixes, workspace: workspace) != nil else {
+            return .failure(AlwaysAllowRefusal(message: Self.leavesWorkspaceMessage))
+        }
+        return result
+    }
+
+    private func derivedAlwaysAllowRules(for choice: AppState.AlwaysAllowChoice) -> Result<[PermissionRule], AlwaysAllowRefusal> {
         guard offersAlwaysAllow else { return .success([]) }
         switch choice {
         case .proposed:
