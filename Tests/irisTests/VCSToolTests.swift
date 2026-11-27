@@ -62,27 +62,30 @@ struct VCSToolTests {
         if let push = VCSTool.Action(rawValue: "push") { #expect(push.writes) }
     }
 
-    @Test("fetch brings main and the role's own branches only: another role's, an outside branch, or any branch for the owner is refused (planner, #1435)")
-    func fetchScope() {
-        #expect(VCSTool.fetchRefusal("main", caller: .role("pilot")) == nil)
-        #expect(VCSTool.fetchRefusal("main", caller: .owner) == nil)
-        #expect(VCSTool.fetchRefusal("agent/pilot/x", caller: .role("pilot")) == nil)
-        for branch in ["agent/other/x", "feature", "agent/pilot", "dependabot/npm/x"] {
-            #expect(VCSTool.fetchRefusal(branch, caller: .role("pilot")) != nil, Comment(rawValue: branch))
+    @Test("a fetch taints when it brings someone else's code: another role's branch, a PR head, or any branch the owner fetches; main and a role's own don't (planner, #1435)")
+    func fetchTaintTable() {
+        let pilot = VCSTool.Caller.role("pilot")
+        #expect(!VCSTool.fetchTaints(branch: nil, pr: nil, caller: pilot))
+        #expect(!VCSTool.fetchTaints(branch: "main", pr: nil, caller: pilot))
+        #expect(!VCSTool.fetchTaints(branch: "agent/pilot/x", pr: nil, caller: pilot))
+        #expect(!VCSTool.fetchTaints(branch: "main", pr: nil, caller: .owner))
+        for branch in ["agent/author/x", "feature", "agent/pilot", "dependabot/npm/x"] {
+            #expect(VCSTool.fetchTaints(branch: branch, pr: nil, caller: pilot), Comment(rawValue: branch))
         }
-        #expect(VCSTool.fetchRefusal("agent/pilot/x", caller: .owner) != nil, "the owner fetches main only")
+        #expect(VCSTool.fetchTaints(branch: nil, pr: 7, caller: pilot) && VCSTool.fetchTaints(branch: nil, pr: 7, caller: .owner))
+        #expect(VCSTool.fetchTaints(branch: "agent/pilot/x", pr: nil, caller: .owner), "the owner's fetch of any branch is someone else's")
     }
 
-    @Test("a refused fetch sends nothing: the mirror isn't made")
+    @Test("a fetch from a repository off the allowlist sends nothing: the mirror isn't made")
     func refusedFetchRunsNothing() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("iris-vcsf-\(UUID().uuidString)")
         let mirror = VCSMirror(root: root, remoteURL: { _ in "/nonexistent" }, credentialConfig: [])
-        let client = GitHubProxyClient(keychain: KeychainManager(serviceSuffix: ".test-\(UUID().uuidString)"), isRepoAllowed: { _ in true })
+        let client = GitHubProxyClient(keychain: KeychainManager(serviceSuffix: ".test-\(UUID().uuidString)"), isRepoAllowed: { _ in false })
         let result = await VCSTool.$caller.withValue(.role("pilot")) {
             await VCSTool.execute(args: ["action": .string("fetch"), "repo": .string("a/b"), "branch": .string("agent/other/x")],
                                   client: client, workspace: NSTemporaryDirectory(), mirror: mirror)
         }
-        #expect(result.contains("isn't") && result.hasPrefix("Refused"), Comment(rawValue: result))
+        #expect(result.contains("not allowed"), Comment(rawValue: result))
         #expect(!FileManager.default.fileExists(atPath: root.path))
     }
 

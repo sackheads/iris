@@ -82,6 +82,17 @@ enum VCSTool {
         return !name.split(separator: "/").contains { $0.hasPrefix(".") }
     }
 
+    /// Planner, #1435: whether a successful `fetch` brought someone else's code, which the agent will read next, so
+    /// the conversation is tainted (the engine marks it, `IrisEngine.executeToolWithHooks`). `main` is reviewed and
+    /// merged, and a role's own branches are its own; another role's branch (a reviewer fetching the author's), a PR
+    /// head, or any branch the owner fetches is someone else's.
+    static func fetchTaints(branch: String?, pr: Int?, caller: Caller) -> Bool {
+        if pr != nil { return true }
+        guard let branch, branch != base else { return false }
+        if case .role = caller { return caller.headRefusal(branch) != nil }
+        return true
+    }
+
     static let maxTitleCharacters = 256
     static let maxBodyBytes = 65_536
 
@@ -99,9 +110,16 @@ enum VCSTool {
     /// Set where every turn starts (`IrisEngine.processInput`): whether the owner typed this one (source `UI`).
     @TaskLocal static var ownerTypedTurn = false
 
+    /// A test's client and mirror for a whole turn through the engine, as `CoreMLEvaluator.$scopedModel` does for a
+    /// guard tier. Nil everywhere but a test.
+    struct Scoped: Sendable { let client: GitHubProxyClient; let mirror: VCSMirror }
+    @TaskLocal static var scoped: Scoped?
+
     static func execute(args: [String: JSONValue], client: GitHubProxyClient, workspace: String? = nil,
                         policy: VCSPolicyStore = .shared, mirror: VCSMirror = .shared) async -> String {
         guard let caller else { return noCallerRefusal }
+        let client = scoped?.client ?? client
+        let mirror = scoped?.mirror ?? mirror
         guard let raw = args["action"]?.stringValue, let action = Action(rawValue: raw) else {
             return "Error: vcs needs an action: " + Action.allCases.map(\.rawValue).joined(separator: ", ")
         }
@@ -113,7 +131,12 @@ enum VCSTool {
                 return "Refused: repository \"\(shown(repo))\" is not allowed for the GitHub tools. The user adds repositories to the allowed list."
             }
             if action == .fetch {
-                return await mirror.fetch(repo: repo, branch: args["branch"]?.stringValue, workspace: workspace)
+                var pr: Int?
+                if args["pr"] != nil {
+                    guard let number = ToolExecutor.positiveInt(args["pr"]) else { return "Error: vcs fetch's pr must be a positive number" }
+                    pr = number
+                }
+                return await mirror.fetch(repo: repo, branch: args["branch"]?.stringValue, pr: pr, workspace: workspace)
             }
             guard let branch = args["branch"]?.stringValue else { return "Error: vcs push needs repo and branch" }
             guard case .policy(let rules) = policy.load() else {
@@ -163,7 +186,8 @@ enum VCSTool {
     static let declaration = FunctionDeclaration(
         name: name,
         description: "Work with GitHub as Iris's own account, for repositories on the user's allowed list. action is one of: "
-            + "fetch (GitHub's main, and branch if given, into this workspace as origin/<name>; nothing is checked out), "
+            + "fetch (GitHub's main, and a branch or a pr's head if given, into this workspace as origin/<name> or "
+            + "origin/pr/<n>; nothing is checked out; another session's branch or a PR head is someone else's code), "
             + "push (this workspace's branch to GitHub's branch of the same name; force only with force true, and never main), "
             + "pr_create (open a draft PR into main from a branch already on GitHub), pr_comment, "
             + "pr_view (a PR's state, branches and description), pr_checks (its CI checks). A session with a role "
@@ -177,7 +201,7 @@ enum VCSTool {
                 "branch": Schema(type: "STRING", description: "push: the branch to publish; fetch: a branch to fetch as well as main."),
                 "force": Schema(type: "BOOLEAN", description: "push: replace GitHub's branch (with a lease on what it was). Default false."),
                 "repo": Schema(type: "STRING", description: "owner/name, e.g. sackheads/iris."),
-                "pr": Schema(type: "INTEGER", description: "The pull request number (pr_comment, pr_view, pr_checks)."),
+                "pr": Schema(type: "INTEGER", description: "The pull request number (pr_comment, pr_view, pr_checks; fetch: its head)."),
                 "head": Schema(type: "STRING", description: "pr_create: the branch the changes are on."),
                 "base": Schema(type: "STRING", description: "pr_create: always main; may be left out."),
                 "title": Schema(type: "STRING", description: "pr_create: the PR title."),
