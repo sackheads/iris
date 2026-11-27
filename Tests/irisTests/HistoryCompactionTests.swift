@@ -147,6 +147,19 @@ struct HistoryCompactionPlanTests {
         #expect(prompt.utf8.count <= 30_000 && prompt.contains("PRIOR") && !prompt.contains(HistoryCompaction.truncatedMarker))
     }
 
+    @Test("the transcript keeps the newest lines with no hole, and marks where it stops (dev-3's #1441 review)")
+    func transcriptHasNoHole() throws {
+        let history = [user("Loop tick 1 of 50. OLDEST"), model("ok"), user("Loop tick 2 of 50. " + String(repeating: "b", count: 9_000)),
+                       model("ok"), user("Loop tick 3 of 50. NEWEST"), model("ok"), user("Loop tick 4 of 50."), model("ok")]
+        let plan = try #require(HistoryCompaction.plan(history, ownerTexts: [], settings: .init(budget: 100, tail: 1), contextWindow: 128_000))
+        let prompt = HistoryCompaction.summaryPrompt(history, plan: plan, ownerTexts: [], settings: .init(maxSummaryInputBytes: 5_000))
+        #expect(prompt.utf8.count <= 5_000 && prompt.contains("NEWEST"))
+        #expect(!prompt.contains("OLDEST"), "an older line past the one that didn't fit leaves no hole")
+        #expect(prompt.contains(HistoryCompaction.transcriptOmitted))
+        let roomy = HistoryCompaction.summaryPrompt(history, plan: plan, ownerTexts: [], settings: .init())
+        #expect(roomy.contains("OLDEST") && !roomy.contains(HistoryCompaction.transcriptOmitted))
+    }
+
     @Test("the budget is capped at half the model's context")
     func budgetCap() {
         #expect(HistoryCompaction.budget(.init(budget: 500_000), contextWindow: 200_000) == 100_000)
