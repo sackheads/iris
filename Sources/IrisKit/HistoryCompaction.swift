@@ -132,29 +132,42 @@ enum HistoryCompaction {
     """
 
     /// The summary call's one message, at most `maxSummaryInputBytes` in all (#1432): the instruction, then the previous
-    /// summary (at most half of what's left), the folded owner messages (newest kept, at most half of what's left after
-    /// that), and the span's lines (newest kept) in the rest. Whatever is cut is marked. A folded message isn't also a
-    /// transcript line, and every line is neutralised, so nothing in it can close its block.
+    /// summary, the folded owner messages (newest kept) and the span's lines (newest kept). When they don't all fit, the
+    /// previous summary and then the folded messages are each held to about half of what's left, but never below what
+    /// the sections after them leave unused (dev-2's #1441 review), so a short transcript doesn't strand the folded
+    /// messages. Whatever is cut is marked. A folded message isn't also a transcript line, and every line is
+    /// neutralised, so nothing in it can close its block.
     static func summaryPrompt(_ history: [Content], plan: Plan, ownerTexts: Set<String>, settings: Settings) -> String {
+        summaryInput(history, plan: plan, ownerTexts: ownerTexts, settings: settings).prompt
+    }
+
+    /// `summaryPrompt`, and how many folded owner messages didn't reach it whole (dropped, or cut), for the head's note.
+    static func summaryInput(_ history: [Content], plan: Plan, ownerTexts: Set<String>,
+                             settings: Settings) -> (prompt: String, foldedCut: Int) {
         let transcriptOpen = "\n\n<transcript>\n", transcriptClose = "\n</transcript>"
         var room = settings.maxSummaryInputBytes - summaryInstruction.utf8.count - transcriptOpen.utf8.count - transcriptClose.utf8.count
-        let prior = plan.priorSummary.map { priorSection(TurnContext.neutralised($0), room: room / 2) } ?? ""
-        room -= prior.utf8.count
-        let folded = foldedSection(plan.foldedOwner, room: room / 2)
-        room -= folded.utf8.count
+        // Every transcript line, newest first, before any is cut. The previous head is in `<previous_summary>` already,
+        // and a folded message in its own section.
         let foldedTexts = Set(plan.foldedOwner)
-        var lines: [String] = []
-        // The previous head is in `<previous_summary>` already, and a folded message in its own section.
+        var candidates: [String] = []
         for content in history[..<plan.cut].reversed() where !isHead(content) {
             if isOwnerTyped(content, ownerTexts: ownerTexts), foldedTexts.contains(content.parts.compactMap(\.text).joined()) { continue }
-            for line in transcriptLines(content, ownerTexts: ownerTexts).reversed() {
-                let neutral = TurnContext.neutralised(line)
-                guard neutral.utf8.count + 1 <= room else { break }
-                lines.append(neutral)
-                room -= neutral.utf8.count + 1
-            }
+            candidates += transcriptLines(content, ownerTexts: ownerTexts).reversed().map(TurnContext.neutralised)
         }
-        return summaryInstruction + prior + folded + transcriptOpen + lines.reversed().joined(separator: "\n") + transcriptClose
+        let transcriptNeed = candidates.reduce(0) { $0 + $1.utf8.count + 1 }
+        let foldedNeed = foldedSection(plan.foldedOwner, room: .max / 4).text.utf8.count
+        let prior = plan.priorSummary.map { priorSection(TurnContext.neutralised($0), room: max(room / 2, room - foldedNeed - transcriptNeed)) } ?? ""
+        room -= prior.utf8.count
+        let folded = foldedSection(plan.foldedOwner, room: max(room / 2, room - transcriptNeed))
+        room -= folded.text.utf8.count
+        var lines: [String] = []
+        for line in candidates {
+            guard line.utf8.count + 1 <= room else { continue }
+            lines.append(line)
+            room -= line.utf8.count + 1
+        }
+        let prompt = summaryInstruction + prior + folded.text + transcriptOpen + lines.reversed().joined(separator: "\n") + transcriptClose
+        return (prompt, plan.foldedOwner.count - folded.whole)
     }
 
     static let truncatedMarker = " [truncated]"
@@ -170,18 +183,20 @@ enum HistoryCompaction {
 
     /// The folded owner messages, newest kept whole while they fit; the next older one is cut to what's left, and any
     /// older than that are counted in a marker. Empty when nothing was folded or nothing fits.
-    private static func foldedSection(_ messages: [String], room: Int) -> String {
-        guard !messages.isEmpty else { return "" }
+    private static func foldedSection(_ messages: [String], room: Int) -> (text: String, whole: Int) {
+        guard !messages.isEmpty else { return ("", 0) }
         let open = "\n\nThe owner's oldest messages, folded here to save room; keep what they decided:\n<folded_owner_messages>\n"
         let close = "\n</folded_owner_messages>"
         // Room for the marker line too, so adding it can't push the section over.
         let marker = { (n: Int) in "[\(n) older folded owner messages truncated]" }
         var left = room - open.utf8.count - close.utf8.count - marker(messages.count).utf8.count - 1
         var kept: [String] = []
+        var whole = 0
         for message in messages.reversed() {
             let line = "owner: " + TurnContext.neutralised(ConversationReader.quoteContinuationLines(message))
             if line.utf8.count + 1 <= left {
                 kept.append(line)
+                whole += 1
                 left -= line.utf8.count + 1
                 continue
             }
@@ -189,10 +204,10 @@ enum HistoryCompaction {
             if cut > "owner: ".utf8.count { kept.append(ConversationReader.utf8Prefix(line, maxBytes: cut) + truncatedMarker) }
             break
         }
-        guard !kept.isEmpty else { return "" }
+        guard !kept.isEmpty else { return ("", 0) }
         let dropped = messages.count - kept.count
         let lines = (dropped > 0 ? [marker(dropped)] : []) + kept.reversed()
-        return open + lines.joined(separator: "\n") + close
+        return (open + lines.joined(separator: "\n") + close, whole)
     }
 
     private static func transcriptLines(_ content: Content, ownerTexts: Set<String>) -> [String] {
@@ -216,9 +231,10 @@ enum HistoryCompaction {
     /// The entry that replaces the span: the summary in the first Part, then each owner message as a Part of its own
     /// (dev-3's #1431 review), so a later compaction copies them by position and the summary, which may be wrapped
     /// outside text, can never pass as one. A tainted conversation's summary arrives already guarded and wrapped.
-    static func head(summary: String, plan: Plan) -> Content {
+    /// `foldedCut`: how many folded owner messages the summary saw only in part or not at all (`summaryInput`).
+    static func head(summary: String, plan: Plan, foldedCut: Int = 0) -> Content {
         let first = "\(summaryLabel), \(plan.turns) turns, compacted to save context. It replaces them; what follows it is verbatim.]\n\n\(summary)"
-            + foldNote(plan) + (plan.ownerParts.isEmpty ? "" : ownerSectionIntro)
+            + foldNote(plan, cut: foldedCut) + (plan.ownerParts.isEmpty ? "" : ownerSectionIntro)
         return Content(role: "user", parts: [Part(text: first)] + plan.ownerParts.map { Part(text: $0) })
     }
 
@@ -233,7 +249,9 @@ enum HistoryCompaction {
         return Content(role: "user", parts: [Part(text: first)] + plan.ownerParts.map { Part(text: $0) })
     }
 
-    private static func foldNote(_ plan: Plan) -> String {
-        plan.foldedOwner.isEmpty ? "" : "\n\n\(plan.foldedOwner.count) earlier owner messages were folded into the summary to save room."
+    private static func foldNote(_ plan: Plan, cut: Int) -> String {
+        guard !plan.foldedOwner.isEmpty else { return "" }
+        let note = "\n\n\(plan.foldedOwner.count) earlier owner messages were folded into the summary to save room."
+        return cut > 0 ? note + " \(cut) of them were too long to fit and reached it only in part or not at all." : note
     }
 }

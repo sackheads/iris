@@ -3763,7 +3763,9 @@ actor IrisEngine {
                                               settings: settings, tainted: snapshot.tainted)
         let head: Content, kind: String
         if let summary {
-            head = HistoryCompaction.head(summary: summary, plan: plan)
+            let cut = HistoryCompaction.summaryInput(snapshot.history, plan: plan, ownerTexts: snapshot.owner,
+                                                     settings: settings).foldedCut
+            head = HistoryCompaction.head(summary: summary, plan: plan, foldedCut: cut)
             kind = "summarized"
         } else if plan.overHardLimit {
             head = HistoryCompaction.omittedHead(plan: plan, priorOmitted: snapshot.omitted)
