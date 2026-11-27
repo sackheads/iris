@@ -117,9 +117,10 @@ struct AlwaysAllowEditResolveTests {
 
     /// Raises the ask and resolves it with `resolution`/`choice`; returns the request that was shown.
     private func resolve(_ state: AppState, _ details: String, _ resolution: AppState.ApprovalResolution,
-                         choice: AppState.AlwaysAllowChoice, in conversationId: UUID) async throws -> ToolApprovalRequest {
+                         choice: AppState.AlwaysAllowChoice, in conversationId: UUID, workspace: String? = nil) async throws -> ToolApprovalRequest {
         let askTask = Task { @MainActor in
-            await state.requestApprovalSource(toolName: "run_command", details: details, conversationId: conversationId, vibecopEnabled: false, isOwner: true)
+            await state.requestApprovalSource(toolName: "run_command", details: details, workspace: workspace, conversationId: conversationId,
+                                              vibecopEnabled: false, isOwner: true)
         }
         for _ in 0..<200 where !state.pendingApprovals.contains(where: { $0.conversationId == conversationId }) {
             try? await Task.sleep(nanoseconds: 5_000_000)
@@ -132,6 +133,44 @@ struct AlwaysAllowEditResolveTests {
 
     private func allowed(_ state: AppState, _ command: String) -> Bool {
         state.permissions.isAllowed(toolName: "run_command", details: command, workspace: nil, isOwner: true)
+    }
+
+    /// A workspace and a sibling of it, as the dev fleet's `../iris-<n>` worktrees sit beside the repo.
+    private func workspaces(_ root: URL) throws -> (workspace: String, sibling: String) {
+        let workspace = root.appendingPathComponent("iris").path, sibling = root.appendingPathComponent("iris-1428").path
+        for dir in [workspace, sibling] { try FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true) }
+        return (workspace, sibling)
+    }
+
+    @Test("a rule that couldn't match its own call is never saved: a cd to a sibling worktree (#1428)",
+          arguments: [AppState.AlwaysAllowChoice.proposed, .edited(["swift build -c"])])
+    func ownCallMustMatch(choice: AppState.AlwaysAllowChoice) async throws {
+        let (state, root) = try rig()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let (workspace, sibling) = try workspaces(root)
+        let cid = state.createNewConversation(isBackground: false, select: false)
+        let command = "cd \(sibling) && swift build -c release"
+        let shown = try await resolve(state, command, .alwaysAllowGlobal, choice: choice, in: cid, workspace: workspace)
+        #expect(shown.alwaysAllowRules(for: choice) == .failure(AlwaysAllowRefusal(message: ToolApprovalRequest.leavesWorkspaceMessage)),
+                "the dialog shows why, from the same function")
+        let saved = (try? String(contentsOf: state.permissions.paths.permissionsJSON, encoding: .utf8)) ?? ""
+        #expect(!saved.contains("swift build"), "nothing is saved: \(saved)")
+        let notes = (state.conversations.first { $0.id == cid }?.messages ?? []).map(\.content).joined(separator: "\n")
+        #expect(notes.contains(ToolApprovalRequest.leavesWorkspaceMessage) && notes.contains("This call was approved once."))
+    }
+
+    @Test("the exact command still sticks for a sibling cd, and a cd inside the workspace still saves its prefix (#1428)")
+    func exactAndInsideStillSave() async throws {
+        let (state, root) = try rig()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let (workspace, sibling) = try workspaces(root)
+        try FileManager.default.createDirectory(atPath: workspace + "/Sources", withIntermediateDirectories: true)
+        let cid = state.createNewConversation(isBackground: false, select: false)
+        let outside = "cd \(sibling) && swift build"
+        _ = try await resolve(state, outside, .alwaysAllowGlobal, choice: .exactCommand, in: cid, workspace: workspace)
+        #expect(state.permissions.isAllowed(toolName: "run_command", details: outside, workspace: workspace, isOwner: true))
+        _ = try await resolve(state, "cd Sources && swift build", .alwaysAllowGlobal, choice: .proposed, in: cid, workspace: workspace)
+        #expect(state.permissions.isAllowed(toolName: "run_command", details: "cd Sources && swift build -c release", workspace: workspace, isOwner: true))
     }
 
     @Test("a narrowed rule is saved and matches only what it names")
