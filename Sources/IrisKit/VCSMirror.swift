@@ -146,15 +146,20 @@ actor VCSMirror {
 
     // MARK: fetch
 
-    /// `main` (and `branch`, when given) from GitHub into the mirror, then into the workspace as
-    /// `refs/remotes/origin/<name>`. Nothing in the workspace is checked out or merged.
-    func fetch(repo: String, branch: String?, workspace: String?) async -> String {
+    /// `main` (and `branch`, or pull request `pr`'s head, when given) from GitHub into the mirror, then into the
+    /// workspace as `refs/remotes/origin/<name>` (`origin/pr/<n>` for a PR). Nothing is checked out or merged.
+    func fetch(repo: String, branch: String?, pr: Int? = nil, workspace: String?) async -> String {
         if let refusal = Self.workspaceRefusal(workspace) { return refusal }
         if let branch, !VCSTool.isBranchName(branch) { return "Refused: \"\(VCSTool.shown(branch))\" is not a branch name vcs accepts." }
+        if let pr, pr <= 0 { return "Refused: a pull request number must be positive." }
         if let failure = await ensureMirror(repo) { return failure }
         let mirror = mirrorPath(repo)
-        let names = [VCSTool.base] + (branch.map { [$0] } ?? [])
-        let specs = names.map { "+refs/heads/\($0):refs/remotes/github/\($0)" }
+        // (GitHub's ref, the name it gets under refs/remotes/github and refs/remotes/origin)
+        var refs = [("refs/heads/\(VCSTool.base)", VCSTool.base)]
+        if let branch, branch != VCSTool.base { refs.append(("refs/heads/\(branch)", branch)) }
+        if let pr { refs.append(("refs/pull/\(pr)/head", "pr/\(pr)")) }
+        let names = refs.map(\.1)
+        let specs = refs.map { "+\($0.0):refs/remotes/github/\($0.1)" }
         let fetched = await git(["--git-dir=\(mirror)", "fetch", "--no-tags", "--no-write-fetch-head", remoteURL(repo)] + specs, network: true)
         guard fetched.ok else { return "Refused: the fetch from GitHub failed (\(Self.firstLine(fetched.err)))." }
         let delivered = await git(["-C", workspace!, "fetch", "--upload-pack=git-upload-pack", "--no-tags", "--no-write-fetch-head",

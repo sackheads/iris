@@ -31,9 +31,11 @@ happens: a repo not on the list sends nothing.
 - **`vcs(action, repo, …)`** (#1435): an agent's pull requests, under a policy the tool enforces
   rather than an approval prompt.
   - **Actions:**
-    - `fetch`: GitHub's `main` into the workspace as `origin/main`, and for a role one of its own `agent/<role>/…`
-      branches as well. Nothing is checked out. Another agent's branch or an outside PR's head isn't fetched:
-      its code would be someone else's, which is why `fetch`'s result doesn't taint.
+    - `fetch`: GitHub's `main` into the workspace as `origin/main`, plus a `branch` (as `origin/<branch>`) or a
+      pull request's head (`pr`, as `origin/pr/<n>`) if given. Nothing is checked out. Fetching `main` or a role's
+      own `agent/<role>/…` branch leaves the conversation as it was. Fetching another session's branch (a
+      reviewer fetching the author's), a PR head, or any branch on your own turn brings someone else's code, so
+      it taints the conversation.
     - `push`: the workspace's `branch` to GitHub's branch of the same name. It's never `main`, and a role pushes
       only `agent/<role>/…`. With `force`, it replaces GitHub's branch under a lease on what GitHub had a moment
       before.
@@ -64,7 +66,8 @@ happens: a repo not on the list sends nothing.
   - **The taint gate:** on a conversation that has read outside text, `push`, `pr_create` and `pr_comment`
     run only on your own attended turn, where you see the call. Unattended, or on a turn a peer
     started, they're refused and the result says it needs you. `fetch`, `pr_view` and `pr_checks` are reads
-    and always run. What `pr_view` and `pr_checks` return taints the conversation; `fetch` returns only commit ids.
+    and always run. What `pr_view` and `pr_checks` return taints the conversation, and so does a `fetch` of
+    someone else's code (above).
 - **`github_approve(repo, pr)`**: attended, non-guest-origin main conversation only. It submits an `APPROVE` review as the account, but only if the PR
   is open and every changed file (including a rename's source path) is under `docs/` or `assets/`
   and not inside a `plans/` or `specs/` folder of `docs/` at any depth (those are instructions that

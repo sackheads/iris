@@ -9052,6 +9052,12 @@ actor IrisEngine {
                                    homeWritableOptIn: homeWritable, additionalRoots: roots, decidedJobProfile: decidedJobProfile,
                                    filesystemPolicy: filesystemPolicy)
         }
+        // #1435 (planner): a fetch of someone else's branch or a PR head brought code the agent will read next.
+        if let vcsCaller, result.hasPrefix("Fetched"),
+           (execArgs["action"]?.stringValue) == VCSTool.Action.fetch.rawValue,
+           VCSTool.fetchTaints(branch: execArgs["branch"]?.stringValue, pr: ToolExecutor.positiveInt(execArgs["pr"]), caller: vcsCaller) {
+            await markReadUntrusted(conversationId)
+        }
 
         if name == "write_file", result.hasPrefix("Successfully wrote to "),
            let cid = conversationId, let path = execArgs["path"]?.stringValue {

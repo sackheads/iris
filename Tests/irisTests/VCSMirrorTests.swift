@@ -261,3 +261,55 @@ struct VCSMirrorTests {
         #expect(!FileManager.default.fileExists(atPath: w.mirrorRoot.path))
     }
 }
+
+/// #1435 (planner): a real turn's `vcs fetch` taints the conversation exactly when it brought someone else's code.
+@MainActor
+@Suite("vcs fetch taint through a turn (#1435 slice 2)", .timeLimit(.minutes(1)))
+struct VCSFetchTaintTests {
+    private func turn(fetching args: [String: JSONValue], role: String?) async throws -> Bool {
+        let fixtures = VCSMirrorTests()
+        let w = try await fixtures.world()
+        try await VCSMirrorTests.sh(["push", "-q", w.github, "main:refs/heads/agent/author/x", "main:refs/heads/feature"], in: w.workspace)
+        let app = AppState()
+        app.conversations.removeAll()
+        let id = UUID()
+        app.createNewConversation(id: id)
+        let idx = try #require(app.conversations.firstIndex { $0.id == id })
+        app.conversations[idx].role = role
+        app.conversations[idx].workspacePath = w.workspace
+        let call = FunctionCall(name: VCSTool.name, args: args.merging(["action": .string("fetch"), "repo": .string("a/b")]) { a, _ in a })
+        let part = Part(text: nil, functionCall: call, functionResponse: nil, thought_signature: nil, thoughtSignature: nil)
+        let client = FakeLLMClient(responses: [
+            GeminiResponse(candidates: [Candidate(content: Content(role: "model", parts: [part]))], usageMetadata: nil),
+            GeminiResponse(candidates: [Candidate(content: Content(role: "model", parts: [Part(text: "ok")]))], usageMetadata: nil),
+        ])
+        let engine = IrisEngine(state: app, tier: .medium, principal: .main, client: client, retryDelays: [],
+                                protectionEnabled: false, sessionPeerCount: 0, githubToolsEnabled: true)
+        let scoped = VCSTool.Scoped(client: GitHubProxyClient(keychain: KeychainManager(serviceSuffix: ".test-\(UUID().uuidString)"),
+                                                              isRepoAllowed: { $0 == "a/b" }),
+                                    mirror: fixtures.mirror(w))
+        try await VCSTool.$scoped.withValue(scoped) {
+            let task = Task { await engine.processInput("go", source: "UI", conversationId: id) }
+            try await value(of: task)
+        }
+        let results = app.conversations[idx].history.flatMap { $0.parts }.compactMap { $0.functionResponse?.response["result"]?.stringValue }
+        #expect(results.contains { $0.hasPrefix("Fetched") }, "\(results)")
+        return app.conversations[idx].hasUntrustedToolOutput
+    }
+
+    @Test("a role fetching main, or its own branch, stays untainted")
+    func ownFetchClean() async throws {
+        #expect(!(try await turn(fetching: [:], role: "pilot")))
+    }
+
+    @Test("a reviewer role fetching the author's branch is tainted")
+    func reviewerFetchTaints() async throws {
+        #expect(try await turn(fetching: ["branch": .string("agent/author/x")], role: "pilot"))
+    }
+
+    @Test("the owner's typed fetch of a branch is tainted; of main, not")
+    func ownerFetch() async throws {
+        #expect(try await turn(fetching: ["branch": .string("feature")], role: nil))
+        #expect(!(try await turn(fetching: [:], role: nil)))
+    }
+}
