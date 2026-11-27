@@ -2064,6 +2064,13 @@ struct ApprovalBannerView: View {
                     .foregroundColor(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
+            // #1428: a one-off Always Allow won't save.
+            if let note = request.alwaysAllowWithheldNote {
+                Label(note, systemImage: "info.circle")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
 
             HStack {
                 // No "Always Allow" where a rule would mean nothing or too much: a `humanOnly`
