@@ -77,6 +77,44 @@ struct LoopApprovalStatsTests {
         #expect(sink.records.isEmpty)
     }
 
+    /// The planner's #1425 check: the log never carries a path, an argument or a credential-shaped string.
+    @Test("shape never carries a path, an argument or a credential, for any tool", arguments: [
+        ("run_command", "swift test --filter Probe --token ghp_0123456789abcdefghijklmnopqrstuvwxyzAB"),
+        ("run_command", "cat /Users/someone/.ssh/id_ed25519"),
+        ("run_command", "ghp_0123456789abcdefghijklmnopqrstuvwxyzAB --help"),
+        ("run_command", "/Users/someone/bin/deploy --prod"),
+        ("run_command", "AWS_SECRET_ACCESS_KEY=abc123 ./deploy.sh"),
+        ("read_file", "/Users/someone/.ssh/id_ed25519"),
+        ("write_file", "/Users/someone/Documents/taxes-2026.pdf"),
+        ("mcp__drive__read", #"{"fileId":"1AbCdEf","token":"ghp_0123456789abcdefghijklmnopqrstuvwxyzAB"}"#),
+    ])
+    func shapeCarriesNoArguments(tool: String, details: String) {
+        let shape = LoopApprovalRecord.shape(tool: tool, details: details)
+        for marker in ["ghp_", "someone", ".ssh", "taxes", "fileId", "AWS_SECRET", "abc123", "--prod", "Probe"] {
+            #expect(!shape.contains(marker), "\(tool) \(details) logged shape \(shape)")
+        }
+        #expect(shape == tool || tool == "run_command", "a non-command tool is logged by its name alone")
+    }
+
+    @Test("past its cap the log moves to loop-approvals.1.jsonl, replacing an older one, and starts afresh")
+    func logRotates() throws {
+        let root = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("iris-1425-rot-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let paths = IrisPaths(root: root)
+        let record = LoopApprovalRecord(at: Date(), conversationId: UUID(), loopId: UUID(), tick: true, ownerTurn: true,
+                                        tool: "run_command", shape: "swift test", tainted: false, layer: "allowlist-prefix",
+                                        asked: false, waitSeconds: nil, approved: true)
+        let logs = root.appendingPathComponent("logs")
+        // A 1-byte cap: every append after the first finds the log over it, so it rotates each time.
+        for _ in 0..<5 { LoopApprovalProbe.appendToLog(record, paths: paths, maxBytes: 1) }
+        let current = try String(contentsOf: logs.appendingPathComponent("loop-approvals.jsonl"), encoding: .utf8)
+        let old = try String(contentsOf: logs.appendingPathComponent("loop-approvals.1.jsonl"), encoding: .utf8)
+        #expect(current.split(separator: "\n").count == 1 && old.split(separator: "\n").count == 1,
+                "the newest line in the log, the one before it kept, and the three older dropped")
+        let names = try FileManager.default.contentsOfDirectory(atPath: logs.path).sorted()
+        #expect(names == ["loop-approvals.1.jsonl", "loop-approvals.jsonl"], "one old file kept, never more")
+    }
+
     @Test("the default sink appends one JSON line per record to logs/loop-approvals.jsonl")
     func appendsJSONLines() throws {
         let root = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("iris-1425-log-\(UUID().uuidString)")
