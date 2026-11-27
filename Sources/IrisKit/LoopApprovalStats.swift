@@ -23,10 +23,14 @@ struct LoopApprovalRecord: Codable, Equatable, Sendable {
     var waitSeconds: Double?
     var approved: Bool
 
+    /// Never a path, an argument or a credential (planner, #1425): a file or MCP tool is its name alone, and a command
+    /// its Always-allow prefixes, which a program spelled as a token, or a path other than a workspace script's, can't
+    /// have. A prefix that still looks like a secret is logged as `exact`.
     static func shape(tool: String, details: String) -> String {
         guard tool == "run_command" else { return tool }
         guard let prefixes = CommandPattern.alwaysAllowPrefixes(details), !prefixes.isEmpty else { return "exact" }
-        return prefixes.map { $0.joined(separator: " ") }.joined(separator: " && ")
+        let shape = prefixes.map { $0.joined(separator: " ") }.joined(separator: " && ")
+        return SecretLikeDetector.containsSecretLikeSubstring(shape) ? "exact" : shape
     }
 
     static func layer(_ source: AppState.ApprovalSource?, asked: Bool) -> String {
@@ -68,10 +72,19 @@ final class LoopApprovalProbe: @unchecked Sendable {
         lock.withLock { askedWait = (askedWait ?? 0) + seconds }
     }
 
+    /// The log's size past which it is moved to `loop-approvals.1.jsonl` (replacing an older one) and started afresh,
+    /// so a loop that runs for weeks holds at most about twice this (planner, #1425).
+    static let maxLogBytes = 5 * 1024 * 1024
+
     /// Appends one record as a JSON line to `logs/loop-approvals.jsonl` in this build's home.
-    static func appendToLog(_ record: LoopApprovalRecord, paths: IrisPaths = .default) {
+    static func appendToLog(_ record: LoopApprovalRecord, paths: IrisPaths = .default, maxBytes: Int = maxLogBytes) {
         let dir = paths.root.appendingPathComponent("logs")
         let url = dir.appendingPathComponent("loop-approvals.jsonl")
+        if let size = (try? FileManager.default.attributesOfItem(atPath: url.path))?[.size] as? Int, size >= maxBytes {
+            let old = dir.appendingPathComponent("loop-approvals.1.jsonl")
+            try? FileManager.default.removeItem(at: old)
+            try? FileManager.default.moveItem(at: url, to: old)
+        }
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .iso8601
         guard var line = try? encoder.encode(record) else { return }
