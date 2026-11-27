@@ -202,11 +202,13 @@ struct VCSToolTests {
         #expect(try policy(#"{"protectedPaths":"nope"}"#).load() == .unreadable)
     }
 
-    @Test("pr_ready: a role never readies its own PR, by its head branch; it readies a peer's, and the owner any (Brian, #1435 F4)")
+    @Test("pr_ready: a role readies only another role's agent/ PR, never its own or a non-agent one; the owner any (Brian, #1435 F4; planner)")
     func readyRule() {
         #expect(VCSTool.readyRefusal(head: "agent/pilot/x", caller: .role("pilot")) != nil)
         #expect(VCSTool.readyRefusal(head: "agent/author/x", caller: .role("pilot")) == nil)
-        #expect(VCSTool.readyRefusal(head: "feature", caller: .role("pilot")) == nil)
+        for head in ["feature", "main", "agent/", "agent/pilot", "agent/Bad Role/x", "dependabot/npm/x", "agent/other"] {
+            #expect(VCSTool.readyRefusal(head: head, caller: .role("pilot")) != nil, "a role doesn't ready a non-agent head: \(head)")
+        }
         #expect(VCSTool.readyRefusal(head: "agent/pilot/x", caller: .owner) == nil)
     }
 
