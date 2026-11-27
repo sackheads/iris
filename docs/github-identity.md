@@ -42,8 +42,9 @@ happens: a repo not on the list sends nothing.
     - `pr_create`: a draft into `main`, from a branch already pushed. `draft` defaults to `true`.
     - `pr_comment`
     - `pr_ready`: marks a draft PR ready for review, which is a reviewer's lgtm and arms its auto-merge. A role
-      may ready only a PR whose branch isn't its own `agent/<role>/…` (rule 25, by the head branch, since every
-      agent's PR is the same account's). Your own typed turn may ready any.
+      may ready only another session's PR, one whose branch is under a different `agent/<other>/…`: never its own,
+      and never a branch that isn't an agent's. That's rule 25, told by the head branch, since every agent's PR is
+      the same account's. Your own typed turn may ready any.
     - `pr_view`: state, branches and description.
     - `pr_checks`: the CI checks on the head.
   - **Who gets it:**

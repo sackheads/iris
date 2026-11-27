@@ -93,12 +93,21 @@ enum VCSTool {
         return true
     }
 
-    /// #1435 F4 (Brian, rule 25 in code): readying a PR is a reviewer's lgtm and arms its auto-merge, so a role may
-    /// ready only a PR it didn't author, told by the head branch: never one under its own prefix. The owner's own
-    /// typed turn may ready any.
+    /// #1435 F4 (Brian, rule 25 in code): readying a PR is a reviewer's lgtm on a peer's work and arms its
+    /// auto-merge, so a role may ready only a PR from ANOTHER role's branch (`agent/<other>/…`, planner): never its
+    /// own, and never anything that isn't an agent's (the owner's, a guest's, an outside one). Told by the head branch,
+    /// since every agent's PR is the same account's. The owner's own typed turn may ready any.
     static func readyRefusal(head: String, caller: Caller) -> String? {
-        guard case .role(let role) = caller, head.hasPrefix(branchPrefix(role: role)) else { return nil }
-        return "Refused: this pull request's branch is this session's own (\(shown(head))); a reviewer readies it, not its author."
+        guard case .role(let role) = caller else { return nil }
+        if head.hasPrefix(branchPrefix(role: role)) {
+            return "Refused: this pull request's branch is this session's own (\(shown(head))); a reviewer readies it, not its author."
+        }
+        let parts = head.split(separator: "/", maxSplits: 2)
+        if parts.count == 3, parts[0] == "agent", let other = SessionRoles.normalizedName(String(parts[1])), other != role,
+           Caller.role(other).headRefusal(head) == nil {
+            return nil
+        }
+        return "Refused: a session readies only another session's agent/<role>/ pull request; \(shown(head)) isn't one."
     }
 
     static let maxTitleCharacters = 256
