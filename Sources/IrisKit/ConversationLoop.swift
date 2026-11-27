@@ -21,10 +21,6 @@ struct ConversationLoop: Codable, Equatable, Sendable {
     /// `intervalSeconds` its delay. Not a loop the person started.
     var isAlarm: Bool
 
-    /// How a tick's and an alarm's own text begins, so `HistoryCompaction` can tell them from the owner's words.
-    static let tickTextPrefix = "Loop tick "
-    static let alarmTextPrefix = "Alarm: the wait you set has ended."
-
     init(prompt: String, intervalSeconds: Double, cap: Int, paused: Bool = false, selfPaced: Bool = false, isAlarm: Bool = false) {
         self.id = UUID()
         self.selfPaced = selfPaced
@@ -156,12 +152,12 @@ struct ConversationLoop: Codable, Equatable, Sendable {
     /// system-event "briefly acknowledge it" suffix, and never starting with a trigger prefix.
     func tickText(number: Int) -> String {
         if isAlarm {
-            return "\(Self.alarmTextPrefix) Carry on from here: \(prompt)"
+            return "Alarm: the wait you set has ended. Carry on from here: \(prompt)"
         }
         let pacing = selfPaced
             ? "\n\nThis loop is self-paced: call `schedule_next_tick` with how long to wait before the next tick (\(Self.describe(seconds: Self.selfPacedMinimum)) to \(Self.describe(seconds: Self.selfPacedMaximum))). Without a call, the next tick runs in \(Self.describe(seconds: Self.selfPacedDefault))."
             : ""
-        return "\(Self.tickTextPrefix)\(number) of \(cap) (\(cadence)). Do this loop's task again now: \(prompt)\n\nIf nothing has changed since the last tick, say so in one line.\(pacing)"
+        return "Loop tick \(number) of \(cap) (\(cadence)). Do this loop's task again now: \(prompt)\n\nIf nothing has changed since the last tick, say so in one line.\(pacing)"
     }
 
     /// Clamps a requested delay to the self-paced bounds, and says what was applied (#190 PR 2).
