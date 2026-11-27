@@ -132,8 +132,18 @@ struct PolicyStoreNamesTests {
     func namesFollowIrisPaths() {
         let names = IrisPaths(root: URL(fileURLWithPath: "\(home)/.iris")).protectedWriteDirs.map(\.lastPathComponent)
         #expect(names.contains("profiles") && names.contains("config"))
-        #expect(PolicyStores.directoryNames == ["profiles", "a2a-peers", "config", "plugins", "exchange"])
+        #expect(PolicyStores.directoryNames == ["profiles", "a2a-peers", "config", "plugins", "exchange", "vcs"])
         #expect(Set(names).isSubset(of: Set(PolicyStores.directoryNames)), "#1115: every protected directory is a store a shell write is caught for")
+    }
+
+    @Test("a shell command naming vcs's mirrors is a person's call, by the home's spelling or its path (#1435)")
+    func vcsMirrorsAreAStore() {
+        let paths = IrisPaths(root: URL(fileURLWithPath: "\(home)/.iris"))
+        for command in ["rm -rf ~/.iris/vcs/a/b.git", "git --git-dir=\(home)/.iris/vcs/a/b.git update-ref refs/heads/x HEAD"] {
+            #expect(PolicyStores.commandNamesStore(command, paths: paths, release: paths, workspace: nil), Comment(rawValue: command))
+        }
+        #expect(!PolicyStores.commandNamesStore("git log --oneline vcs/", paths: paths, release: paths, workspace: nil),
+                "a bare word vcs isn't the home's folder")
     }
 }
 

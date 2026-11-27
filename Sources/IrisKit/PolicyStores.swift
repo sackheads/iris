@@ -10,10 +10,11 @@ import Foundation
 /// write there grants permission as a `write_file` would, and YOLO must not approve it.
 enum PolicyStores {
     /// The stores' directory names, for the tests that pin them to `IrisPaths`.
-    static let directoryNames = ["profiles", "a2a-peers", "config", "plugins", "exchange"]
+    static let directoryNames = ["profiles", "a2a-peers", "config", "plugins", "exchange", "vcs"]
 
-    /// #1115's three: common words, so only spelled under the home (`.iris/config`) counts as naming one.
-    private static let homeSpelledNames = ["config", "plugins", "exchange"]
+    /// #1115's three, and #1435's `vcs` mirrors: common words, so only spelled under the home (`.iris/config`)
+    /// counts as naming one.
+    private static let homeSpelledNames = ["config", "plugins", "exchange", "vcs"]
 
     /// What the shell would see: quotes and backslashes removed, case folded (APFS is
     /// case-insensitive).

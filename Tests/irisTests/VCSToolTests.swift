@@ -62,11 +62,11 @@ struct VCSToolTests {
         if let push = VCSTool.Action(rawValue: "push") { #expect(push.writes) }
     }
 
-    @Test("a write's result doesn't taint; pr_view's and pr_checks' do")
+    @Test("only pr_view's and pr_checks' results taint; a write's and fetch's don't")
     func resultTaint() {
         for action in VCSTool.Action.allCases {
             let taints = IrisEngine.resultCarriesOutsideContent(VCSTool.name, args: ["action": .string(action.rawValue)])
-            #expect(taints == !action.writes, "\(action)")
+            #expect(taints == ["pr_view", "pr_checks"].contains(action.rawValue), "\(action)")
         }
         #expect(IrisEngine.resultCarriesOutsideContent(VCSTool.name, args: [:]), "no action: taints, the safe side")
     }

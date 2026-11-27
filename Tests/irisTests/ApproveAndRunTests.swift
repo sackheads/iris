@@ -1036,7 +1036,7 @@ struct ViewWholeBlockedCallTests {
 struct ProtectedDirectoryTextTests {
     @Test func theCardAndTheModelsRefusalNameEveryProtectedDirectory() {
         let names = IrisPaths.default.protectedWriteDirs.map(\.lastPathComponent)
-        #expect(Set(names) == ["config", "plugins", "exchange", "profiles"], "the check protects these four: \(names)")
+        #expect(Set(names) == ["config", "plugins", "exchange", "profiles", "vcs"], "the check protects these five: \(names)")
         for name in names {
             #expect(EventCard.protectedNotApprovable.contains("`\(name)/`"), "card text omits \(name): \(EventCard.protectedNotApprovable)")
             #expect(IrisEngine.protectedWriteRefusal(tool: "write_file").contains(name), "refusal omits \(name)")
@@ -1044,7 +1044,7 @@ struct ProtectedDirectoryTextTests {
     }
 
     @Test func thePhraseIsAReadableList() {
-        #expect(IrisPaths.protectedWriteDirPhrase() == "`config/`, `plugins/`, `exchange/` or `profiles/`")
-        #expect(IrisPaths.protectedWriteDirPhrase(prefix: "~/.iris/", slash: false) == "`~/.iris/config`, `~/.iris/plugins`, `~/.iris/exchange` or `~/.iris/profiles`")
+        #expect(IrisPaths.protectedWriteDirPhrase() == "`config/`, `plugins/`, `exchange/`, `profiles/` or `vcs/`")
+        #expect(IrisPaths.protectedWriteDirPhrase(prefix: "~/.iris/", slash: false) == "`~/.iris/config`, `~/.iris/plugins`, `~/.iris/exchange`, `~/.iris/profiles` or `~/.iris/vcs`")
     }
 }
