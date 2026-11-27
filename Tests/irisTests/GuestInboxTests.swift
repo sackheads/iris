@@ -143,6 +143,18 @@ struct GuestInboxTests {
         #expect(try app.store.inbox.openItems().isEmpty)
     }
 
+    /// Only the dispatch layer reads arguments outside the schema; the emit layer checks routing alone, so this row
+    /// is what a dropped dispatch check fails.
+    @Test("a guest's inbox_item with an argument outside its schema is refused at dispatch")
+    func unknownArgumentRefused() async throws {
+        let app = try await app()
+        var args = basic
+        args["attachments"] = .array([.string("/etc/hosts")])
+        let text = await raise(app, on: guest(app), args: args)
+        #expect(text == GuestToolset.inboxArgumentRefusal("attachments"))
+        #expect(try app.store.inbox.openItems().isEmpty)
+    }
+
     @Test("a guest can't follow up another client's thread, and another client can't follow up the guest's")
     func threadsAreTheChains() async throws {
         let app = try await app()
