@@ -55,7 +55,7 @@ struct BrokerToolFloorTests {
     }
 
     @Test("a broker's call to any tool outside its floor is refused before a handler runs",
-          arguments: ["run_command", "write_file", "github_comment", "save_fact", "manage_fact",
+          arguments: ["run_command", "write_file", "vcs", "save_fact", "manage_fact",
                       "update_memory", "update_soul", "send_to_session", "schedule_job", "list_sessions"])
     func outsideTheFloorRefused(name: String) async {
         let (text, _) = await result(of: name, args: ["command": .string("touch /tmp/iris-1203-should-not-exist"),
