@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """#1437: per-tick tokens and dollars for one or more `iris --perf run` records of loop-ttl-1437.
 Usage: perf/tools/ttl1437-report.py <run.json> [<run.json> ...]
-Prices: claude-sonnet-5-5 list ($/M): input 2.00, output 10.00, cache read 0.20, 5m write 2.50, 1h write 4.00."""
+Prices: claude-sonnet-5-5 list ($/M), from platform.claude.com pricing (2026-11-27): input 2.00, output 10.00,
+cache read 0.10 (0.05x on Sonnet 5.5 and Opus 5.5), 5m write 2.50, 1h write 4.00."""
 import json, sys
-IN, OUT, READ, W5, W1H = 2.00, 10.00, 0.20, 2.50, 4.00
+IN, OUT, READ, W5, W1H = 2.00, 10.00, 0.10, 2.50, 4.00
 grand = 0.0
 for path in sys.argv[1:]:
     rec = json.load(open(path))
