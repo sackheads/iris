@@ -129,6 +129,17 @@ struct UnattendedLoopTests {
         #expect(await source == nil)
     }
 
+    @Test("#1439's log labels a held call unattended-held, apart from a plain no")
+    func heldIsLogged() async throws {
+        let (state, root) = try setUp(); defer { try? FileManager.default.removeItem(at: root) }
+        var records: [LoopApprovalRecord] = []
+        state.loopApprovalSink = { records.append($0) }
+        let id = looping(state)
+        _ = await ask(state, id, "git push origin pilot/x", root: root)
+        #expect(records.map(\.layer) == ["unattended-held"] && records.first?.asked == false && records.first?.tick == false,
+                "\(records.map(\.layer))")
+    }
+
     @Test("the dialog sink itself refuses on an unattended loop's turn, whatever gate asked")
     func dialogBackstop() async throws {
         let (state, root) = try setUp(); defer { try? FileManager.default.removeItem(at: root) }

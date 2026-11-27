@@ -35,9 +35,9 @@ struct LoopApprovalRecord: Codable, Equatable, Sendable {
         return SecretLikeDetector.containsSecretLikeSubstring(shape) ? "exact" : shape
     }
 
-    static func layer(_ source: AppState.ApprovalSource?, asked: Bool) -> String {
+    static func layer(_ source: AppState.ApprovalSource?, asked: Bool, held: Bool = false) -> String {
         switch source {
-        case nil: return asked ? "person-denied" : "denied"
+        case nil: return held ? "unattended-held" : asked ? "person-denied" : "denied"
         case .person: return "person"
         case .yolo: return "yolo"
         case .autoApprove: return "auto-approve"
@@ -93,6 +93,11 @@ final class LoopApprovalProbe: @unchecked Sendable {
     private let lock = NSLock()
     private var askedWait: Double?
     var asked: Bool { lock.withLock { askedWait != nil } }
+    /// #1425: an unattended loop's turn held this call for the person (`AppState.recordUnattendedLoopDenial`), where an
+    /// attended one would have asked: what #1425's numbers need told apart from a rule's or Vibecop's no.
+    private var heldFlag = false
+    var held: Bool { lock.withLock { heldFlag } }
+    func noteHeld() { lock.withLock { heldFlag = true } }
     var waitSeconds: Double? { lock.withLock { askedWait } }
     func noteAsked(waited: Duration) {
         let seconds = Double(waited.components.seconds) + Double(waited.components.attoseconds) / 1e18

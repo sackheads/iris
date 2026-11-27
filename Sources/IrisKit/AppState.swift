@@ -5369,7 +5369,7 @@ class AppState {
         loopApprovalSink(LoopApprovalRecord(
             at: Date(), conversationId: id, loopId: loop.id, tick: LoopApprovalProbe.inLoopTick, ownerTurn: isOwner,
             tool: toolName, shape: LoopApprovalRecord.shape(tool: toolName, details: details), tainted: tainted,
-            layer: LoopApprovalRecord.layer(source, asked: probe.asked), asked: probe.asked,
+            layer: LoopApprovalRecord.layer(source, asked: probe.asked, held: probe.held), asked: probe.asked,
             waitSeconds: probe.waitSeconds, approved: source != nil))
         return source
     }
@@ -5609,6 +5609,7 @@ class AppState {
     /// Records a call an unattended loop's turn may not run, and notes it in the transcript the first time.
     func recordUnattendedLoopDenial(toolName: String, details: String, args: [String: JSONValue], workspace: String?,
                                     conversationId: UUID?) {
+        LoopApprovalProbe.current?.noteHeld()
         guard let id = conversationId, let loop = conversations.first(where: { $0.id == id })?.loop else { return }
         var entry = unattendedLoopDenials[id].flatMap { $0.loopId == loop.id ? $0 : nil } ?? (loopId: loop.id, calls: [])
         let call = BlockedCall(toolName: toolName, args: args, cwd: workspace, reason: .approval)
