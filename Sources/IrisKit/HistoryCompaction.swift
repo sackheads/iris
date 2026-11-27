@@ -89,7 +89,7 @@ enum HistoryCompaction {
         return first.hasPrefix(summaryLabel) || first.hasPrefix(omittedLabel)
     }
 
-    static let ownerSectionIntro = "\n\nThe owner's own messages from those turns follow, verbatim, oldest first, each in its own block."
+    static let ownerSectionIntro = "\n\nThe owner's own messages and Inbox decisions from those turns follow, verbatim, oldest first, each in its own block."
     static let ownerPartOpen = "<owner_message>\n"
     static let ownerPartClose = "\n</owner_message>"
 
