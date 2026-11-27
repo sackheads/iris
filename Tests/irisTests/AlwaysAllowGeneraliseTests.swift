@@ -35,14 +35,20 @@ struct AlwaysAllowGeneraliseTests {
             PermissionRule.alwaysAllowOffer(toolName: "run_command", details: command, workspace: workspace)
         }
 
-        /// Saves what Always Allow offers for `command`, then reads the allowlist back from disk as a relaunch would.
+        /// Saves what Always Allow offers for `command` (a script's rule in the project, as the dialog's project button
+        /// does; everything else globally), then reads the allowlist back from disk as a relaunch would.
         func save(_ command: String) -> PermissionManager {
-            permissions.allowGlobally(offer(command).rules)
+            let rules = offer(command).rules
+            if rules.contains(where: \.isScriptPrefix) {
+                permissions.allowInProject(rules, workspace: workspace)
+            } else {
+                permissions.allowGlobally(rules)
+            }
             return PermissionManager(paths: permissions.paths)
         }
 
-        func allowed(_ manager: PermissionManager, _ command: String) -> Bool {
-            manager.isAllowed(toolName: "run_command", details: command, workspace: workspace, isOwner: true)
+        func allowed(_ manager: PermissionManager, _ command: String, in workspace: String? = nil) -> Bool {
+            manager.isAllowed(toolName: "run_command", details: command, workspace: workspace ?? self.workspace, isOwner: true)
         }
 
         func cleanUp() { try? FileManager.default.removeItem(at: root) }
@@ -119,6 +125,22 @@ struct AlwaysAllowGeneraliseTests {
         }
     }
 
+    @Test("a script rule is per project: repo B's same-named script isn't covered, a global one never matches, and no workspace is Allow once")
+    func scriptPerProject() throws {
+        let rig = try Rig(); defer { rig.cleanUp() }
+        let repoB = rig.root.appendingPathComponent("other-repo").path
+        try FileManager.default.createDirectory(atPath: repoB + "/scripts", withIntermediateDirectories: true)
+        try "#!/bin/sh\n".write(toFile: repoB + "/scripts/test-filter.sh", atomically: true, encoding: .utf8)
+        let next = rig.save("scripts/test-filter.sh FooTests")
+        #expect(rig.allowed(next, "scripts/test-filter.sh BarTests"))
+        #expect(!rig.allowed(next, "scripts/test-filter.sh BarTests", in: repoB))
+        rig.permissions.allowGlobally([PermissionRule(toolName: "run_command", details: "scripts/test-filter.sh", match: .prefix)])
+        #expect(!rig.allowed(PermissionManager(paths: rig.permissions.paths), "scripts/test-filter.sh X", in: repoB),
+                "a global script prefix, even hand-written, matches nothing")
+        let none = PermissionRule.alwaysAllowOffer(toolName: "run_command", details: "scripts/test-filter.sh X", workspace: nil)
+        #expect(none.rules.isEmpty && none.withheld == ToolApprovalRequest.scriptNeedsWorkspaceMessage)
+    }
+
     // MARK: git rebase
 
     @Test("a git rebase rule covers another upstream")
@@ -127,14 +149,17 @@ struct AlwaysAllowGeneraliseTests {
         #expect(prefixes(rig.offer("git rebase origin/main").rules) == ["git rebase"])
         let next = rig.save("git rebase origin/main")
         #expect(rig.allowed(next, "git rebase origin/feature"))
-        #expect(rig.allowed(next, "git rebase --onto origin/main HEAD~2"))
+        for command in ["git rebase --onto origin/main HEAD~2", "git rebase --onto origin/main feature HEAD",
+                        "git rebase --continue", "git rebase --abort", "git rebase --skip"] {
+            #expect(rig.allowed(next, command), Comment(rawValue: command))
+        }
     }
 
-    @Test("a git rebase that can run a program is never covered and gets no prefix", arguments: [
-        "git rebase --exec make origin/main", "git rebase --exec=make origin/main", "git rebase --ex=make origin/main",
-        "git rebase -x make origin/main", "git rebase -xmake origin/main", "git rebase -ix make origin/main",
-        "git rebase -i origin/main", "git rebase --interactive origin/main", "git rebase --inter origin/main",
-        "git rebase -s custom origin/main", "git rebase --strategy=custom origin/main", "git rebase -Xours origin/main",
+    @Test("a git rebase with any option off the allowlist is never covered and gets no prefix: the class is closed", arguments: [
+        "git rebase --exec make origin/main", "git rebase --ex=make origin/main", "git rebase --in origin/main",
+        "git rebase --edit-todo", "git rebase -x make origin/main", "git rebase -i origin/main", "git rebase -s ours origin/main",
+        "git rebase -Xours origin/main", "git rebase --strategy=ours origin/main", "git rebase --onto=origin/main HEAD~2",
+        "git rebase --autosquash origin/main", "git rebase -S origin/main",
     ])
     func rebaseHazards(command: String) throws {
         let rig = try Rig(); defer { rig.cleanUp() }
@@ -148,10 +173,10 @@ struct AlwaysAllowGeneraliseTests {
     @Test("a git worktree add rule covers another worktree beside the workspace")
     func worktreeGeneralises() throws {
         let rig = try Rig(); defer { rig.cleanUp() }
-        #expect(prefixes(rig.offer("git worktree add ../x origin/main").rules) == ["git worktree add"])
-        let next = rig.save("git worktree add ../x origin/main")
-        for command in ["git worktree add ../y origin/main", "git worktree add -b dev3/z ../z origin/main",
-                        "git worktree add --detach ../w abc123", "git worktree add \(rig.root.path)/v"] {
+        #expect(prefixes(rig.offer("git worktree add ../iris-x origin/main").rules) == ["git worktree add"])
+        let next = rig.save("git worktree add ../iris-x origin/main")
+        for command in ["git worktree add ../iris-y origin/main", "git worktree add -b dev3/z ../iris-z origin/main",
+                        "git worktree add --detach ../iris-w abc123", "git worktree add \(rig.root.path)/iris-v", "git worktree add build/wt"] {
             #expect(rig.allowed(next, command), Comment(rawValue: command))
         }
     }
@@ -159,14 +184,35 @@ struct AlwaysAllowGeneraliseTests {
     @Test("a git worktree add outside the workspace's parent, or with an option this doesn't know, stays a prompt; other worktree verbs get no prefix")
     func worktreeHazards() throws {
         let rig = try Rig(); defer { rig.cleanUp() }
-        let next = rig.save("git worktree add ../x origin/main")
-        for command in ["git worktree add /tmp/x", "git worktree add ../../x", "git worktree add --unknown ../x",
-                        "git worktree add", "cd Sources && git worktree add ../../../x"] {
+        let next = rig.save("git worktree add ../iris-x origin/main")
+        for command in ["git worktree add ../other", "git worktree add /tmp/x", "git worktree add ../../x", "git worktree add --unknown ../x",
+                        "git worktree add", "cd Sources && git worktree add ../../../x", "git worktree add -f ../x",
+                        "git worktree add -B dev3/x ../x", "git worktree add --lock ../x", "git worktree add -b -x ../x",
+                        "git worktree add ../x origin/main extra", "git worktree add -- ../x"] {
             #expect(!rig.allowed(next, command), Comment(rawValue: command))
         }
         for verb in ["git worktree remove ../x", "git worktree prune", "git worktree move ../x ../y"] {
             #expect(prefixes(rig.offer(verb).rules).isEmpty, Comment(rawValue: verb))
         }
+    }
+
+    @Test("a worktree goes only to a <workspace>-* sibling or a plain folder inside the workspace, after resolving links (#1434 rulings)")
+    func worktreeTargets() throws {
+        let rig = try Rig(); defer { rig.cleanUp() }
+        let ws = rig.workspace, home = "/nowhere/home"
+        try FileManager.default.createSymbolicLink(atPath: rig.root.path + "/iris-link", withDestinationPath: rig.root.path + "/outside")
+        for ok in ["../iris-x", "../iris-1434", "build/wt", "\(rig.root.path)/iris-y"] {
+            #expect(CommandPattern.worktreeTargetAllowed(ok, cwd: ws, workspaceReal: ws, home: home), Comment(rawValue: ok))
+        }
+        for bad in ["../other", "../iris-x/deeper", "../iris-", "../iris", "../.vim/pack/evil/start/p", "../.hidden", ".git/wt",
+                    "build/.cache/wt", "../../iris-x", "/tmp/x", "~/iris-x", "../iris-link", "../iris-link/x"] {
+            #expect(!CommandPattern.worktreeTargetAllowed(bad, cwd: ws, workspaceReal: ws, home: home), Comment(rawValue: bad))
+        }
+        // A workspace directly in home: its siblings are home's own folders. And one that is home: its parent is above it.
+        let parent = (ws as NSString).deletingLastPathComponent
+        #expect(!CommandPattern.worktreeTargetAllowed("../iris-x", cwd: ws, workspaceReal: ws, home: parent))
+        #expect(!CommandPattern.worktreeTargetAllowed("../iris-x", cwd: ws, workspaceReal: ws, home: ws))
+        #expect(CommandPattern.worktreeTargetAllowed("wt", cwd: ws, workspaceReal: ws, home: parent), "inside the workspace still goes")
     }
 
     @Test("git push and gh api stay exact")

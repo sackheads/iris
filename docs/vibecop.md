@@ -39,9 +39,9 @@ A tool Iris doesn't know keeps its verb only when that verb is on a short read-o
 ### Fleet commands, and one-offs (#1428)
 
 A few more commands generalise, each with its hazards held back:
-- **A workspace script**, `scripts/test-filter.sh FooTests`, saves `scripts/test-filter.sh`, covering any arguments and the same ride-along pipes. It matches only that path, run from the workspace's root, and only when that path is the file itself, not a link out of the workspace.
-- **`git rebase`** saves `git rebase`, which never covers a rebase that can run a program: `--exec`/`-x`, `--strategy`/`-s`/`-X`, or `--interactive`/`-i`, in any spelling git accepts.
-- **`git worktree add`** saves `git worktree add`, which covers only a new worktree under the workspace's parent folder (beside the workspace, or inside it). Other `git worktree` verbs get no prefix.
+- **A workspace script**, `scripts/test-filter.sh FooTests`, saves `scripts/test-filter.sh` for that project only (**Always allow in project**; Global is refused, since the same path is a different script in every repo, and a conversation with no workspace gets Allow once only), covering any arguments and the same ride-along pipes. It matches only that path, run from the workspace's root, and only when that path is the file itself, not a link out of the workspace.
+- **`git rebase`** saves `git rebase`, which covers only `git rebase <upstream>`, `--onto <a> <b> [<c>]`, `--continue`, `--abort` and `--skip`, each option spelled in full as its own word. Any other option prompts, since several run a program (`--exec`, `--interactive`, `--edit-todo`, `--strategy`, `-S`) and git accepts their abbreviations. A covered `--continue` still runs a todo's own `exec` lines, and your editor if a commit message is needed, as `git commit` runs hooks; a todo can only hold `exec` lines after a rebase that already asked you (`-i` or `--exec`).
+- **`git worktree add`** saves `git worktree add`, which covers only `git worktree add [-b <name>] [--detach] <path> [<commit-ish>]` with the path a sibling named after the workspace (`~/src/iris-1434` beside `~/src/iris`, one level, never when the workspace sits directly in your home folder) or a folder inside the workspace with no `.` component, either one after resolving links. Any other option prompts, and other `git worktree` verbs get no prefix.
 
 `git push` and `gh api` stay exact.
 
