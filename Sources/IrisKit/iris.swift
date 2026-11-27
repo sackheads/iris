@@ -3737,13 +3737,6 @@ actor IrisEngine {
     /// grapheme cluster has no size bound, so a grapheme cap is no cap (#187 review).
     static let rotationSummaryMaxInputBytes = 200_000
 
-    /// 5b §0.4: one easy-tier call summarising Iris for its replacement. Input is the last 200
-    /// owner/Iris messages, labelled as `ConversationReader` labels them, plus event cards as
-    /// "event:" lines (a card delivered during the rotation's reflection lands in the old Iris,
-    /// and this is how the new one hears of it), newest kept when the byte cap bites. The reply is guarded like any other text no human read before it reaches
-    /// the model. The guard's verdict is returned unwrapped so the caller can show the clean text
-    /// and give history the wrapped form (`deliverEvent`'s split). nil on any failure; the caller
-    /// still rotates.
     /// #1421: compacts a loop's or goal's history at the start of a turn, once it's over budget (`HistoryCompaction`).
     /// The summary is one `.easy` call with no tools. In a conversation that has read outside text it's guarded at
     /// tier 3 and stays wrapped, and the conversation stays tainted: a summary can't launder outside text. If no summary
@@ -3753,20 +3746,20 @@ actor IrisEngine {
         guard principal == .main, let localState = state else { return }
         let provider = providerOverride ?? ConfigManager.shared.primaryProvider
         let model = turnModel()
-        let snapshot = await MainActor.run { () -> (history: [Content], tainted: Bool, omitted: Int, ownerTexts: Set<String>)? in
+        let snapshot = await MainActor.run { () -> (history: [Content], tainted: Bool, omitted: Int, owner: [String])? in
             guard let c = localState.conversations.first(where: { $0.id == conversationId }),
                   c.loop != nil || c.activeGoal != nil else { return nil }
             return (c.history, c.hasUntrustedToolOutput, c.sessionCard?.historyTurnsOmitted ?? 0,
-                    Set(c.messages.filter { $0.role == .user }.map(\.content)))
+                    c.messages.filter { $0.role == .user }.map(\.content))
         }
         guard let snapshot else { return }
         var settings = compactionOverride ?? HistoryCompaction.Settings()
         if compactionOverride == nil { settings.budget = ConfigManager.shared.historyCompactionBudget }
         let window = HistoryCompaction.contextWindow(provider: provider, model: model)
-        guard let plan = HistoryCompaction.plan(snapshot.history, ownerTexts: snapshot.ownerTexts, settings: settings,
+        guard let plan = HistoryCompaction.plan(snapshot.history, ownerMessages: snapshot.owner, settings: settings,
                                                 contextWindow: window) else { return }
 
-        let summary = await compactionSummary(snapshot.history, plan: plan, ownerTexts: snapshot.ownerTexts,
+        let summary = await compactionSummary(snapshot.history, plan: plan, ownerTexts: Set(snapshot.owner),
                                               settings: settings, tainted: snapshot.tainted)
         let head: Content, kind: String
         if let summary {
@@ -3810,6 +3803,13 @@ actor IrisEngine {
         return InjectionGuard.wrapped(outcome, contextTag: "history_summary")
     }
 
+    /// 5b §0.4: one easy-tier call summarising Iris for its replacement. Input is the last 200
+    /// owner/Iris messages, labelled as `ConversationReader` labels them, plus event cards as
+    /// "event:" lines (a card delivered during the rotation's reflection lands in the old Iris,
+    /// and this is how the new one hears of it), newest kept when the byte cap bites. The reply is guarded like any other text no human read before it reaches
+    /// the model. The guard's verdict is returned unwrapped so the caller can show the clean text
+    /// and give history the wrapped form (`deliverEvent`'s split). nil on any failure; the caller
+    /// still rotates.
     func summarizeForRotation(messages: [ChatMessage]) async -> InjectionGuard.GuardOutcome? {
         let visible = messages.filter { $0.role == .user || $0.role == .agent || $0.role == .event }.suffix(200)
         var lines: [String] = []

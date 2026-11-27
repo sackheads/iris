@@ -14,7 +14,7 @@ struct HistoryCompactionPlanTests {
     @Test("under budget, nothing is planned")
     func underBudget() {
         let history = [user("hi"), model("hello")]
-        #expect(HistoryCompaction.plan(history, ownerTexts: [], settings: .init(budget: 10_000, tail: 1_000), contextWindow: 128_000) == nil)
+        #expect(HistoryCompaction.plan(history, ownerMessages: [], settings: .init(budget: 10_000, tail: 1_000), contextWindow: 128_000) == nil)
     }
 
     @Test("the cut lands on a turn start, never between a tool call and its result")
@@ -26,11 +26,34 @@ struct HistoryCompactionPlanTests {
             history.append(Content(role: "user", parts: [Part(functionResponse: FunctionResponse(name: "read_file", response: ["result": .string(big)]))]))
             history.append(model("board unchanged"))
         }
-        let plan = try! #require(HistoryCompaction.plan(history, ownerTexts: [], settings: .init(budget: 3_000, tail: 2_500), contextWindow: 128_000))
+        let plan = try! #require(HistoryCompaction.plan(history, ownerMessages: [], settings: .init(budget: 3_000, tail: 2_500), contextWindow: 128_000))
         #expect(plan.cut > 0 && HistoryCompaction.isTurnStart(history[plan.cut]), "cut \(plan.cut)")
         #expect(HistoryCompaction.tokens(history[plan.cut...]) <= 2_500)
         #expect(plan.ownerMessages.isEmpty, "a loop tick isn't the owner's words")
         #expect(plan.turns == history[..<plan.cut].filter(HistoryCompaction.isTurnStart).count)
+    }
+
+    @Test("a previous head isn't a turn, isn't recompacted alone, and its owner section isn't fed back as its summary")
+    func previousHead() throws {
+        let head = HistoryCompaction.head(summary: "Open items: none.", plan: .init(cut: 3, turns: 2, tokensBefore: 0, tokensCompacted: 0,
+                                                                                    ownerMessages: ["hold #1414"], priorSummary: nil, overHardLimit: false))
+        let headOnly = [head, user("Loop tick 9 of 50 (every 1m). \(big)")]
+        #expect(HistoryCompaction.plan(headOnly, ownerMessages: [], settings: .init(budget: 100, tail: 50), contextWindow: 128_000) == nil,
+                "a span that is only the previous head is never compacted again")
+        let history = [head, user("Loop tick 1 of 50. \(big)"), model(big), user("Loop tick 2 of 50. \(big)"), model("ok")]
+        let plan = try #require(HistoryCompaction.plan(history, ownerMessages: ["hold #1414"], settings: .init(budget: 100, tail: 50),
+                                                       contextWindow: 128_000))
+        #expect(plan.turns == 1, "the head isn't counted as a turn")
+        #expect(plan.priorSummary?.contains("Open items: none.") == true && plan.priorSummary?.contains("<owner_message>") == false)
+        #expect(plan.ownerMessages == ["hold #1414"], "the earlier compaction's owner message is quoted again")
+        let prompt = HistoryCompaction.summaryPrompt(history, plan: plan, ownerTexts: ["hold #1414"], settings: .init())
+        #expect(prompt.components(separatedBy: "Open items: none.").count == 2, "the previous head is in the prompt once")
+    }
+
+    @Test("an owner message still in the tail isn't quoted, and one typed twice is quoted once per copy compacted")
+    func ownerMessagesBeyondTail() {
+        let tail = [user("yes"), model("ok"), user("User (mid-task): hold"), model("ok")][...]
+        #expect(HistoryCompaction.ownerMessagesBeyondTail(["yes", "ship it", "yes", "hold"], tail: tail) == ["yes", "ship it"])
     }
 
     @Test("the budget is capped at half the model's context")
@@ -154,11 +177,49 @@ struct HistoryCompactionEngineTests {
         #expect(prompt.contains("event: Peer message (mid-task)") && !prompt.contains("owner: Peer message"),
                 "the summary input labels a peer's steer as an event, not the owner")
         let plan = try #require(HistoryCompaction.plan(before + [Content(role: "user", parts: [Part(text: "what's new?")])],
-                                                       ownerTexts: Set(Self.ownerWords), settings: settings, contextWindow: 128_000))
+                                                       ownerMessages: Self.ownerWords, settings: settings, contextWindow: 128_000))
         let tailBefore = before[plan.cut...].map { $0.parts.compactMap(\.text) }
         #expect(Array(after[1..<(1 + tailBefore.count)]).map { $0.parts.compactMap(\.text) } == tailBefore, "the tail is verbatim")
         #expect(client.summaryRequests.count == 1)
         #expect(state.conversations.first { $0.id == id }?.messages.contains { $0.content.hasPrefix("Compacted ") } == true)
+    }
+
+    @Test("a second compaction still quotes every owner message from the first (dev-2's #1431 review)")
+    func secondCompactionKeepsOwnerWords() async throws {
+        let (state, id, _) = try app()
+        await turn(state, id, client: Client(summary: "first"), settings: settings)
+        // Ten more ticks of history, then a second compaction.
+        let idx = try #require(state.conversations.firstIndex { $0.id == id })
+        for i in 0..<10 {
+            state.conversations[idx].history.append(Content(role: "user", parts: [Part(text: "Loop tick \(20 + i) of 50 (every 1m). Do it")]))
+            state.conversations[idx].history.append(Content(role: "model", parts: [Part(text: "tick: \(big)")]))
+        }
+        let client = Client(summary: "second")
+        await turn(state, id, client: client, settings: settings)
+        let head = headText(state, id)
+        #expect(head.contains("second") && client.summaryRequests.count == 1, "\(head.prefix(200))")
+        for words in Self.ownerWords { #expect(head.contains("<owner_message>\n\(words)\n</owner_message>"), "lost on the 2nd: \(words)") }
+        let prompt = try #require(client.summaryRequests.first?.contents.first?.parts.first?.text)
+        #expect(prompt.contains("<previous_summary>") && prompt.contains("first"))
+    }
+
+    @Test("a second drop past the hard limit keeps the owner's words and adds to the card's count")
+    func secondDropKeepsOwnerWords() async throws {
+        let (state, id, _) = try app(tainted: true, card: true)
+        var hard = settings
+        hard.hardLimitFraction = 0.0001
+        await turn(state, id, client: Client(summary: "s"), settings: hard, canary: "MALICIOUS")
+        let firstCount = state.conversations.first { $0.id == id }?.sessionCard?.historyTurnsOmitted ?? 0
+        let idx = try #require(state.conversations.firstIndex { $0.id == id })
+        for i in 0..<10 {
+            state.conversations[idx].history.append(Content(role: "user", parts: [Part(text: "Loop tick \(20 + i) of 50 (every 1m). Do it")]))
+            state.conversations[idx].history.append(Content(role: "model", parts: [Part(text: "tick: \(big)")]))
+        }
+        await turn(state, id, client: Client(summary: "s"), settings: hard, canary: "MALICIOUS")
+        let head = headText(state, id)
+        #expect(head.hasPrefix(HistoryCompaction.omittedLabel))
+        for words in Self.ownerWords { #expect(head.contains(words), "lost on the 2nd drop: \(words)") }
+        #expect((state.conversations.first { $0.id == id }?.sessionCard?.historyTurnsOmitted ?? 0) > firstCount)
     }
 
     @Test("a tainted loop's summary is guarded and wrapped, and the conversation stays tainted")
