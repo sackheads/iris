@@ -188,6 +188,8 @@ struct AlwaysAllowGeneraliseTests {
         for command in ["git worktree add ../other", "git worktree add /tmp/x", "git worktree add ../../x", "git worktree add --unknown ../x",
                         "git worktree add", "cd Sources && git worktree add ../../../x", "git worktree add -f ../x",
                         "git worktree add -B dev3/x ../x", "git worktree add --lock ../x", "git worktree add -b -x ../x",
+                        // #1436: a sibling path the target check allows, so only -b's value check refuses it.
+                        "git worktree add -b -x ../iris-x",
                         "git worktree add ../x origin/main extra", "git worktree add -- ../x"] {
             #expect(!rig.allowed(next, command), Comment(rawValue: command))
         }
