@@ -11,7 +11,7 @@ struct PrincipalFloorTests {
             return
         }
         #expect(tools == ["search_memory", "search_conversations", "read_conversation"])
-        let actingTools: Set<String> = ["run_command", "write_file", "github_comment", "github_approve",
+        let actingTools: Set<String> = ["run_command", "write_file", "vcs", "github_approve",
                                         "save_fact", "manage_fact", "update_memory", "update_soul"]
         #expect(tools.isDisjoint(with: actingTools))
     }

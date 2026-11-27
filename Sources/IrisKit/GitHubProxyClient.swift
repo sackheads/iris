@@ -165,6 +165,73 @@ extension GitHubProxyClient {
         }
     }
 
+    /// #1435: the files `head` changes against `base` (`GET /compare/{base}...{head}`), every rename's source
+    /// included, or why they couldn't all be listed. Branch names reach the path only after `VCSTool.isBranchName`.
+    func changedFiles(repo: String, base: String, head: String) async -> Result<[String], CompareRefusal> {
+        guard VCSTool.isBranchName(base), VCSTool.isBranchName(head) else { return .failure(.init("Refused: not a branch name vcs accepts.")) }
+        switch await perform(method: "GET", repo: repo, path: "compare/\(base)...\(head)", query: "per_page=\(Self.filePageSize)") {
+        case .refused(let message): return .failure(.init(message))
+        case .done(let json, let link):
+            guard let files = json["files"] as? [[String: Any]] else {
+                return .failure(.init("Refused: GitHub did not list the branch's changed files, so none were checked."))
+            }
+            guard files.count < Self.filePageSize, !Self.hasNextPage(link) else {
+                return .failure(.init("Refused: the branch changes too many files for me to check them all."))
+            }
+            return .success(files.flatMap { file in [file["filename"], file["previous_filename"]].compactMap { $0 as? String } })
+        }
+    }
+
+    struct CompareRefusal: Error, Equatable {
+        let message: String
+        init(_ message: String) { self.message = message }
+    }
+
+    static let maxPRBodyShown = 4_000
+
+    /// #1435: `GET /pulls/{pr}`: number, state, branches, title and the description (others' words: the caller
+    /// taints the conversation with it). Only the description keeps its line breaks.
+    func viewPR(repo: String, pr: Int) async -> String {
+        guard pr > 0 else { return "Refused: a pull request number must be positive." }
+        switch await perform(method: "GET", repo: repo, path: "pulls/\(pr)") {
+        case .refused(let message): return message
+        case .done(let json, _):
+            let token = Self.token(keychain: keychain)
+            let head = ((json["head"] as? [String: Any])?["ref"] as? String) ?? "?"
+            let base = ((json["base"] as? [String: Any])?["ref"] as? String) ?? "?"
+            let state = (json["draft"] as? Bool == true ? "draft, " : "") + ((json["merged"] as? Bool == true) ? "merged" : (json["state"] as? String ?? "?"))
+            var lines = ["#\(pr) \(json["title"] as? String ?? "") [\(state)] \(head) -> \(base)"]
+            if let url = Self.githubURL(json["html_url"]) { lines.append(url) }
+            let header = sanitize(lines.joined(separator: " "), token: token)
+            let body = SecretScrub.scrub(json["body"] as? String ?? "", token.map { [$0] } ?? [])
+            let capped = body.count > Self.maxPRBodyShown ? String(body.prefix(Self.maxPRBodyShown)) + "\n[description cut]" : body
+            return body.isEmpty ? header : header + "\n\n" + capped
+        }
+    }
+
+    /// #1435: the check runs on a PR's head commit (`GET /commits/{sha}/check-runs`), one line each.
+    func checks(repo: String, pr: Int) async -> String {
+        guard pr > 0 else { return "Refused: a pull request number must be positive." }
+        let head: String
+        switch await perform(method: "GET", repo: repo, path: "pulls/\(pr)") {
+        case .refused(let message): return message
+        case .done(let json, _):
+            guard let sha = Self.commitSHA(json, side: "head") else { return "Refused: GitHub did not report the pull request's head commit." }
+            head = sha
+        }
+        switch await perform(method: "GET", repo: repo, path: "commits/\(head)/check-runs", query: "per_page=100") {
+        case .refused(let message): return message
+        case .done(let json, _):
+            let runs = json["check-runs"] as? [[String: Any]] ?? []
+            guard !runs.isEmpty else { return "#\(pr) at \(head.prefix(7)): no checks have reported." }
+            let token = Self.token(keychain: keychain)
+            let lines = runs.prefix(50).map { run in
+                sanitize("\(run["name"] as? String ?? "?"): \(run["conclusion"] as? String ?? (run["status"] as? String ?? "?"))", token: token)
+            }
+            return "#\(pr) at \(head.prefix(7)):\n" + lines.joined(separator: "\n")
+        }
+    }
+
     enum IdentityCheck: Equatable, Sendable {
         /// The token belongs to the configured login.
         case match

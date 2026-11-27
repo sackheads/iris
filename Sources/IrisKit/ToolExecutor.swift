@@ -111,7 +111,7 @@ struct ToolExecutor {
     /// Injectable so tests never mutate `ConfigManager.shared`.
     ///
     /// `githubToolsEnabled` defaults to "the GitHub token is present, the account's login is set, the user
-    /// has allowed at least one repo and `GET /user` named that login (#1184)" (#966, Invariant 6): with any missing the three `github_*` tools can only
+    /// has allowed at least one repo and `GET /user` named that login (#1184)" (#966, Invariant 6): with any missing `github_approve` and `vcs` can only
     /// refuse, so their declarations are prompt weight an unconfigured install must not pay. The
     /// default reads `ConfigManager.githubToolsConfigured`: three parts fixed at launch and the identity check's cached
     /// answer, never the Keychain per turn (#578). A turn that finds it unchecked or unverified starts a
@@ -240,19 +240,22 @@ struct ToolExecutor {
             tools.append(contentsOf: workspaceTools)
         }
         
-        if githubToolsEnabled { tools.append(contentsOf: Self.githubToolDeclarations) }
+        // `vcs` is declared here with the GitHub tools; the engine keeps it only for a turn with a caller (#1435).
+        if githubToolsEnabled { tools.append(contentsOf: Self.githubToolDeclarations + [VCSTool.declaration]) }
 
         let mcpTools = await MCPManager.shared.getGeminiTools()
         tools.append(contentsOf: mcpTools)
         return tools
     }
 
-    /// The three tools that act on GitHub as Iris's own account (#966). Declared to the attended main
+    /// The owner-only tool that acts on GitHub as Iris's own account (#966). Declared to the attended main
     /// agent only, and only when the token is present: `IrisEngine.mainOnlyDeclared` and
-    /// `unattendedNeverDeclared` strip them for every other principal and turn, and
+    /// `unattendedNeverDeclared` strip it for every other principal and turn, and
     /// `IrisEngine.githubDispatchRefusal` refuses a call that arrives anyway. Every call is bounded
     /// by the user's allowed-repos list inside `GitHubProxyClient`, whatever the model sends.
-    nonisolated static let githubProxyTools: Set<String> = ["github_create_pr", "github_comment", "github_approve"]
+    /// `github_create_pr` and `github_comment` became `vcs`'s `pr_create` and `pr_comment` (#1435), which
+    /// has its own gate: a role's session may use it unattended (`VCSTool`).
+    nonisolated static let githubProxyTools: Set<String> = ["github_approve"]
 
     /// Every tool that reads the owner's memory or conversations (#1195). A turn a guest's message
     /// started or steered is `.main` and attended, but its words are a guest's: these read the
@@ -294,35 +297,6 @@ struct ToolExecutor {
 
     nonisolated static let githubToolDeclarations: [FunctionDeclaration] = [
         FunctionDeclaration(
-            name: "github_create_pr",
-            description: "Open a pull request on GitHub as Iris's own GitHub account, from a branch that is already pushed. Only for repositories the user has put on the allowed list; any other is refused. Pass draft true unless the user asked for a ready PR. Returns the PR number and link.",
-            parameters: Schema(
-                type: "OBJECT",
-                properties: [
-                    "repo": Schema(type: "STRING", description: "owner/name, e.g. sackheads/iris."),
-                    "head": Schema(type: "STRING", description: "The branch the changes are on."),
-                    "base": Schema(type: "STRING", description: "The branch to merge into, usually main."),
-                    "title": Schema(type: "STRING", description: "The PR title."),
-                    "body": Schema(type: "STRING", description: "The PR description."),
-                    "draft": Schema(type: "BOOLEAN", description: "Open it as a draft. Default true.")
-                ],
-                required: ["repo", "head", "base", "title", "body"]
-            )
-        ),
-        FunctionDeclaration(
-            name: "github_comment",
-            description: "Post a comment on a GitHub pull request as Iris's own GitHub account. Only for repositories the user has put on the allowed list; any other is refused. Returns the comment link.",
-            parameters: Schema(
-                type: "OBJECT",
-                properties: [
-                    "repo": Schema(type: "STRING", description: "owner/name, e.g. sackheads/iris."),
-                    "pr": Schema(type: "INTEGER", description: "The pull request number."),
-                    "body": Schema(type: "STRING", description: "The comment text.")
-                ],
-                required: ["repo", "pr", "body"]
-            )
-        ),
-        FunctionDeclaration(
             name: "github_approve",
             description: "Approve a GitHub pull request as Iris's own GitHub account. It refuses unless the PR is open and every changed file is under docs/ or assets/ (not a plans/ or specs/ folder, which are instructions and need a human); anything else needs a human reviewer, so do not try to work around a refusal. The approval is tied to the commit that was checked, and the result says if the PR moved afterwards. Only for repositories the user has put on the allowed list.",
             parameters: Schema(
@@ -336,7 +310,7 @@ struct ToolExecutor {
         ),
     ]
 
-    /// `draft` on `github_create_pr`: true unless the model sent an explicit `false`, so an omitted
+    /// `draft` on `vcs`'s `pr_create`: true unless the model sent an explicit `false`, so an omitted
     /// or malformed value opens a draft (the safer shape).
     static func githubDraftFlag(_ value: JSONValue?) -> Bool {
         if case .bool(let b)? = value { return b }
@@ -345,7 +319,7 @@ struct ToolExecutor {
 
     /// A positive integer argument the model may have sent as an int, a whole double or a numeric
     /// string; anything else is nil.
-    private static func positiveInt(_ value: JSONValue?) -> Int? {
+    static func positiveInt(_ value: JSONValue?) -> Int? {
         switch value {
         case .int(let i): return i > 0 ? i : nil
         case .double(let d): return d > 0 && d == d.rounded() && d < 1e9 ? Int(d) : nil
@@ -470,20 +444,8 @@ struct ToolExecutor {
         case "delete_skill":
             guard let name = args["name"]?.stringValue else { return "Error: Missing name for delete_skill" }
             return await deleteSkill(name: name)
-        case "github_create_pr":
-            guard let repo = args["repo"]?.stringValue, let head = args["head"]?.stringValue,
-                  let base = args["base"]?.stringValue, let title = args["title"]?.stringValue,
-                  let body = args["body"]?.stringValue else {
-                return "Error: github_create_pr needs repo, head, base, title and body"
-            }
-            return await (githubClient ?? GitHubProxyClient()).createPR(repo: repo, head: head, base: base, title: title, body: body,
-                                                      draft: Self.githubDraftFlag(args["draft"]))
-        case "github_comment":
-            guard let repo = args["repo"]?.stringValue, let body = args["body"]?.stringValue else {
-                return "Error: github_comment needs repo, pr and body"
-            }
-            guard let pr = Self.positiveInt(args["pr"]) else { return "Error: github_comment needs a positive pr number" }
-            return await (githubClient ?? GitHubProxyClient()).comment(repo: repo, pr: pr, body: body)
+        case VCSTool.name:
+            return await VCSTool.execute(args: args, client: githubClient ?? GitHubProxyClient())
         case "github_approve":
             guard let repo = args["repo"]?.stringValue else { return "Error: github_approve needs repo and pr" }
             guard let pr = Self.positiveInt(args["pr"]) else { return "Error: github_approve needs a positive pr number" }

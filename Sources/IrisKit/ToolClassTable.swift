@@ -23,6 +23,7 @@ enum ToolClassTable {
         put(["run_command", "read_file", "write_file"], .approvalGated)
         put(ToolExecutor.googleWorkspaceTools, .ownerOnly)
         put(ToolExecutor.githubProxyTools, .ownerOnly)      // act as Iris's own GitHub account, no approval step
+        put([VCSTool.name], .ownerOnly)                    // the same account, under its own policy (#1435)
         put(ToolExecutor.ownerJobReadTools, .ownerOnly)
         // The roster, standing jobs, and the one tool that re-points which AGENTS.md reaches the prompt.
         // `set_alarm` schedules a future turn that runs without the guest stamp, carrying the guest's note (#1294's shape, dev-2's review of #1307).

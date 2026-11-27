@@ -4334,6 +4334,10 @@ actor IrisEngine {
         // a `.subagent` (never pinned itself) could create the standing job the pinned-conversation
         // gate exists to stop, laundering it through `invoke_subagent`.
         if isUnattended || principal != .main { toolsList.removeAll { Self.jobCreationTools.contains($0.name) } }
+        // #1435: `vcs` only for a turn it would act for: a session with a /role, or the owner's own attended turn.
+        if toolsList.contains(where: { $0.name == VCSTool.name }), await vcsTurn(conversationId).caller == nil {
+            toolsList.removeAll { $0.name == VCSTool.name }
+        }
         // Add set_workspace tool dynamically — not to a background turn (#282 §0.10, invariant 6):
         // its grant is its boundary, and `executeFunctionCall` refuses the call anyway.
         if !isUnattended {
@@ -6031,6 +6035,9 @@ actor IrisEngine {
     /// `sanitizeArrival`, which taints then.
     nonisolated static func resultCarriesOutsideContent(_ name: String, args: [String: JSONValue]) -> Bool {
         if resultIsIrisOwnWords.contains(name) { return false }
+        // #1435: a `vcs` write returns a fixed sentence, a PR number and a checked github.com link, or a refusal
+        // (GitHub's own short error included), never another person's text; `pr_view` and `pr_checks` do.
+        if name == VCSTool.name, (args["action"]?.stringValue).flatMap(VCSTool.Action.init(rawValue:))?.writes == true { return false }
         if name == "read_file" {
             let path = args["path"]?.stringValue.trimmingCharacters(in: .whitespaces).lowercased() ?? ""
             return path.hasPrefix(ArtifactURI.scheme)
@@ -6285,7 +6292,7 @@ actor IrisEngine {
         jobCreationTools.union([scheduleNextTickTool, setAlarmTool, "rename_conversation", "propose_goal_contract",
                                 "amend_goal_contract", "reach_checkpoint", "delegate_milestone",
                                 "waive_criterion", "list_sessions", "describe_session", "send_to_session",
-                                "set_session_card", "close_request", "inbox_item", resolveInboxItemTool])
+                                "set_session_card", "close_request", "inbox_item", resolveInboxItemTool, VCSTool.name])
             .union(ToolExecutor.githubProxyTools)
 
     nonisolated static let listSessionsDeclaration = FunctionDeclaration(
@@ -6386,7 +6393,7 @@ actor IrisEngine {
                                       principal: Principal, guestOrigin: Bool = false, nonOwner: Bool = false,
                                       keepUnattended: Set<String> = []) -> [FunctionDeclaration] {
         var denied: Set<String> = []
-        if guestOrigin { denied.formUnion(ToolExecutor.githubProxyTools) }
+        if guestOrigin { denied.formUnion(ToolExecutor.githubProxyTools.union([VCSTool.name])) }
         // `keepUnattended` only ever names the job-run inbox tools; it cannot lift any other unattended strip.
         if isUnattended { denied.formUnion(unattendedNeverDeclared.subtracting(keepUnattended.intersection(jobRunInboxTools))) }
         if principal != .main { denied.formUnion(mainOnlyDeclared) }
@@ -6608,6 +6615,30 @@ actor IrisEngine {
             return localState.isGuestOriginTurn(conversationId)
                 || localState.isGuestOriginTurn(localState.delegationRoot(of: conversationId))
         }
+    }
+
+    /// #1435: whose `vcs` policy a call on this conversation's current turn acts under, whether the conversation has
+    /// read outside text, and whether the owner is attending the turn (`AppState.isOwnerAttended`, which a peer- or
+    /// guest-started turn never is, and a background run isn't either).
+    func vcsTurn(_ conversationId: UUID) async -> (caller: VCSTool.Caller?, tainted: Bool, ownerAttended: Bool) {
+        let guestOrigin = await isGuestOriginConversation(conversationId)
+        let localState = state
+        let principal = self.principal
+        return await MainActor.run {
+            let conversation = localState?.conversations.first { $0.id == conversationId }
+            let ownerAttended = conversation?.isBackground == false && localState?.isOwnerAttended(conversationId) == true
+            let caller = VCSTool.caller(principal: principal, guestOrigin: guestOrigin, role: conversation?.role,
+                                        ownerAttended: ownerAttended)
+            return (caller, conversation?.hasUntrustedToolOutput == true, ownerAttended)
+        }
+    }
+
+    /// #1435: a `vcs` call this turn may not make: no caller, or a write on a tainted conversation nobody is watching.
+    func vcsDispatchRefusal(_ call: FunctionCall, conversationId: UUID) async -> String? {
+        let turn = await vcsTurn(conversationId)
+        guard turn.caller != nil else { return VCSTool.noCallerRefusal }
+        guard let action = (call.args["action"]?.stringValue).flatMap(VCSTool.Action.init(rawValue:)) else { return nil }
+        return VCSTool.taintRefusal(action, tainted: turn.tainted, ownerAttended: turn.ownerAttended)
     }
 
     /// What the dispatcher tells a background run that reached for one anyway.
@@ -7031,6 +7062,9 @@ actor IrisEngine {
             return refusal
         }
         if principal == .main, let refusal = await toolClassGate(tool: functionCall.name, conversationId: conversationId) {
+            return refusal
+        }
+        if functionCall.name == VCSTool.name, let refusal = await vcsDispatchRefusal(functionCall, conversationId: conversationId) {
             return refusal
         }
         if Self.jobCreationTools.contains(functionCall.name), isUnattended {
@@ -8702,7 +8736,7 @@ actor IrisEngine {
         "google_docs_get", "google_drive_search", "google_sheets_get",
         "gmail_list_unread", "gmail_send_email",
         "list_jobs", "get_job_run", "search_conversations", "read_conversation",
-        "github_create_pr", "github_comment", "github_approve",
+        "github_approve", VCSTool.name,
     ]
 
     /// The tools `buildRequest` declares inline (identity, memory, sessions, goals, delegation)
@@ -9000,11 +9034,17 @@ actor IrisEngine {
         let fsBinding = conversationId == nil ? self.binding : await bindingForCall(conversationId: conversationId!)
         let filesystemPolicy = FilesystemPolicy.resolve(binding: fsBinding,
                                                          grant: FilesystemPolicy.grant(fromFsRoots: fsBinding.profile.fsRoots))
-        var result = await executor.execute(name: name, args: execArgs, cwd: cwd, conversationId: conversationId, useSandbox: useSandbox, grant: grant, grantedMount: grantedMount,
-                                              approvedWorkspaceRoot: approvedWorkspaceRoot, decidedPath: decidedPath, restrictedPath: restrictedPath,
-                                              homeWritableOptIn: await homeWritableOptIn(for: conversationId),
-                                              additionalRoots: await additionalRoots(for: conversationId), decidedJobProfile: decidedJobProfile,
-                                              filesystemPolicy: filesystemPolicy)
+        // #1435: the shared executor learns whose `vcs` policy applies from the turn, never from the model.
+        var vcsCaller: VCSTool.Caller?
+        if name == VCSTool.name, let conversationId { vcsCaller = await vcsTurn(conversationId).caller }
+        let homeWritable = await homeWritableOptIn(for: conversationId)
+        let roots = await additionalRoots(for: conversationId)
+        var result = await VCSTool.$caller.withValue(vcsCaller) {
+            await executor.execute(name: name, args: execArgs, cwd: cwd, conversationId: conversationId, useSandbox: useSandbox, grant: grant, grantedMount: grantedMount,
+                                   approvedWorkspaceRoot: approvedWorkspaceRoot, decidedPath: decidedPath, restrictedPath: restrictedPath,
+                                   homeWritableOptIn: homeWritable, additionalRoots: roots, decidedJobProfile: decidedJobProfile,
+                                   filesystemPolicy: filesystemPolicy)
+        }
 
         if name == "write_file", result.hasPrefix("Successfully wrote to "),
            let cid = conversationId, let path = execArgs["path"]?.stringValue {
