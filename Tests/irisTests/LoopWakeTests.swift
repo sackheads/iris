@@ -58,7 +58,7 @@ struct LoopWakeTests {
     @Test("idle: the arrival's turn runs at once, no tick runs for it, and the waiting tick keeps its due time",
           arguments: Channel.allCases, [false, true])
     func idleWakes(_ channel: Channel, _ selfPaced: Bool) async throws {
-        let (state, id, sender) = try app()
+        let (state, id, sender) = try app(latencyMs: 200)
         let engine = try #require(state.engine)
         state.startLoop(ConversationLoop(prompt: "p", intervalSeconds: 3600, cap: 5, selfPaced: selfPaced), in: id)
         #expect(await eventually { state.loopNextTick[id] != nil })
@@ -98,8 +98,10 @@ struct LoopWakeTests {
 
     /// #1423 (planner's ruling): a turn between ticks never moves the next one, so a chatty conversation still loops.
     @Test("an arrival keeps an interval loop's due time: three arrivals, and the next tick hasn't moved")
+    // Each turn takes 200 ms, so re-arming from a turn's end would move the tick by more than the 50 ms the chip's
+    // recomputed date is compared within.
     func arrivalsKeepTheDueTime() async throws {
-        let (state, id, sender) = try app()
+        let (state, id, sender) = try app(latencyMs: 200)
         let engine = try #require(state.engine)
         state.startLoop(ConversationLoop(prompt: "p", intervalSeconds: 3600, cap: 5), in: id)
         #expect(await eventually { state.loopNextTick[id] != nil })
@@ -158,7 +160,7 @@ struct LoopWakeTests {
 
     @Test("a self-paced loop's wake survives an arrival, and a turn that reschedules moves it")
     func selfPacedWakeSurvives() async throws {
-        let (state, id, sender) = try app()
+        let (state, id, sender) = try app(latencyMs: 200)
         let engine = try #require(state.engine)
         state.startLoop(ConversationLoop(prompt: "p", intervalSeconds: 3600, cap: 5, selfPaced: true), in: id)
         #expect(await eventually { state.loopNextTick[id] != nil })
