@@ -156,18 +156,20 @@ struct UnattendedLoopTests {
         let run = Task { await UnattendedLoop.$turn.withValue(parentTick) {
             await engine.processInput("subtask", source: "System", conversationId: child)
         } }
-        for _ in 0..<80 where state.pendingApprovals.isEmpty && state.unattendedLoopDenials[parent] == nil {
-            try? await Task.sleep(nanoseconds: 25_000_000)
-        }
         if parentTick {
+            // Nothing can block an unattended turn, so the run finishes on its own: wait for it, not for a window.
+            // CI's runner took ~15 s over this turn (#1447 run 46092000550), so no short poll.
+            try await value(of: run, within: 45)
             #expect(state.pendingApprovals.isEmpty, "a subagent of an unattended tick shows no dialog")
             #expect(state.unattendedLoopDenials[parent]?.calls.count == 1, "held on the loop's conversation")
             #expect(notices(state, parent).count == 1)
         } else {
+            let deadline = TestClock.deadline(45)
+            while state.pendingApprovals.isEmpty, TestClock.now() < deadline { try? await Task.sleep(nanoseconds: 25_000_000) }
             #expect(state.pendingApprovals.count == 1, "a subagent of the person's typed turn still asks")
             state.denyPendingApprovals(for: child)
+            try await value(of: run, within: 45)
         }
-        try await value(of: run)
     }
 
     /// dev-3's #1447 review: the root half of the taint check had no row.
