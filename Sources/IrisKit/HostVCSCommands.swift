@@ -33,18 +33,20 @@ enum HostVCSCommands {
 
     static func needsPerson(words: [String]) -> Bool {
         var i = 0
-        // Leading `VAR=value` assignments and wrappers: git or gh behind them is git or gh run another way.
+        // Leading `VAR=value` assignments and wrappers: git or gh behind them is git or gh run another way. An assignment
+        // can undo the credential strip (`GIT_CONFIG_COUNT=0 git …`, dev-3's #1453 review), so it counts as a wrapper.
         var wrapped = false
         while i < words.count {
             let word = words[i]
-            if word.contains("="), !word.hasPrefix("-"), word.first.map({ $0.isLetter || $0 == "_" }) == true { i += 1; continue }
+            if word.contains("="), !word.hasPrefix("-"), word.first.map({ $0.isLetter || $0 == "_" }) == true { wrapped = true; i += 1; continue }
             if wrappers.contains(basename(word)) { wrapped = true; i += 1; while i < words.count, words[i].hasPrefix("-") { i += 1 }; continue }
             break
         }
         guard i < words.count else { return false }
         let program = words[i]
         let name = basename(program)
-        if name == "gh" { return true }
+        // `git-credential-osxkeychain` and the other `git-*` programs, run directly, read or move credentials too.
+        if name == "gh" || name.hasPrefix("git-") { return true }
         guard name == "git" else { return false }
         if wrapped || program.contains("/") { return true }
         var j = i + 1
@@ -54,7 +56,16 @@ enum HostVCSCommands {
             j += (option == "-C" && !words[j].contains("=")) ? 2 : 1
         }
         guard j < words.count else { return false }
-        return transportSubcommands.contains(words[j])
+        let subcommand = words[j]
+        // `credential fill` asks the helpers for a credential; `credential-*` is a helper itself.
+        if subcommand == "credential" || subcommand.hasPrefix("credential-") { return true }
+        // `git config` that sets an alias, a credential setting or an include: each can bring the credential back later.
+        if subcommand == "config", words[(j + 1)...].contains(where: { word in
+            let key = word.lowercased()
+            return key.hasPrefix("alias.") || key.hasPrefix("credential") || key.hasPrefix("include") || key.hasPrefix("core.sshcommand")
+                || key.hasPrefix("core.askpass")
+        }) { return true }
+        return transportSubcommands.contains(subcommand)
     }
 
     private static func basename(_ word: String) -> String {
@@ -65,6 +76,8 @@ enum HostVCSCommands {
         let patterns = [#"(^|[^A-Za-z0-9_.-])gh([^A-Za-z0-9_.-]|$)"#,
                         #"/git([^A-Za-z0-9_.-]|$)"#,
                         #"(^|[^A-Za-z0-9_.-])git\s+(-c|--config-env|--exec-path|--git-dir|--work-tree)"#,
+                        #"(^|[^A-Za-z0-9_.-])git(-|\s+)credential"#,
+                        #"GIT_[A-Z_]+="#,
                         #"(^|[^A-Za-z0-9_.-])git\s+(\S+\s+)*?(push|fetch|pull|clone|ls-remote|remote|submodule|send-email|archive)([^A-Za-z0-9_.-]|$)"#]
         return patterns.contains { command.range(of: $0, options: .regularExpression) != nil }
     }
