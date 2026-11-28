@@ -60,11 +60,35 @@ struct HistoryProvenanceTests {
         #expect(stripped.producedBy == "anthropic", "the entry still says who wrote it")
     }
 
-    @Test("an entry with no producer, written before #1452, is sent exactly as before")
-    func legacyUnchanged() throws {
-        let legacy = request(reply("answer", signature: "OLD-SIG", by: nil))
-        #expect(try geminiBody(HistoryProvenance.filtered(legacy, for: "gemini")) == (try geminiBody(legacy)))
-        #expect(try openAIBody(HistoryProvenance.filtered(legacy, for: "deepseek")) == (try openAIBody(legacy)))
+    @Test("an untagged entry, written before #1452, keeps what its own provider reads, byte for byte")
+    func legacyOwnKind() throws {
+        let gemini = request(reply("answer", signature: "Q2lnbmF0dXJlLWJ5dGVzLWZvci1hLXJlYWwtdHVybi1vZi1HZW1pbmk_x+/==", by: nil))
+        #expect(try geminiBody(HistoryProvenance.filtered(gemini, for: "gemini")) == (try geminiBody(gemini)))
+        let deepseek = request(reply("answer", signature: "The user wants the file, so read it first.", by: nil))
+        #expect(try openAIBody(HistoryProvenance.filtered(deepseek, for: "deepseek")) == (try openAIBody(deepseek)))
+        #expect(try openAIBody(HistoryProvenance.filtered(deepseek, for: "openai")) == (try openAIBody(deepseek)))
+    }
+
+    /// dev-2's #1455 probe: every conversation from before #1452 is untagged, and a switch must still not cross them.
+    @Test("an untagged entry never sends a Gemini signature to an OpenAI-compatible provider, or reasoning to Gemini")
+    func legacyOtherKind() throws {
+        let signature = "Q2lnbmF0dXJlLWJ5dGVzLWZvci1hLXJlYWwtdHVybi1vZi1HZW1pbmk_x+/=="
+        let gemini = request(reply("answer", signature: signature, by: nil))
+        #expect(try openAIBody(gemini).contains(signature))
+        #expect(!(try openAIBody(HistoryProvenance.filtered(gemini, for: "deepseek"))).contains(signature))
+        let reasoning = "The user wants the file, so read it first."
+        let deepseek = request(reply("answer", signature: reasoning, by: nil))
+        #expect(try geminiBody(deepseek).contains(reasoning))
+        let toGemini = HistoryProvenance.filtered(deepseek, for: "gemini")
+        #expect(!(try geminiBody(toGemini)).contains(reasoning))
+        #expect(toGemini.contents[0].parts[1].functionCall?.thoughtSignature == nil)
+        #expect(toGemini.contents[0].parts[0].text == "answer")
+        // A one-word answer is reasoning too, never taken for a signature (dev-2's #1455 re-review).
+        let short = request(reply("answer", signature: "Reading", by: nil))
+        #expect(!(try geminiBody(HistoryProvenance.filtered(short, for: "gemini"))).contains("Reading"))
+        #expect(try openAIBody(HistoryProvenance.filtered(short, for: "deepseek")) == (try openAIBody(short)))
+        // Anthropic's client sends neither kind, so its requests are as before.
+        #expect(try geminiBody(HistoryProvenance.filtered(deepseek, for: "anthropic")) == (try geminiBody(deepseek)))
     }
 
     @Test("producedBy is never sent to Gemini, and it round-trips through history's JSON (an old row decodes as nil)")

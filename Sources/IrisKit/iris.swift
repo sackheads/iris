@@ -5050,6 +5050,8 @@ actor IrisEngine {
                 // re-resolves and sees it — never mid-stream.
                 let streamResponses = streamResponsesOverride ?? ConfigManager.shared.streamResponses
                 let streamed = streamResponses && client.supportsStreaming
+                // #1452: who answers this call, read before it: the primary may be switched while the reply streams.
+                let producer = client.producerId
                 // `roundForDump` is a `let` snapshot: `modelRound` only advances after `outcome`
                 // resolves, so every attempt below (the original call and any retry) belongs to
                 // this same round.
@@ -5139,7 +5141,7 @@ actor IrisEngine {
                     modelContent.anthropicBlocks = response.candidates?.first?.content?.anthropicBlocks
                 }
                 // #1452: which provider wrote it, so a request to another drops what only this one reads.
-                modelContent.producedBy = client.producerId
+                modelContent.producedBy = producer
                 await MainActor.run { 
                     localState?.appendContentToHistory(for: conversationId, content: modelContent) 
                 }
