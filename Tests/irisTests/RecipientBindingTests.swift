@@ -47,6 +47,53 @@ struct RecipientBindingTests {
         FunctionCall(name: "send_to_session", args: ["to": .string(to), "message": .string(message)], id: "c1")
     }
 
+    /// #1408's shape: the recipient's stamp lives only while its turn runs (`endEngineTurn` clears it), and that turn
+    /// can end before the test looks. So the stamp and `bindingForCall` are read at the recipient turn's own model call,
+    /// found by the relayed text in its request, while the turn that carries them is running.
+    private final class StampAtRecipientTurn: LLMClientProtocol, @unchecked Sendable {
+        private let lock = NSLock()
+        private var responses: [GeminiResponse]
+        private var reads: [(stamp: AccessBinding?, viaCall: AccessBinding)] = []
+        private let marker: String
+        private let read: @Sendable () async -> (AccessBinding?, AccessBinding)
+        init(_ responses: [GeminiResponse], marker: String, read: @escaping @Sendable () async -> (AccessBinding?, AccessBinding)) {
+            self.responses = responses; self.marker = marker; self.read = read
+        }
+        var seen: [(stamp: AccessBinding?, viaCall: AccessBinding)] { lock.withLock { reads } }
+        func generateContent(request: GeminiRequest, tier: ModelTier) async throws -> GeminiResponse {
+            let texts = request.contents.flatMap(\.parts).compactMap(\.text)
+            if texts.contains(where: { $0.contains(marker) }) && !request.contents.contains(where: { $0.parts.contains { $0.functionResponse != nil } }) {
+                let (stamp, viaCall) = await read()
+                lock.withLock { reads.append((stamp, viaCall)) }
+            }
+            return lock.withLock { responses.isEmpty ? Self.noted : responses.removeFirst() }
+        }
+        static let noted = GeminiResponse(candidates: [Candidate(content: Content(role: "model", parts: [Part(text: "noted")]))], usageMetadata: nil)
+    }
+
+    /// The `.main` engine both sides share, whose model call on the recipient's turn records what it carries.
+    private func recordingMain(_ w: World, marker: String, responses: [GeminiResponse]) -> (IrisEngine, StampAtRecipientTurn) {
+        let box = EngineBox()
+        let client = StampAtRecipientTurn(responses, marker: marker) { [app = w.app, reviewer = w.reviewer] in
+            let stamp = await MainActor.run { app.guestSteeredBinding(for: reviewer) }
+            return (stamp, await box.engine!.bindingForCall(conversationId: reviewer))
+        }
+        let main = IrisEngine(state: w.app, tier: .medium, principal: .main, client: client, retryDelays: [], protectionEnabled: false)
+        box.engine = main
+        w.app.installEngine(main)
+        return (main, client)
+    }
+
+    private final class EngineBox: @unchecked Sendable { var engine: IrisEngine? }
+
+    private func recipientReads(_ client: StampAtRecipientTurn) async -> (stamp: AccessBinding?, viaCall: AccessBinding)? {
+        for _ in 0..<200 {
+            if let first = client.seen.first { return first }
+            try? await Task.sleep(nanoseconds: 25_000_000)
+        }
+        return client.seen.first
+    }
+
     /// A direct guest send: `self` (the sending engine) is the guest's own, so the recipient gets
     /// exactly the guest's binding — deny-all profile capped by the `.mcpGuest` floor, memoryRead
     /// no higher than `.task`.
@@ -60,20 +107,17 @@ struct RecipientBindingTests {
         ])
         let guestEngine = IrisEngine(state: w.app, tier: .medium, principal: .mcpGuest, client: guestClient, retryDelays: [],
                                      protectionEnabled: false, sessionPeerCount: 0, guestClientId: "dev-1")
-        let main = IrisEngine(state: w.app, tier: .medium, principal: .main,
-                              client: FakeLLMClient(responses: [GeminiResponse(candidates: [Candidate(content: Content(role: "model", parts: [Part(text: "noted")]))], usageMetadata: nil)]),
-                              retryDelays: [], protectionEnabled: false)
-        w.app.installEngine(main)
+        let (_, recorder) = recordingMain(w, marker: "please check this", responses: [])
         await guestEngine.processInput("go", source: "UI", conversationId: w.guest)
         #expect(await eventually { self.text(w.app, w.reviewer).contains("please check this") })
 
-        let stamped = w.app.guestSteeredBinding(for: w.reviewer)
+        let read = await recipientReads(recorder)
+        let stamped = read?.stamp
         #expect(stamped != nil, "the recipient turn must carry a binding, not just the YOLO-off bool")
         #expect(stamped?.principal == .mcpGuest)
         #expect(stamped?.isOwner == false)
         #expect(stamped?.profile.memoryRead ?? .full != .full, "a guest's binding must not read as owner memory")
-        let viaCall = await main.bindingForCall(conversationId: w.reviewer)
-        #expect(viaCall == stamped, "bindingForCall must read the same stamp")
+        #expect(read?.viaCall == stamped, "bindingForCall must read the same stamp")
     }
 
     /// A relay: `builder`'s own turn was itself guest-steered and already carries a stamped
@@ -88,18 +132,14 @@ struct RecipientBindingTests {
         w.app.markGuestSteeredBinding(stampedOnBuilder, for: w.builder)
 
         let call = sendCall(to: "role:reviewer", message: "forwarding this along")
-        let main = IrisEngine(state: w.app, tier: .medium, principal: .main,
-                              client: FakeLLMClient(responses: [
-                                GeminiResponse(candidates: [Candidate(content: Content(role: "model", parts: [Part(functionCall: call)]))], usageMetadata: nil),
-                                GeminiResponse(candidates: [Candidate(content: Content(role: "model", parts: [Part(text: "ok")]))], usageMetadata: nil),
-                                GeminiResponse(candidates: [Candidate(content: Content(role: "model", parts: [Part(text: "noted")]))], usageMetadata: nil),
-                              ]),
-                              retryDelays: [], protectionEnabled: false)
-        w.app.installEngine(main)
+        let (main, recorder) = recordingMain(w, marker: "forwarding this along", responses: [
+            GeminiResponse(candidates: [Candidate(content: Content(role: "model", parts: [Part(functionCall: call)]))], usageMetadata: nil),
+            GeminiResponse(candidates: [Candidate(content: Content(role: "model", parts: [Part(text: "ok")]))], usageMetadata: nil),
+        ])
         await main.processInput("go", source: "UI", conversationId: w.builder)
         #expect(await eventually { self.text(w.app, w.reviewer).contains("forwarding this along") })
 
-        let stamped = w.app.guestSteeredBinding(for: w.reviewer)
+        let stamped = await recipientReads(recorder)?.stamp
         #expect(stamped == stampedOnBuilder, "the relay must carry the SAME binding forward, not the engine's own owner-shaped default")
     }
 
@@ -109,20 +149,18 @@ struct RecipientBindingTests {
     func ordinarySendStampsNothing() async {
         let w = world()
         let call = sendCall(to: "role:reviewer", message: "ordinary peer business")
-        let main = IrisEngine(state: w.app, tier: .medium, principal: .main,
-                              client: FakeLLMClient(responses: [
-                                GeminiResponse(candidates: [Candidate(content: Content(role: "model", parts: [Part(functionCall: call)]))], usageMetadata: nil),
-                                GeminiResponse(candidates: [Candidate(content: Content(role: "model", parts: [Part(text: "ok")]))], usageMetadata: nil),
-                                GeminiResponse(candidates: [Candidate(content: Content(role: "model", parts: [Part(text: "noted")]))], usageMetadata: nil),
-                              ]),
-                              retryDelays: [], protectionEnabled: false)
-        w.app.installEngine(main)
+        let (main, recorder) = recordingMain(w, marker: "ordinary peer business", responses: [
+            GeminiResponse(candidates: [Candidate(content: Content(role: "model", parts: [Part(functionCall: call)]))], usageMetadata: nil),
+            GeminiResponse(candidates: [Candidate(content: Content(role: "model", parts: [Part(text: "ok")]))], usageMetadata: nil),
+        ])
         await main.processInput("go", source: "UI", conversationId: w.builder)
         #expect(await eventually { self.text(w.app, w.reviewer).contains("ordinary peer business") })
 
-        #expect(w.app.guestSteeredBinding(for: w.reviewer) == nil)
-        let viaCall = await main.bindingForCall(conversationId: w.reviewer)
-        #expect(viaCall == (await main.binding), "no stamp: falls back to the engine's own binding")
+        // Read during the recipient's turn, so the nil is "never stamped", not "stamped and already cleared".
+        let read = await recipientReads(recorder)
+        #expect(read != nil, "the recipient turn made its model call")
+        #expect(read?.stamp == nil)
+        #expect(read?.viaCall == (await main.binding), "no stamp: falls back to the engine's own binding")
     }
 
     /// The stamp is transient, like the bool it rides alongside: once the recipient's turn ends,
@@ -319,18 +357,14 @@ struct RecipientBindingTests {
         w.app.markGuestOriginTurn(delegateSender)
 
         let call = sendCall(to: "role:reviewer", message: "relay from a doubly-stamped delegate")
-        let main = IrisEngine(state: w.app, tier: .medium, principal: .main,
-                              client: FakeLLMClient(responses: [
-                                GeminiResponse(candidates: [Candidate(content: Content(role: "model", parts: [Part(functionCall: call)]))], usageMetadata: nil),
-                                GeminiResponse(candidates: [Candidate(content: Content(role: "model", parts: [Part(text: "ok")]))], usageMetadata: nil),
-                                GeminiResponse(candidates: [Candidate(content: Content(role: "model", parts: [Part(text: "noted")]))], usageMetadata: nil),
-                              ]),
-                              retryDelays: [], protectionEnabled: false)
-        w.app.installEngine(main)
+        let (main, recorder) = recordingMain(w, marker: "relay from a doubly-stamped delegate", responses: [
+            GeminiResponse(candidates: [Candidate(content: Content(role: "model", parts: [Part(functionCall: call)]))], usageMetadata: nil),
+            GeminiResponse(candidates: [Candidate(content: Content(role: "model", parts: [Part(text: "ok")]))], usageMetadata: nil),
+        ])
         await main.processInput("go", source: "UI", conversationId: delegateSender)
         #expect(await eventually { self.text(w.app, w.reviewer).contains("relay from a doubly-stamped delegate") })
 
-        #expect(w.app.guestSteeredBinding(for: w.reviewer) == narrow, "root wide, sender narrow -- the relay must end up narrow")
+        #expect(await recipientReads(recorder)?.stamp == narrow, "root wide, sender narrow -- the relay must end up narrow")
     }
 
     /// dev-3 review round 3: the opposite order of the test above, in a fresh world (reusing the
@@ -347,18 +381,14 @@ struct RecipientBindingTests {
         w.app.markGuestOriginTurn(delegateSender)
 
         let call = sendCall(to: "role:reviewer", message: "relay from the opposite order")
-        let main = IrisEngine(state: w.app, tier: .medium, principal: .main,
-                              client: FakeLLMClient(responses: [
-                                GeminiResponse(candidates: [Candidate(content: Content(role: "model", parts: [Part(functionCall: call)]))], usageMetadata: nil),
-                                GeminiResponse(candidates: [Candidate(content: Content(role: "model", parts: [Part(text: "ok")]))], usageMetadata: nil),
-                                GeminiResponse(candidates: [Candidate(content: Content(role: "model", parts: [Part(text: "noted")]))], usageMetadata: nil),
-                              ]),
-                              retryDelays: [], protectionEnabled: false)
-        w.app.installEngine(main)
+        let (main, recorder) = recordingMain(w, marker: "relay from the opposite order", responses: [
+            GeminiResponse(candidates: [Candidate(content: Content(role: "model", parts: [Part(functionCall: call)]))], usageMetadata: nil),
+            GeminiResponse(candidates: [Candidate(content: Content(role: "model", parts: [Part(text: "ok")]))], usageMetadata: nil),
+        ])
         await main.processInput("go", source: "UI", conversationId: delegateSender)
         #expect(await eventually { self.text(w.app, w.reviewer).contains("relay from the opposite order") })
 
-        #expect(w.app.guestSteeredBinding(for: w.reviewer) == narrow, "sender wide, root narrow -- must still end up narrow")
+        #expect(await recipientReads(recorder)?.stamp == narrow, "sender wide, root narrow -- must still end up narrow")
     }
 
     /// dev-2 review of #1212: `bindingForCall` must check the delegation root too, mirroring
