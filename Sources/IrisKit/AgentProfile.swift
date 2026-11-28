@@ -22,6 +22,13 @@ struct AgentProfile: Equatable, Sendable {
     /// so only the person sets it. It adds allowances inside Vibecop's baseline and decides nothing
     /// itself: it is not an approval, and a guest-origin turn is not given it.
     var vibecop: String? = nil
+    /// #1429: the specific model this profile runs on (`model: provider/model`), or nil for the default: the primary
+    /// provider and the profile's `tier`. Not yet read by any turn (slice 2 routes by it).
+    var model: ModelRef? = nil
+    /// Why a `model:` line didn't read, for the start notice and the picker. A bad one is ignored rather than making
+    /// the profile unusable (dev-2's #1457 review): Claude Code's agent files use `model: sonnet`, and nothing routes by
+    /// the key yet. Not kept in the snapshot.
+    var modelProblem: String? = nil
 
     /// Tools a profile never narrows (#465, Fork B): each is already offered only on its own
     /// trigger or in its own state (Invariant 6), so narrowing it would break `/goal` or `/rename`
@@ -45,7 +52,8 @@ struct AgentProfile: Equatable, Sendable {
 
     var snapshot: AgentProfileSnapshot {
         AgentProfileSnapshot(name: name, role: role, tier: tier?.rawValue, skills: skills, tools: tools,
-                             prompt: prompt, contentHash: contentHash, vibecop: vibecop)
+                             prompt: prompt, contentHash: contentHash, vibecop: vibecop,
+                             modelProvider: model?.providerId, modelId: model?.model)
     }
 }
 
@@ -61,11 +69,15 @@ struct AgentProfileSnapshot: Codable, Equatable, Sendable {
     var prompt: String
     var contentHash: String
     var vibecop: String?
+    /// #1429: the profile's `model:`, kept with the snapshot so an edit to the file doesn't move a running conversation.
+    var modelProvider: String?
+    var modelId: String?
 
     init(name: String, role: String?, tier: String?, skills: [String]?, tools: [String]?,
-         prompt: String, contentHash: String, vibecop: String? = nil) {
+         prompt: String, contentHash: String, vibecop: String? = nil, modelProvider: String? = nil, modelId: String? = nil) {
         self.name = name; self.role = role; self.tier = tier; self.skills = skills
         self.tools = tools; self.prompt = prompt; self.contentHash = contentHash; self.vibecop = vibecop
+        self.modelProvider = modelProvider; self.modelId = modelId
     }
 
     // Invariant 1: every field past the name and prompt may be absent in a later format.
@@ -79,11 +91,14 @@ struct AgentProfileSnapshot: Codable, Equatable, Sendable {
         prompt = try c.decode(String.self, forKey: .prompt)
         contentHash = try c.decodeIfPresent(String.self, forKey: .contentHash) ?? ""
         vibecop = try c.decodeIfPresent(String.self, forKey: .vibecop)
+        modelProvider = try c.decodeIfPresent(String.self, forKey: .modelProvider)
+        modelId = try c.decodeIfPresent(String.self, forKey: .modelId)
     }
 
     var profile: AgentProfile {
         AgentProfile(name: name, role: role, tier: tier.flatMap(ModelTier.init(rawValue:)), skills: skills,
-                     tools: tools, prompt: prompt, contentHash: contentHash, vibecop: vibecop)
+                     tools: tools, prompt: prompt, contentHash: contentHash, vibecop: vibecop,
+                     model: modelProvider.flatMap { p in modelId.map { ModelRef(providerId: p, model: $0) } })
     }
 }
 
@@ -161,10 +176,18 @@ struct AgentProfileStore: Sendable {
             }
             vibecop = text.isEmpty ? nil : text
         }
+        var model: ModelRef?
+        var modelProblem: String?
+        if let raw = SkillFrontmatter.value(fields, key: "model") {
+            switch ModelRef.parse(raw) {
+            case .success(let ref): model = ref
+            case .failure(let why): modelProblem = "`model: \(raw)` doesn't read: \(why.message)"
+            }
+        }
         guard !body.isEmpty else { return .failure(.init(message: "the profile has no text below its frontmatter")) }
         let hash = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
         return .success(AgentProfile(name: name, role: role, tier: tier, skills: lists["skills"], tools: lists["tools"],
-                                     prompt: body, contentHash: hash, vibecop: vibecop))
+                                     prompt: body, contentHash: hash, vibecop: vibecop, model: model, modelProblem: modelProblem))
     }
 
     /// `vibecop: one line of text`, or the YAML literal block (`vibecop: |` and indented lines, one
@@ -302,6 +325,9 @@ struct KnownCapabilities: Equatable, Sendable {
         var parts: [String] = []
         if !tools.isEmpty { parts.append("tools Iris doesn't have: " + tools.joined(separator: ", ")) }
         if !skills.isEmpty { parts.append("skills it can't find: " + skills.joined(separator: ", ")) }
-        return parts.isEmpty ? nil : "Names " + parts.joined(separator: "; ") + ". They are ignored."
+        let names = parts.isEmpty ? nil : "Names " + parts.joined(separator: "; ") + ". They are ignored."
+        let model = profile.modelProblem.map { $0 + ". It is ignored." }
+        let lines = [names, model].compactMap { $0 }
+        return lines.isEmpty ? nil : lines.joined(separator: " ")
     }
 }
