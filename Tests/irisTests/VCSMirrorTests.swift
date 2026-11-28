@@ -116,6 +116,25 @@ struct VCSMirrorTests {
         #expect(!(await githubHas(w, "agent/pilot/sneak")))
     }
 
+    @Test("a merge whose resolution changes a protected path is refused (dev-2's #1448 review)")
+    func evilMerge() async throws {
+        let w = try await world()
+        try await commit(w, branch: "agent/pilot/side", files: ["a.txt": "a\n"], message: "side")
+        try await Self.sh(["checkout", "-q", "main"], in: w.workspace)
+        try await commit(w, branch: "agent/pilot/merge", files: ["b.txt": "b\n"], message: "other")
+        // Merge without committing, slip a workflow into the resolution, then commit the merge.
+        try await Self.sh(["merge", "--no-ff", "--no-commit", "agent/pilot/side"], in: w.workspace)
+        try FileManager.default.createDirectory(atPath: w.workspace + "/.github/workflows", withIntermediateDirectories: true)
+        try "on: push\n".write(toFile: w.workspace + "/.github/workflows/ci.yml", atomically: true, encoding: .utf8)
+        try await Self.sh(["add", "-A"], in: w.workspace)
+        try await Self.sh(["commit", "-q", "-m", "merge"], in: w.workspace)
+        let plainLog = try await Self.sh(["log", "--format=", "--name-only", "main..HEAD"], in: w.workspace)
+        #expect(!plainLog.contains("ci.yml"), "the row reproduces the case: plain log doesn't list the merge's file")
+        let result = await mirror(w).push(repo: "a/b", branch: "agent/pilot/merge", force: false, caller: role, workspace: w.workspace, policy: .defaults)
+        #expect(result.contains("protected path"), Comment(rawValue: result))
+        #expect(!(await githubHas(w, "agent/pilot/merge")))
+    }
+
     /// Plants everything the agent's repository could use to run a program in the broker's git: hooks of every
     /// side, a filter and a diff driver with an attributes file, `core.fsmonitor`, `uploadpack.packObjectsHook`,
     /// a `remote.<mirror>` with its own upload-pack, and an `insteadOf` rewriting the mirror and GitHub.
