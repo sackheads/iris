@@ -21,6 +21,7 @@ struct LoopWakeTests {
                              createIfEmpty: false, emitLaunchNotices: false)
         state.permissions = PermissionManager(paths: IrisPaths(root: URL(fileURLWithPath: NSTemporaryDirectory())
             .appendingPathComponent("iris-1423-\(UUID().uuidString)")))
+        state.loopRestSeconds = 0   // the rows that pin the rest set their own
         let replies = (1...8).map { GeminiResponse(candidates: [Candidate(content: Content(role: "model", parts: [Part(text: "reply \($0)")]))],
                                                    usageMetadata: nil) }
         let engine = IrisEngine(state: state, tier: .medium, client: FakeLLMClient(responses: replies, latency: .init(minMs: latencyMs, maxMs: latencyMs)),
@@ -132,6 +133,80 @@ struct LoopWakeTests {
         let ticks = sent(state, id).filter { $0.hasPrefix("Loop tick") }.count
         #expect(ticks >= 3, "\(ticks) ticks in ~4 s at a 1 s interval with \(n) arrivals; before #1423 an arrival every 0.25 s left none")
         #expect(ticks <= 5, "no more than one tick per interval")
+        state.pauseLoop(for: id)
+    }
+
+    /// Tick start times in `id` over `seconds`, sampled every 50 ms.
+    private func tickStarts(_ state: AppState, _ id: UUID, over seconds: Double) async -> [Double] {
+        var starts: [Double] = []
+        let start = TestClock.now()
+        var seen = 0
+        while TestClock.seconds(since: start) < seconds {
+            let count = sent(state, id).filter { $0.hasPrefix("Loop tick") }.count
+            if count > seen { starts.append(TestClock.seconds(since: start)); seen = count }
+            try? await Task.sleep(nanoseconds: 50_000_000)
+        }
+        return starts
+    }
+
+    @Test("at the production rest, a short interval's next tick is due a minute after the tick ENDS; a long one's an interval after it began")
+    func productionRestIsAMinute() async throws {
+        // A fresh state, its rest untouched: the helpers above zero it for their fast loops (dev-3's #1458 review).
+        let state = AppState(store: try ConversationStore.inMemory(), tier2Provisioning: .provisioned, tier3Provisioning: .provisioned,
+                             createIfEmpty: false, emitLaunchNotices: false)
+        #expect(state.loopRestSeconds == 60)
+        // 1 s is below `/loop`'s shortest interval (60 s) on purpose, built directly rather than parsed: at 60 the start
+        // and end anchors coincide, and this row exists to tell them apart.
+        for (interval, restWins) in [(1.0, true), (3600.0, false)] {
+            let id = state.createNewConversation(isBackground: false, select: false)
+            let loop = ConversationLoop(prompt: "p", intervalSeconds: interval, cap: 5)
+            state.startLoop(loop, in: id)
+            // The start's own arm runs on a task; let it land first, or it takes the tick-start record mid-turn.
+            #expect(await eventually { state.loopNextTick[id] != nil })
+            let started = SuspendingClock().now
+            guard case .run = state.takeLoopTick(for: id, loopId: loop.id) else { Issue.record("no tick"); return }
+            // The tick's turn lasts a measurable while, so a rest anchored at its start would show.
+            try? await Task.sleep(nanoseconds: 400_000_000)
+            let ended = SuspendingClock().now
+            state.endEngineTurn(for: id)
+            let fire = state.loopFireTime(for: id, loop: loop, delay: interval)
+            // One-sided where a late reading could only help (dev-3's review): nothing suspends between `ended` and the
+            // code's own clock reading today, but a later edit might.
+            if restWins {
+                #expect(fire >= ended + .seconds(60), "due at least 60 s after the tick ended")
+                #expect(fire > started + .seconds(60.3), "not 60 s after it began")
+                #expect(fire <= ended + .seconds(70))
+            } else {
+                #expect(fire <= started + .seconds(3600.5), "due an interval after the tick began")
+                #expect(fire < ended + .seconds(3600), "the rest doesn't add to it")
+            }
+            state.pauseLoop(for: id)
+        }
+    }
+
+    @Test("a tick that outlasts its interval rests the minimum after it ends: never back to back")
+    func slowTicksRest() async throws {
+        // `/loop 1m` with 90 s ticks and a 60 s rest, scaled: a 1 s interval, 1.5 s ticks, a 1 s rest. Ticks ~2.5 s apart.
+        let (state, id, _) = try app(latencyMs: 1500)
+        state.loopRestSeconds = 1
+        state.startLoop(ConversationLoop(prompt: "p", intervalSeconds: 1, cap: 20), in: id)
+        let starts = await tickStarts(state, id, over: 9)
+        #expect(starts.count >= 2, "ticks ran: \(starts)")
+        let gaps = zip(starts.dropFirst(), starts).map { $0 - $1 }
+        #expect(gaps.allSatisfy { $0 >= 2.2 }, "each tick began at least the rest after the last one ended: gaps \(gaps)")
+        state.pauseLoop(for: id)
+    }
+
+    @Test("a tick shorter than its interval keeps the cadence start to start, the rest not adding to it")
+    func shortTicksKeepCadence() async throws {
+        // `/loop 20m` with 2-minute ticks, scaled: a 2 s interval, 0.5 s ticks, a 0.5 s rest. Starts 2 s apart, not 2.5.
+        let (state, id, _) = try app(latencyMs: 500)
+        state.loopRestSeconds = 0.5
+        state.startLoop(ConversationLoop(prompt: "p", intervalSeconds: 2, cap: 20), in: id)
+        let starts = await tickStarts(state, id, over: 7.5)
+        #expect(starts.count >= 3, "ticks ran: \(starts)")
+        let gaps = zip(starts.dropFirst(), starts).map { $0 - $1 }
+        #expect(gaps.allSatisfy { $0 >= 1.8 && $0 < 2.3 }, "start to start is the interval: gaps \(gaps)")
         state.pauseLoop(for: id)
     }
 
