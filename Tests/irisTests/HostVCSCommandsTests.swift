@@ -25,6 +25,8 @@ struct HostVCSCommandsTests {
         "export GIT_CONFIG_COUNT=0; git status", "unset GIT_CONFIG_COUNT && git status", "env -u GIT_CONFIG_COUNT git status",
         "GIT_CONFIG_KEY_0=credential.helper GIT_CONFIG_VALUE_0=osxkeychain git status", "git -c credential.helper=x fetch",
         "git --config-env=credential.helper=X status", "echo $GIT_CONFIG_COUNT",
+        // A non-git assignment can still point git at another config (a HOME whose .gitconfig names a helper).
+        "HOME=/tmp/x git status", "XDG_CONFIG_HOME=/tmp/x git log",
         "git config set alias.y '!sh'", "git config --file .git/config alias.z x", "git config Alias.X '!sh'",
         "git config http.https://github.com/.extraheader 'AUTHORIZATION: bearer x'", "git config url.https://x@github.com/.insteadOf https://github.com/",
     ])
