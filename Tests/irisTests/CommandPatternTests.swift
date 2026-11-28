@@ -244,10 +244,11 @@ struct CommandPatternTests {
     @Test("AppState's approval ladder skips an exact saved rule on a guest-origin turn (#1141)")
     @MainActor
     func appStateGuestOriginSkipsExact() async throws {
-        // `git push` has no prefix form, so Always Allow saves it exact.
-        let rule = PermissionRule.forAlwaysAllow(toolName: "run_command", details: "git push origin main")
+        // `npm install` has no prefix form, so Always Allow saves it exact. (Not `git push`, which since #1435's slice 3
+        // is the person's every time and has no saved rule at all.)
+        let rule = PermissionRule.forAlwaysAllow(toolName: "run_command", details: "npm install lodash")
         #expect(rule.count == 1 && !rule[0].isPrefix)
-        let got = try await ladder(saving: rule, details: "git push origin main")
+        let got = try await ladder(saving: rule, details: "npm install lodash")
         #expect(got.ordinary == .allowlist(AllowMatch(scope: .global, rule: rule[0])))
         #expect(got.guest == .person)
     }
@@ -255,8 +256,8 @@ struct CommandPatternTests {
     @Test("a delegate of a guest-origin turn skips saved rules too (#1141)")
     @MainActor
     func appStateGuestDelegateSkipsExact() async throws {
-        let rule = PermissionRule.forAlwaysAllow(toolName: "run_command", details: "git push origin main")
-        let exact = try await ladder(saving: rule, details: "git push origin main", guestDelegate: true)
+        let rule = PermissionRule.forAlwaysAllow(toolName: "run_command", details: "npm install lodash")
+        let exact = try await ladder(saving: rule, details: "npm install lodash", guestDelegate: true)
         #expect(exact.ordinary == .allowlist(AllowMatch(scope: .global, rule: rule[0])))
         #expect(exact.guest == .person)
         let prefix = try await ladder(saving: PermissionRule.forAlwaysAllow(toolName: "run_command", details: "git status"),
