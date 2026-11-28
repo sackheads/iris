@@ -28,29 +28,22 @@ struct GitIdentityEnvironmentTests {
 
     // MARK: fragmentContents
 
-    @Test("the fragment sets the configured login's identity (id+login noreply form) and resets credential.helper before re-adding it")
+    @Test("the fragment sets the configured login's identity (id+login noreply form), clears credential.helper and adds none (#1435 F5)")
     func fragmentContents() {
-        let text = GitIdentityEnvironment.fragmentContents(login: "acme-bot", accountId: 12345, helperExecutable: "/path/to/iris")
+        let text = GitIdentityEnvironment.fragmentContents(login: "acme-bot", accountId: 12345)
         #expect(text.contains("name = acme-bot"))
         #expect(text.contains("email = 12345+acme-bot@users.noreply.github.com"),
                 "an account made for this feature is always created after GitHub's 2017 cutoff (#1188): only the id+login form attributes")
         #expect(!text.contains("iris-main"))
-        #expect(text.contains("helper =\n"), "the empty reset must come before the real helper line")
-        #expect(text.contains("--git-credential-helper"))
-        #expect(text.contains("useHttpPath = true"), "without this git never sends the helper a path (dev-3's review, real git 2.54)")
+        #expect(text.hasSuffix("helper ="), "the only credential line is the empty reset")
+        #expect(!text.contains("--git-credential-helper"), "the credential left host git: pushing is vcs push")
         #expect(!text.contains("ghp_"), "no secret in the static fragment")
     }
 
     @Test("a nil account id falls back to the bare noreply form (#1188): shouldApply never lets this reach a real commit")
     func fragmentContentsNilIdFallsBack() {
-        let text = GitIdentityEnvironment.fragmentContents(login: "acme-bot", accountId: nil, helperExecutable: "/path/to/iris")
+        let text = GitIdentityEnvironment.fragmentContents(login: "acme-bot", accountId: nil)
         #expect(text.contains("email = acme-bot@users.noreply.github.com"))
-    }
-
-    @Test("a helper path with a space is shell-quoted so it runs as one word")
-    func fragmentContentsQuotesThePath() {
-        let text = GitIdentityEnvironment.fragmentContents(login: "acme-bot", accountId: 12345, helperExecutable: "/Applications/Iris Dev.app/iris")
-        #expect(text.contains("'/Applications/Iris Dev.app/iris'"))
     }
 
     // MARK: ensureFragment
@@ -62,32 +55,30 @@ struct GitIdentityEnvironmentTests {
         defer { try? FileManager.default.removeItem(at: dir) }
         let path = dir.appendingPathComponent(GitIdentityEnvironment.fragmentFileName).path
 
-        GitIdentityEnvironment.ensureFragment(at: path, login: "acme-bot", accountId: 12345, helperExecutable: "/path/to/iris")
+        GitIdentityEnvironment.ensureFragment(at: path, login: "acme-bot", accountId: 12345)
         let first = try String(contentsOfFile: path, encoding: .utf8)
         #expect(first.contains("12345+acme-bot@users.noreply.github.com"))
 
         // The login changed in Settings: the fragment follows it, nothing of the old one stays.
-        GitIdentityEnvironment.ensureFragment(at: path, login: "other-bot", accountId: 12345, helperExecutable: "/path/to/iris")
+        GitIdentityEnvironment.ensureFragment(at: path, login: "other-bot", accountId: 12345)
         let relogin = try String(contentsOfFile: path, encoding: .utf8)
         #expect(relogin.contains("name = other-bot") && !relogin.contains("acme-bot"))
-        GitIdentityEnvironment.ensureFragment(at: path, login: "acme-bot", accountId: 12345, helperExecutable: "/path/to/iris")
+        GitIdentityEnvironment.ensureFragment(at: path, login: "acme-bot", accountId: 12345)
 
         // Same helper path and id again: the file is left exactly as it was (no gratuitous rewrite).
-        GitIdentityEnvironment.ensureFragment(at: path, login: "acme-bot", accountId: 12345, helperExecutable: "/path/to/iris")
+        GitIdentityEnvironment.ensureFragment(at: path, login: "acme-bot", accountId: 12345)
         #expect(try String(contentsOfFile: path, encoding: .utf8) == first)
 
         // The id changed (re-verified under a different account, #1188): the fragment follows it too.
-        GitIdentityEnvironment.ensureFragment(at: path, login: "acme-bot", accountId: 99999, helperExecutable: "/path/to/iris")
+        GitIdentityEnvironment.ensureFragment(at: path, login: "acme-bot", accountId: 99999)
         let reidentified = try String(contentsOfFile: path, encoding: .utf8)
         #expect(reidentified.contains("99999+acme-bot@users.noreply.github.com") && !reidentified.contains("12345"))
-        GitIdentityEnvironment.ensureFragment(at: path, login: "acme-bot", accountId: 12345, helperExecutable: "/path/to/iris")
-
-        // A DIFFERENT helper path (a rebuild or reinstall moved the binary): the fragment must
-        // refresh, or the baked `credential.helper` line goes stale (dev-3's review).
-        GitIdentityEnvironment.ensureFragment(at: path, login: "acme-bot", accountId: 12345, helperExecutable: "/different/path")
-        let refreshed = try String(contentsOfFile: path, encoding: .utf8)
-        #expect(refreshed != first)
-        #expect(refreshed.contains("/different/path"))
+        GitIdentityEnvironment.ensureFragment(at: path, login: "acme-bot", accountId: 12345)
+        #expect(try String(contentsOfFile: path, encoding: .utf8) == first, "back to the first identity")
+        // A fragment an older build wrote, with the helper line, is rewritten without it (#1435 F5).
+        try (first + "\n\thelper = !'/old/iris' --git-credential-helper\n").write(toFile: path, atomically: true, encoding: .utf8)
+        GitIdentityEnvironment.ensureFragment(at: path, login: "acme-bot", accountId: 12345)
+        #expect(!(try String(contentsOfFile: path, encoding: .utf8)).contains("--git-credential-helper"))
     }
 
     // MARK: additions
@@ -206,14 +197,15 @@ struct GitIdentityEnvironmentTests {
 
 @Suite("ToolExecutor.hostSpawn + GitHub git identity (#966 spec §4)")
 struct HostSpawnGitIdentityTests {
-    @Test("without the new parameters, the unrestricted branch is unchanged (regression guard)")
+    @Test("without the identity parameters, the unrestricted branch adds only the credential strip (#1435 F5)")
     func unaffectedWithoutParameters() {
         let base = ["PATH": "/usr/bin"]
         let spawn = ToolExecutor.hostSpawn("git push", restrictedPath: nil, base: base)
         #expect(spawn.executable == "/bin/zsh")
         #expect(spawn.arguments == ["-c", "git push"])
-        #expect(spawn.environment["GIT_CONFIG_COUNT"] == nil)
-        #expect(spawn.environment["GIT_TERMINAL_PROMPT"] == nil)
+        #expect(spawn.environment == HostVCSCommands.withoutCredentials(BinaryResolver.commandEnvironment(base: base)))
+        #expect(spawn.environment["GIT_CONFIG_KEY_0"] == "credential.helper" && spawn.environment["GIT_CONFIG_VALUE_0"] == "")
+        #expect(spawn.environment["GIT_ASKPASS"] == "/usr/bin/false" && spawn.environment["GIT_SSH_COMMAND"] == "/usr/bin/false")
     }
 
     @Test("with a fragment path and an allowed repo, the unrestricted branch carries the git-identity environment")
@@ -222,7 +214,8 @@ struct HostSpawnGitIdentityTests {
         let spawn = ToolExecutor.hostSpawn("git push", restrictedPath: nil, base: base,
                                            gitIdentityRepos: ["sackheads/iris"], gitIdentityRoutingPath: "/frag")
         #expect(spawn.environment["GIT_TERMINAL_PROMPT"] == "0")
-        #expect(Int(spawn.environment["GIT_CONFIG_COUNT"] ?? "") == 6)
+        #expect(Int(spawn.environment["GIT_CONFIG_COUNT"] ?? "") == 6 + 3, "six identity conditions, then the three-key credential strip")
+        #expect(spawn.environment["GIT_CONFIG_KEY_6"] == "credential.helper", "the strip comes last, after the identity")
     }
 
     @Test("the sandboxed git-read branch ignores the new parameters entirely (#658(a), frozen)")
@@ -240,7 +233,7 @@ struct HostSpawnGitIdentityTests {
         let base = ["PATH": "/usr/bin"]
         let spawn = ToolExecutor.hostSpawn("git push", restrictedPath: nil, base: base,
                                            gitIdentityRepos: [], gitIdentityRoutingPath: "/frag")
-        #expect(spawn.environment == BinaryResolver.commandEnvironment(base: base))
+        #expect(spawn.environment == HostVCSCommands.withoutCredentials(BinaryResolver.commandEnvironment(base: base)))
     }
 }
 
@@ -328,36 +321,33 @@ struct RealGitEndToEndTests {
                 "credential.useHttpPath=true must make git add the repo path for the helper to check")
     }
 
-    @Test("the fragment's stub helper actually receives the repo path through GitIdentityEnvironment.environment()")
-    func fragmentDrivesTheRealHelper() async throws {
+    @Test("host git holds no credential: neither the person's own global helper nor any other runs through run_command's environment (#1435 F5)")
+    func hostGitHasNoCredential() async throws {
         guard Self.git != nil else { return }
         let home = FileManager.default.temporaryDirectory.appendingPathComponent("iris-gitid-rg-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: home) }
-        let repo = try await makeRepo(home: home)
-        // `includeIf.hasconfig:remote.*.url:` matches against a CONFIGURED remote, not the
-        // `credential fill` request's own `url=` field -- the repo needs a real matching remote.
-        _ = try await run(["remote", "add", "origin", "https://github.com/sackheads/iris.git"], cwd: repo,
-                    env: ["HOME": home.path, "PATH": "/usr/bin:/bin"])
-
         let captured = home.appendingPathComponent("captured.txt")
         let stub = home.appendingPathComponent("stub.sh")
-        try "#!/bin/sh\ncat > \(PluginAuthRunner.shellQuoted(captured.path))\n".write(to: stub, atomically: true, encoding: .utf8)
+        try "#!/bin/sh\ncat > \(PluginAuthRunner.shellQuoted(captured.path))\necho password=leaked\n".write(to: stub, atomically: true, encoding: .utf8)
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: stub.path)
-
+        // The person's own ~/.gitconfig names a helper (as osxkeychain would be), and the repo has an allowed remote.
+        let repo = try await makeRepo(home: home, globalInsteadOf: "[credential]\n\thelper = !\(PluginAuthRunner.shellQuoted(stub.path))\n")
+        _ = try await run(["remote", "add", "origin", "https://github.com/sackheads/iris.git"], cwd: repo,
+                    env: ["HOME": home.path, "PATH": "/usr/bin:/bin"])
         let fragmentPath = home.appendingPathComponent(GitIdentityEnvironment.fragmentFileName).path
-        GitIdentityEnvironment.ensureFragment(at: fragmentPath, login: "acme-bot", accountId: 12345, helperExecutable: stub.path)
+        GitIdentityEnvironment.ensureFragment(at: fragmentPath, login: "acme-bot", accountId: 12345)
         let routingPath = home.appendingPathComponent(GitIdentityEnvironment.routingFileName).path
         GitIdentityEnvironment.writeRoutingFile(repos: ["sackheads/iris"], identityFragmentPath: fragmentPath, to: routingPath)
-
-        var env = ["HOME": home.path, "PATH": "/usr/bin:/bin"]
-        env = GitIdentityEnvironment.environment(repos: ["sackheads/iris"], routingPath: routingPath, base: env)
-
+        let env = HostVCSCommands.withoutCredentials(GitIdentityEnvironment.environment(repos: ["sackheads/iris"], routingPath: routingPath,
+                                                                                         base: ["HOME": home.path, "PATH": "/usr/bin:/bin"]))
         let fillInput = Data("url=https://github.com/sackheads/iris.git\n\n".utf8)
-        _ = try await run(["credential", "fill"], cwd: repo, env: env, stdin: fillInput)
-
-        let capturedText = try String(contentsOf: captured, encoding: .utf8)
-        #expect(capturedText.contains("path=sackheads/iris.git"))
+        let out = try? await run(["credential", "fill"], cwd: repo, env: env, stdin: fillInput)
+        #expect(!FileManager.default.fileExists(atPath: captured.path), "no helper ran")
+        #expect(out?.contains("leaked") != true)
+        // Control: without the strip, the person's helper does run, so the row tests something.
+        _ = try? await run(["credential", "fill"], cwd: repo, env: ["HOME": home.path, "PATH": "/usr/bin:/bin", "GIT_TERMINAL_PROMPT": "0"], stdin: fillInput)
+        #expect(FileManager.default.fileExists(atPath: captured.path), "control: the global helper runs without the strip")
     }
 
     @Test("a push URL resolves to https for an allowed repo even under a pre-existing global SSH insteadOf rule (dev-3's review, reproduced)")
@@ -379,7 +369,7 @@ struct RealGitEndToEndTests {
 
         // With the fix: GitIdentityEnvironment's identity rule outcompetes the global one.
         let fragmentPath = home.appendingPathComponent(GitIdentityEnvironment.fragmentFileName).path
-        GitIdentityEnvironment.ensureFragment(at: fragmentPath, login: "acme-bot", accountId: 12345, helperExecutable: "/path/to/iris")
+        GitIdentityEnvironment.ensureFragment(at: fragmentPath, login: "acme-bot", accountId: 12345)
         let routingPath = home.appendingPathComponent(GitIdentityEnvironment.routingFileName).path
         GitIdentityEnvironment.writeRoutingFile(repos: ["sackheads/iris"], identityFragmentPath: fragmentPath, to: routingPath)
         var env = ["HOME": home.path, "PATH": "/usr/bin:/bin"]
@@ -399,7 +389,7 @@ struct RealGitEndToEndTests {
                     env: ["HOME": home.path, "PATH": "/usr/bin:/bin"])
 
         let fragmentPath = home.appendingPathComponent(GitIdentityEnvironment.fragmentFileName).path
-        GitIdentityEnvironment.ensureFragment(at: fragmentPath, login: "acme-bot", accountId: 12345, helperExecutable: "/path/to/iris")
+        GitIdentityEnvironment.ensureFragment(at: fragmentPath, login: "acme-bot", accountId: 12345)
         let routingPath = home.appendingPathComponent(GitIdentityEnvironment.routingFileName).path
         // "sackheads/iris" is allowed; "other/repo" (this remote) is not.
         GitIdentityEnvironment.writeRoutingFile(repos: ["sackheads/iris"], identityFragmentPath: fragmentPath, to: routingPath)
@@ -426,7 +416,7 @@ struct RealGitEndToEndTests {
                     env: ["HOME": home.path, "PATH": "/usr/bin:/bin"])
 
         let fragmentPath = home.appendingPathComponent(GitIdentityEnvironment.fragmentFileName).path
-        GitIdentityEnvironment.ensureFragment(at: fragmentPath, login: "acme-bot", accountId: 12345, helperExecutable: "/path/to/iris")
+        GitIdentityEnvironment.ensureFragment(at: fragmentPath, login: "acme-bot", accountId: 12345)
         let routingPath = home.appendingPathComponent(GitIdentityEnvironment.routingFileName).path
         GitIdentityEnvironment.writeRoutingFile(repos: ["sackheads/iris"], identityFragmentPath: fragmentPath, to: routingPath)
         var env = ["HOME": home.path, "PATH": "/usr/bin:/bin"]
@@ -455,7 +445,7 @@ struct RealGitEndToEndTests {
         _ = try await run(["remote", "add", "upstream", "git@github.com:sackheads/iris-fork.git"], cwd: repo, env: env0)
 
         let fragmentPath = home.appendingPathComponent(GitIdentityEnvironment.fragmentFileName).path
-        GitIdentityEnvironment.ensureFragment(at: fragmentPath, login: "acme-bot", accountId: 12345, helperExecutable: "/path/to/iris")
+        GitIdentityEnvironment.ensureFragment(at: fragmentPath, login: "acme-bot", accountId: 12345)
         let routingPath = home.appendingPathComponent(GitIdentityEnvironment.routingFileName).path
         GitIdentityEnvironment.writeRoutingFile(repos: ["sackheads/iris"], identityFragmentPath: fragmentPath, to: routingPath)
         var env = env0

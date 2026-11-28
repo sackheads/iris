@@ -690,10 +690,13 @@ struct ToolExecutor {
             }
             return ("/bin/zsh", ["-f", "-c", command], restricted)
         }
+        // #1435 slice 3 (F5): whatever git this command runs holds no credential, Iris's or the person's.
         let unrestricted = BinaryResolver.commandEnvironment(base: base)
-        guard let routingPath = gitIdentityRoutingPath else { return ("/bin/zsh", ["-c", command], unrestricted) }
-        return ("/bin/zsh", ["-c", command],
-                GitIdentityEnvironment.environment(repos: gitIdentityRepos, routingPath: routingPath, base: unrestricted))
+        guard let routingPath = gitIdentityRoutingPath else {
+            return ("/bin/zsh", ["-c", command], HostVCSCommands.withoutCredentials(unrestricted))
+        }
+        return ("/bin/zsh", ["-c", command], HostVCSCommands.withoutCredentials(
+            GitIdentityEnvironment.environment(repos: gitIdentityRepos, routingPath: routingPath, base: unrestricted)))
     }
 
     func runCommand(_ command: String, cwd: String?, conversationId: UUID? = nil, useSandbox: Bool = false,
@@ -892,12 +895,10 @@ struct ToolExecutor {
                 let accountId = ConfigManager.shared.githubAccountId
                 if GitIdentityEnvironment.shouldApply(hasToken: hasToken, login: login, accountId: accountId,
                                                       repos: repos, guestOrigin: guestOrigin),
-                   let login, let executablePath = Bundle.main.executablePath {
+                   let login {
                     let paths = irisPaths ?? .default
                     let fragmentPath = paths.configDir.appendingPathComponent(GitIdentityEnvironment.fragmentFileName).path
-                    GitIdentityEnvironment.ensureFragment(at: fragmentPath, login: login,
-                                                          accountId: accountId,
-                                                          helperExecutable: executablePath)
+                    GitIdentityEnvironment.ensureFragment(at: fragmentPath, login: login, accountId: accountId)
                     // A unique per-invocation routing file (Invariant 3: tool calls run in
                     // parallel inside one turn's withTaskGroup, so two concurrent run_command
                     // calls must never share one) -- removed by the `defer` declared with

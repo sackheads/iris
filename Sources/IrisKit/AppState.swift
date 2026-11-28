@@ -5424,6 +5424,8 @@ class AppState {
         // #974 Task 9b (F6 / Invariant 6): and a host command that writes an access-policy store.
         let policyWrite = permissions.writesPolicyStore(toolName: toolName, details: details, workspace: workspace,
                                                         inSandbox: inSandbox)
+            // #1435 slice 3 (F5): a host command that reaches a code host or changes what git runs is a person's alone.
+            || (toolName == "run_command" && !inSandbox && HostVCSCommands.needsPerson(details))
         if let id = conversationId, let conversation = conversations.first(where: { $0.id == id }), conversation.isBackground {
             // A call that only a person may approve has nobody to ask here, and the allowlist
             // below must not stand in for them (#599). Its one caller refuses unattended

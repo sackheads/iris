@@ -90,7 +90,9 @@ enum GitIdentityEnvironment {
     /// a configured-account remote) — the same empty-then-set pattern `WorkspaceGit.overrides`
     /// already uses for the same reason. `useHttpPath` is required or the helper never receives a
     /// `path` to check the allowlist against (dev-3's review).
-    static func fragmentContents(login: String, accountId: Int?, helperExecutable: String) -> String {
+    /// #1435 slice 3 (Brian's F5): identity only. The credential left host git; pushing is `vcs push`, whose mirror runs
+    /// Iris's helper itself (`VCSMirror.helperConfig`). The empty `helper` clears any the person's own config sets.
+    static func fragmentContents(login: String, accountId: Int?) -> String {
         let identity = GitHubProxyClient.commitIdentity(login: login, accountId: accountId)
         return """
         [user]
@@ -98,8 +100,6 @@ enum GitIdentityEnvironment {
         \temail = \(identity.email)
         [credential]
         \thelper =
-        \thelper = !\(PluginAuthRunner.shellQuoted(helperExecutable)) --git-credential-helper
-        \tuseHttpPath = true
         """
     }
 
@@ -107,8 +107,8 @@ enum GitIdentityEnvironment {
     /// computed now (dev-2's and dev-3's review: the helper's executable path can change across a
     /// rebuild, a reinstall, or a dev home shared between worktrees, and the fragment must not
     /// keep pointing at a now-stale one). No secret in it, safe to call on every launch.
-    static func ensureFragment(at path: String, login: String, accountId: Int?, helperExecutable: String) {
-        let contents = fragmentContents(login: login, accountId: accountId, helperExecutable: helperExecutable)
+    static func ensureFragment(at path: String, login: String, accountId: Int?) {
+        let contents = fragmentContents(login: login, accountId: accountId)
         if let existing = try? String(contentsOfFile: path, encoding: .utf8), existing == contents { return }
         try? FileManager.default.createDirectory(atPath: (path as NSString).deletingLastPathComponent,
                                                   withIntermediateDirectories: true)
