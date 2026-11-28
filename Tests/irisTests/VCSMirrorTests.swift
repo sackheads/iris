@@ -135,6 +135,25 @@ struct VCSMirrorTests {
         #expect(!(await githubHas(w, "agent/pilot/merge")))
     }
 
+    @Test("an evil merge whose workflow a later commit removes is still refused: only the merge listing sees it (dev-3's #1448 review)")
+    func evilMergeThenRemoved() async throws {
+        let w = try await world()
+        try await commit(w, branch: "agent/pilot/side2", files: ["a.txt": "a\n"], message: "side")
+        try await Self.sh(["checkout", "-q", "main"], in: w.workspace)
+        try await commit(w, branch: "agent/pilot/hide", files: ["b.txt": "b\n"], message: "other")
+        try await Self.sh(["merge", "--no-ff", "--no-commit", "agent/pilot/side2"], in: w.workspace)
+        try FileManager.default.createDirectory(atPath: w.workspace + "/.github/workflows", withIntermediateDirectories: true)
+        try "on: push\n".write(toFile: w.workspace + "/.github/workflows/ci.yml", atomically: true, encoding: .utf8)
+        try await Self.sh(["add", "-A"], in: w.workspace)
+        try await Self.sh(["commit", "-q", "-m", "merge"], in: w.workspace)
+        try FileManager.default.removeItem(atPath: w.workspace + "/.github/workflows/ci.yml")
+        try await commit(w, branch: "agent/pilot/hide", files: ["c.txt": "c\n"], message: "remove it again")
+        let net = try await Self.sh(["diff", "--name-only", "main...HEAD"], in: w.workspace)
+        #expect(!net.contains("ci.yml"), "the net change is clean, so only the merge listing can refuse it")
+        let result = await mirror(w).push(repo: "a/b", branch: "agent/pilot/hide", force: false, caller: role, workspace: w.workspace, policy: .defaults)
+        #expect(result.contains("protected path"), Comment(rawValue: result))
+    }
+
     @Test("a branch that merges in a main which changed a workflow still pushes: main's change isn't the branch's (dev-3's #1448 review)")
     func catchUpMergePushes() async throws {
         let w = try await world()

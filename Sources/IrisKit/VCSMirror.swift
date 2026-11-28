@@ -237,6 +237,8 @@ actor VCSMirror {
         let raw = await git(["--git-dir=\(mirror)", "diff", "--raw", "-z", "--no-renames", "--no-ext-diff", "--no-textconv", base, tip])
         guard raw.ok else { return "Refused: the branch's change couldn't be read." }
         let entries = Self.rawEntries(raw.out)
+        // Defence in depth: the log walk above already lists every path any commit or merge changed, so this net check
+        // can't refuse anything it missed today; it stays so a future change to that walk can't open the hole alone.
         if let hit = entries.map(\.path).sorted().first(where: policy.protects) {
             return "Refused: the branch changes \(VCSTool.shown(hit)), a protected path, so it needs a person to push it."
         }
