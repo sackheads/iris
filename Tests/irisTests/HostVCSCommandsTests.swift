@@ -19,6 +19,12 @@ struct HostVCSCommandsTests {
         "git-credential-osxkeychain get", "/usr/libexec/git-core/git-credential-store get",
         "git config alias.x '!env -u GIT_CONFIG_COUNT git push'", "git config credential.helper osxkeychain",
         "git config --local include.path /tmp/x", "git config core.sshCommand ssh",
+        // The planner's widening: keychain secrets and every git variable, wherever it's set or unset.
+        "security find-internet-password -s github.com -w", "security find-generic-password -s gh:github.com -w",
+        "security dump-keychain -d", "security export -k login.keychain", "/usr/bin/security find-key",
+        "export GIT_CONFIG_COUNT=0; git status", "unset GIT_CONFIG_COUNT && git status", "env -u GIT_CONFIG_COUNT git status",
+        "GIT_CONFIG_KEY_0=credential.helper GIT_CONFIG_VALUE_0=osxkeychain git status", "git -c credential.helper=x fetch",
+        "git --config-env=credential.helper=X status", "echo $GIT_CONFIG_COUNT",
     ])
     func needsPerson(_ command: String) {
         #expect(HostVCSCommands.needsPerson(command), Comment(rawValue: command))
@@ -27,7 +33,7 @@ struct HostVCSCommandsTests {
     @Test("ordinary local git, and words that only look like gh or git, take the usual ladder", arguments: [
         "git status", "git commit -m x", "git log --oneline", "git -C sub status", "git add -A", "git rebase --continue",
         "git worktree add ../iris-x", "swift build", "grep -r gh docs", "ls ghost", "cat .github/x", "github-cli-docs",
-        "echo pushing", "git diff push.txt", "git config user.name x", "git config --get remote.origin.url",
+        "echo pushing", "git diff push.txt", "security list-keychains", "security find-identity -v -p codesigning", "git config user.name x", "git config --get remote.origin.url",
     ])
     func usualLadder(_ command: String) {
         #expect(!HostVCSCommands.needsPerson(command), Comment(rawValue: command))
