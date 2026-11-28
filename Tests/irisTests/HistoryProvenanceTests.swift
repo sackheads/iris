@@ -89,6 +89,7 @@ struct HistoryProvenanceTests {
         #expect(try openAIBody(HistoryProvenance.filtered(short, for: "deepseek")) == (try openAIBody(short)))
         // Anthropic's client sends neither kind, so its requests are as before.
         #expect(try geminiBody(HistoryProvenance.filtered(deepseek, for: "anthropic")) == (try geminiBody(deepseek)))
+        #expect(try geminiBody(HistoryProvenance.filtered(gemini, for: "anthropic")) == (try geminiBody(gemini)))
     }
 
     @Test("producedBy is never sent to Gemini, and it round-trips through history's JSON (an old row decodes as nil)")
