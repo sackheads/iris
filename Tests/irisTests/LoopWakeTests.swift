@@ -9,8 +9,8 @@ import Foundation
 /// What decides it: `deliverPeerMessage` (peer and topic, which is a peer delivery with `envelope.topic`) and
 /// `deliverInboxAnswerFrame` start the target's turn at once when `loop.isLive` and the turn claim say it's free, and
 /// queue it otherwise. A waiting `/loop` tick lives on its own slot (`IrisEngine.loopTicks`), not the goal loop's, so it
-/// holds nothing an arrival queues behind. The arrival's turn ends by re-arming the tick from then (`armLoopTick`, at the
-/// end of every turn), so it takes the waiting tick's place rather than adding one.
+/// holds nothing an arrival queues behind. The arrival's turn ends by arming the tick again (`armLoopTick`, at the end of
+/// every turn), which keeps the waiting tick and its due time (`AppState.loopDue`): an arrival never moves the next tick.
 @MainActor
 @Suite("A looping conversation wakes on a peer, topic or Inbox message (#1423)", .timeLimit(.minutes(1)))
 struct LoopWakeTests {
@@ -55,7 +55,7 @@ struct LoopWakeTests {
         }
     }
 
-    @Test("idle: the arrival's turn runs at once, no tick runs for it, and the next tick is re-armed from its end",
+    @Test("idle: the arrival's turn runs at once, no tick runs for it, and the waiting tick keeps its due time",
           arguments: Channel.allCases, [false, true])
     func idleWakes(_ channel: Channel, _ selfPaced: Bool) async throws {
         let (state, id, sender) = try app()
@@ -68,8 +68,9 @@ struct LoopWakeTests {
         #expect(outcome == .delivered, "\(channel): delivered at once, not queued for the tick")
         #expect(await eventually { sent(state, id).contains { $0.contains(marker) } }, "\(channel): its turn ran")
         #expect(!sent(state, id).contains { $0.hasPrefix("Loop tick") }, "\(channel): no tick ran for it")
-        #expect(await eventually { !state.isThinking(in: id) && (state.loopNextTick[id].map { $0 > before } ?? false) },
-                "\(channel): the next tick is re-armed from the arrival's end, a full interval later")
+        // The arrival's turn cancels the waiting tick as it starts (#190); its end arms it again, at the same due time.
+        #expect(await eventually { !state.isThinking(in: id) && state.loopNextTick[id] != nil })
+        #expect(state.loopNextTick[id].map { abs($0.timeIntervalSince(before)) < 0.05 } ?? false, "\(channel): the arrival didn't move the next tick")
         #expect(await engine.hasLoopTick(for: id), "\(channel): one tick waits, not two")
         state.pauseLoop(for: id)
     }
@@ -95,23 +96,80 @@ struct LoopWakeTests {
         state.pauseLoop(for: id)
     }
 
-    /// The planner's note on #1423, pinned so a change to it is deliberate: each arrival re-arms the tick a full interval
-    /// from its own end, so a conversation that hears more often than its interval never runs its own `/loop` prompt.
-    @Test("documents tick starvation: each arrival pushes the waiting tick back a full interval from its own end")
-    func arrivalsStarveTheTick() async throws {
+    /// #1423 (planner's ruling): a turn between ticks never moves the next one, so a chatty conversation still loops.
+    @Test("an arrival keeps an interval loop's due time: three arrivals, and the next tick hasn't moved")
+    func arrivalsKeepTheDueTime() async throws {
         let (state, id, sender) = try app()
         let engine = try #require(state.engine)
         state.startLoop(ConversationLoop(prompt: "p", intervalSeconds: 3600, cap: 5), in: id)
         #expect(await eventually { state.loopNextTick[id] != nil })
-        var last = try #require(state.loopNextTick[id])
+        let due = try #require(state.loopNextTick[id])
         for n in 1...3 {
             let marker = "chatty-\(n)"
             #expect(await deliver(.peer, marker, to: id, from: sender, engine: engine) == .delivered)
-            #expect(await eventually { sent(state, id).contains { $0.contains(marker) } })
-            #expect(await eventually { !state.isThinking(in: id) && (state.loopNextTick[id].map { $0 > last } ?? false) },
-                    "arrival \(n) pushed the tick back")
-            last = try #require(state.loopNextTick[id])
+            #expect(await eventually { sent(state, id).contains { $0.contains(marker) } && !state.isThinking(in: id) && state.loopNextTick[id] != nil })
+            #expect(state.loopNextTick[id].map { abs($0.timeIntervalSince(due)) < 0.05 } ?? false, "arrival \(n) left the tick where it was")
         }
+        #expect(await engine.hasLoopTick(for: id))
+        state.pauseLoop(for: id)
+    }
+
+    @Test("a chatty peer, an arrival every quarter interval, still gets a tick every interval")
+    func chattyPeerStillTicks() async throws {
+        let (state, id, sender) = try app()
+        let engine = try #require(state.engine)
+        state.startLoop(ConversationLoop(prompt: "p", intervalSeconds: 1, cap: 20), in: id)
+        #expect(await eventually { state.loopNextTick[id] != nil })
+        let start = TestClock.now()
+        var n = 0
+        while TestClock.seconds(since: start) < 4.2 {
+            n += 1
+            _ = await deliver(.peer, "chatty-\(n)", to: id, from: sender, engine: engine)
+            try? await Task.sleep(nanoseconds: 250_000_000)
+        }
+        let ticks = sent(state, id).filter { $0.hasPrefix("Loop tick") }.count
+        #expect(ticks >= 3, "\(ticks) ticks in ~4 s at a 1 s interval with \(n) arrivals; before #1423 an arrival every 0.25 s left none")
+        #expect(ticks <= 5, "no more than one tick per interval")
+        state.pauseLoop(for: id)
+    }
+
+    @Test("a busy turn spanning the due time gives exactly one tick, right after it")
+    func busyTurnGivesOneTick() async throws {
+        let (state, id, sender) = try app(latencyMs: 2500)
+        let engine = try #require(state.engine)
+        state.startLoop(ConversationLoop(prompt: "p", intervalSeconds: 0.5, cap: 20), in: id)
+        #expect(await eventually { state.loopNextTick[id] != nil })
+        // One long turn: the due time (0.5 s) and several more intervals pass while it runs.
+        #expect(await deliver(.peer, "long-turn", to: id, from: sender, engine: engine) == .delivered)
+        #expect(await eventually { state.isThinking(in: id) })
+        #expect(await eventually(10) { !state.isThinking(in: id) || sent(state, id).contains { $0.hasPrefix("Loop tick") } })
+        let ended = TestClock.now()
+        #expect(await eventually(5) { sent(state, id).contains { $0.hasPrefix("Loop tick") } }, "the missed tick runs after the turn")
+        #expect(TestClock.seconds(since: ended) < 2, "right after it, not at the 30 s busy retry")
+        // The tick's own turn takes 2.5 s; nothing else may start beside or before it.
+        try? await Task.sleep(nanoseconds: 1_500_000_000)
+        #expect(sent(state, id).filter { $0.hasPrefix("Loop tick") }.count == 1, "one tick, no catch-up burst for the missed ones")
+        let texts = sent(state, id)
+        let turn = try #require(texts.firstIndex { $0.contains("long-turn") })
+        let tick = try #require(texts.firstIndex { $0.hasPrefix("Loop tick") })
+        #expect(turn < tick, "no tick ran during the busy turn")
+        state.pauseLoop(for: id)
+    }
+
+    @Test("a self-paced loop's wake survives an arrival, and a turn that reschedules moves it")
+    func selfPacedWakeSurvives() async throws {
+        let (state, id, sender) = try app()
+        let engine = try #require(state.engine)
+        state.startLoop(ConversationLoop(prompt: "p", intervalSeconds: 3600, cap: 5, selfPaced: true), in: id)
+        #expect(await eventually { state.loopNextTick[id] != nil })
+        let wake = try #require(state.loopNextTick[id])
+        #expect(await deliver(.inbox, "arrival", to: id, from: sender, engine: engine) == .delivered)
+        #expect(await eventually { sent(state, id).contains { $0.contains("arrival") } && !state.isThinking(in: id) && state.loopNextTick[id] != nil })
+        #expect(state.loopNextTick[id].map { abs($0.timeIntervalSince(wake)) < 0.05 } ?? false, "the arrival kept the wake")
+        _ = state.scheduleNextLoopTick(for: id, requested: 120)
+        #expect(await deliver(.peer, "rescheduled", to: id, from: sender, engine: engine) == .delivered)
+        #expect(await eventually { state.loopNextTick[id].map { $0 < wake.addingTimeInterval(-3000) } ?? false },
+                "a reschedule moves it to what was asked for")
         state.pauseLoop(for: id)
     }
 }

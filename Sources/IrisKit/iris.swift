@@ -5554,7 +5554,12 @@ actor IrisEngine {
     /// loop's: a goal follow-up holds arrivals (`goalFollowUpPending`, `isLive`) until it runs,
     /// and a tick waits up to a day, so a peer's message or a subagent's post-back would have
     /// waited with it. `running` once the tick has started its turn.
-    private var loopTicks: [UUID: (token: UUID, task: Task<Void, Never>, running: Bool, loopId: UUID)] = [:]
+    private var loopTicks: [UUID: (token: UUID, task: Task<Void, Never>, running: Bool, loopId: UUID, fireAt: SuspendingClock.Instant)] = [:]
+
+    /// #1423: a tick that found a turn running tries again this long after, in case no turn end re-arms it first.
+    static let loopBusyRetrySeconds: Double = 30
+
+    nonisolated static func seconds(_ d: Duration) -> Double { Double(d.components.seconds) + Double(d.components.attoseconds) / 1e18 }
 
     /// Cancels the conversation's loop tick: a waiting one always, a running one only when
     /// `includingRunning` (Stop). Pause and `/loop stop` let a running tick finish.
@@ -5571,17 +5576,21 @@ actor IrisEngine {
     /// Test seam: whether a tick is scheduled or running for the conversation.
     func hasLoopTick(for conversationId: UUID) -> Bool { loopTicks[conversationId] != nil }
 
-    /// Schedules the conversation's next `/loop` tick, its interval from now on uptime (#190).
-    /// A paused loop, or none, schedules nothing; one with no ticks left ends with a line saying so.
-    func armLoopTick(for conversationId: UUID) async {
+    /// Schedules the conversation's next `/loop` tick at its due time on uptime (#190, #1423): an interval loop's is its
+    /// last tick's start plus the interval, a self-paced loop's what it last asked for, and a turn between ticks keeps it.
+    /// A paused loop, or none, schedules nothing; one with no ticks left ends with a line saying so. `notBefore` holds a
+    /// retry back that long.
+    func armLoopTick(for conversationId: UUID, notBefore: Double = 0) async {
         let localState = state
-        // The delay is taken in the same main-actor step: a self-paced loop's is whatever the
-        // last turn asked for with `schedule_next_tick`, else the default (#190 PR 2).
-        let armed = await MainActor.run { () -> (ConversationLoop, Double)? in
+        // The fire time is taken in the same main-actor step: a self-paced loop's delay is whatever
+        // the last turn asked for with `schedule_next_tick`, else the default (#190 PR 2).
+        let armed = await MainActor.run { () -> (ConversationLoop, SuspendingClock.Instant)? in
             guard let localState, let loop = localState.armableLoop(for: conversationId) else { return nil }
-            return (loop, loop.ticksLeft > 0 ? localState.nextLoopDelay(for: conversationId, loop: loop) : 0)
+            guard loop.ticksLeft > 0 else { return (loop, SuspendingClock().now) }
+            let delay = localState.nextLoopDelay(for: conversationId, loop: loop)
+            return (loop, localState.loopFireTime(for: conversationId, loop: loop, delay: delay, notBefore: notBefore))
         }
-        guard let (loop, delay) = armed else { return }
+        guard let (loop, fireAt) = armed else { return }
         guard loop.ticksLeft > 0 else {
             await MainActor.run { localState?.endLoopAtCap(for: conversationId) }
             return
@@ -5590,6 +5599,9 @@ actor IrisEngine {
         // re-arms here, and restarting the delay would push a pending alarm back every time the
         // user wrote (#1029 review). A replaced alarm has a new id and arms afresh.
         if loop.isAlarm, let waiting = loopTicks[conversationId], !waiting.running, waiting.loopId == loop.id { return }
+        // The same tick already waits for the same moment: another turn ending keeps it (#1423).
+        if let waiting = loopTicks[conversationId], !waiting.running, waiting.loopId == loop.id, waiting.fireAt == fireAt { return }
+        let delay = max(0, Self.seconds(fireAt - SuspendingClock().now))
         let token = UUID()
         let task = Task { [weak self] in
             await UptimeWait.seconds(delay)
@@ -5599,7 +5611,7 @@ actor IrisEngine {
         }
         // A running tick is the turn arming this one, finishing: replaced, not cancelled.
         if let old = loopTicks[conversationId], !old.running { old.task.cancel() }
-        loopTicks[conversationId] = (token, task, false, loop.id)
+        loopTicks[conversationId] = (token, task, false, loop.id, fireAt)
         await MainActor.run { localState?.loopNextTick[conversationId] = Date().addingTimeInterval(delay) }
     }
 
@@ -5614,7 +5626,13 @@ actor IrisEngine {
             return
         case .busy:
             guard !Task.isCancelled else { return }
-            await armLoopTick(for: conversationId)
+            // An alarm comes back at its minimum. A loop tick fires as the running turn ends (`armDueLoopTick`); the retry
+            // only covers a turn whose end doesn't re-arm, and never replaces a tick a turn end already armed (#1423).
+            if loop.isAlarm {
+                await armLoopTick(for: conversationId)
+            } else if loopTicks[conversationId]?.token == token {
+                await armLoopTick(for: conversationId, notBefore: Self.loopBusyRetrySeconds)
+            }
         case .run(let tick):
             if !Task.isCancelled {
                 // #1425 step 0: marks the tick's tool calls for `LoopApprovalRecord`, and records what the tick spent;
