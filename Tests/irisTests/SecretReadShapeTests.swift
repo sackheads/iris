@@ -142,6 +142,10 @@ struct SecretReadShapeTests {
         #expect(SecretReadShape.asks(command: "grep -R key .", cwd: clean, workspace: clean, home: h.home))
         #expect(!SecretReadShape.asks(command: "grep -r key .", cwd: clean, workspace: clean, home: h.home),
                 "-r doesn't follow the link; the walk doesn't either, and the workspace has no credential file")
+        // The planner's row: the common forms that don't follow links stay approvable inside the workspace.
+        for command in ["grep -r TODO .", "rg TODO", "find . -name '*.swift'"] {
+            #expect(!SecretReadShape.asks(command: command, cwd: clean, workspace: clean, home: h.home), Comment(rawValue: command))
+        }
     }
 
     @Test("~ and $HOME spellings resolve to the home folder")
