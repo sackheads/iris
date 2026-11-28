@@ -135,7 +135,7 @@ struct VCSMirrorTests {
         #expect(!(await githubHas(w, "agent/pilot/merge")))
     }
 
-    @Test("an evil merge whose workflow a later commit removes is still refused: only the merge listing sees it (dev-3's #1448 review)")
+    @Test("an evil merge whose workflow a later merge removes is still refused: only the merge listing sees it (dev-3's #1448 review)")
     func evilMergeThenRemoved() async throws {
         let w = try await world()
         try await commit(w, branch: "agent/pilot/side2", files: ["a.txt": "a\n"], message: "side")
@@ -146,8 +146,17 @@ struct VCSMirrorTests {
         try "on: push\n".write(toFile: w.workspace + "/.github/workflows/ci.yml", atomically: true, encoding: .utf8)
         try await Self.sh(["add", "-A"], in: w.workspace)
         try await Self.sh(["commit", "-q", "-m", "merge"], in: w.workspace)
+        // Removed again in a second merge's resolution, so no ordinary commit ever touches ci.yml: plain git log lists
+        // neither merge's files, and only the merge listing can see it.
+        try await Self.sh(["checkout", "-q", "-b", "agent/pilot/side3", "main"], in: w.workspace)
+        try await commit(w, branch: "agent/pilot/side3", files: ["c.txt": "c\n"], message: "side 3")
+        try await Self.sh(["checkout", "-q", "agent/pilot/hide"], in: w.workspace)
+        try await Self.sh(["merge", "--no-ff", "--no-commit", "agent/pilot/side3"], in: w.workspace)
         try FileManager.default.removeItem(atPath: w.workspace + "/.github/workflows/ci.yml")
-        try await commit(w, branch: "agent/pilot/hide", files: ["c.txt": "c\n"], message: "remove it again")
+        try await Self.sh(["add", "-A"], in: w.workspace)
+        try await Self.sh(["commit", "-q", "-m", "merge again"], in: w.workspace)
+        let plain = try await Self.sh(["log", "--format=", "--name-only", "main..HEAD"], in: w.workspace)
+        #expect(!plain.contains("ci.yml"), "no ordinary commit touches it")
         let net = try await Self.sh(["diff", "--name-only", "main...HEAD"], in: w.workspace)
         #expect(!net.contains("ci.yml"), "the net change is clean, so only the merge listing can refuse it")
         let result = await mirror(w).push(repo: "a/b", branch: "agent/pilot/hide", force: false, caller: role, workspace: w.workspace, policy: .defaults)
