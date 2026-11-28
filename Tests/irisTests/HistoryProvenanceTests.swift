@@ -81,8 +81,8 @@ struct HistoryProvenanceTests {
         #expect(try geminiBody(deepseek).contains(reasoning))
         let toGemini = HistoryProvenance.filtered(deepseek, for: "gemini")
         #expect(!(try geminiBody(toGemini)).contains(reasoning))
-        #expect(toGemini.contents[0].parts[1].functionCall?.thoughtSignature == nil)
-        #expect(toGemini.contents[0].parts[0].text == "answer")
+        #expect(toGemini.contents[1].parts[1].functionCall?.thoughtSignature == nil)
+        #expect(toGemini.contents[1].parts[0].text == "answer")
         // A one-word answer is reasoning too, never taken for a signature (dev-2's #1455 re-review).
         let short = request(reply("answer", signature: "Reading", by: nil))
         #expect(!(try geminiBody(HistoryProvenance.filtered(short, for: "gemini"))).contains("Reading"))
