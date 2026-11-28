@@ -74,6 +74,8 @@ enum SecretReadShape {
         // its first expression. None means the call's own directory.
         var roots: [String] = []
         for word in words.dropFirst() {
+            // `find`'s own options (-H, -L, -P, -E, -X, -d, -s, -x) come before its paths; its expression starts after them.
+            if program == "find", ["-H", "-L", "-P", "-E", "-X", "-d", "-s", "-x"].contains(word), roots.isEmpty { continue }
             if program == "find", word.hasPrefix("-") || word == "(" || word == "!" { break }
             if !word.hasPrefix("-") { roots.append(word) }
         }
