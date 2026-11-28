@@ -1,7 +1,7 @@
 import Foundation
 
 /// #1435 slice 3 (Brian's F5): on the host, `run_command`'s git holds no credential, and the commands that would reach a
-/// forge or change what git runs always ask the person: no allowlist rule, no Vibecop, no YOLO. Everything remote goes
+/// forge or a credential always ask the person: no allowlist rule, no Vibecop, no YOLO. Everything remote goes
 /// through `vcs` (`VCSMirror`), which holds the credential and enforces the policy.
 ///
 /// This is the host tier's line until host agents are contained (#1435's spike, S5): a person-approved command still
@@ -23,7 +23,6 @@ enum HostVCSCommands {
     static let wrappers: Set<String> = ["env", "command", "exec", "xargs", "nice", "nohup", "time", "sudo", "doas", "caffeinate",
                                         "timeout", "gtimeout", "stdbuf", "arch", "builtin", "noglob", "chroot"]
 
-    static let reason = "This command reaches a code host or changes what git runs, so only you can approve it, every time. Agents push and open PRs through vcs."
 
     /// Whether `command` needs the person on the host: `gh` in any form; git spelled as a path or run through another
     /// program; git with a transport subcommand; git with `-c`, `--config-env`, `--exec-path` or a repository option.
