@@ -85,7 +85,10 @@ struct SecretReadShapeTests {
         for command in ["rg -L TODO \(h.home)/notes", "grep -R TODO \(h.home)/notes", "find -L \(h.home)/notes -name x", "tree -l \(h.home)/notes"] {
             #expect(SecretReadShape.asks(command: command, cwd: h.workspace, workspace: h.workspace, home: h.home), Comment(rawValue: command))
         }
-        #expect(!SecretReadShape.asks(command: "rg -L TODO \(h.workspace)", cwd: h.workspace, workspace: h.workspace, home: h.home))
+        // Inside the workspace too: a link it carries can lead out (dev-3's #1451 review, round 3).
+        for command in ["rg -L TODO \(h.workspace)", "grep -R key .", "find -L . -name x"] {
+            #expect(SecretReadShape.asks(command: command, cwd: h.workspace, workspace: h.workspace, home: h.home), Comment(rawValue: command))
+        }
         #expect(!SecretReadShape.asks(command: "rg TODO \(h.home)/notes", cwd: h.workspace, workspace: h.workspace, home: h.home))
     }
 
@@ -127,6 +130,18 @@ struct SecretReadShapeTests {
         #expect(!SecretReadShape.asks(command: "grep -in x \(h.home)/notes/todo.md", cwd: h.workspace, workspace: h.workspace, home: h.home))
         // An attached value's letters aren't flags: `-f/var/...` doesn't make grep recursive.
         #expect(!SecretReadShape.asks(command: "grep -f\(h.home)/notes/todo.md x \(h.home)/notes", cwd: h.workspace, workspace: h.workspace, home: h.home))
+    }
+
+    @Test("a repo-carried link to ~/.ssh: grep -R asks, grep -r in a clean workspace runs (dev-3's #1451 review)")
+    func repoLinkToSSH() throws {
+        let h = try home(); defer { try? FileManager.default.removeItem(at: h.root) }
+        let clean = h.home + "/src/linked"
+        try FileManager.default.createDirectory(atPath: clean, withIntermediateDirectories: true)
+        try "x\n".write(toFile: clean + "/a.swift", atomically: true, encoding: .utf8)
+        try FileManager.default.createSymbolicLink(atPath: clean + "/keys", withDestinationPath: "../../.ssh")
+        #expect(SecretReadShape.asks(command: "grep -R key .", cwd: clean, workspace: clean, home: h.home))
+        #expect(!SecretReadShape.asks(command: "grep -r key .", cwd: clean, workspace: clean, home: h.home),
+                "-r doesn't follow the link; the walk doesn't either, and the workspace has no credential file")
     }
 
     @Test("~ and $HOME spellings resolve to the home folder")

@@ -110,13 +110,10 @@ enum SecretReadShape {
                       lowered == ws.lowercased() || lowered.hasPrefix(ws.lowercased() + "/") else { return true }
                 if holdsCredentialFile(resolved) { return true }
             }
-            if follows, let workspace {
-                let ws = IrisPaths.canonicalPath(workspace).lowercased()
-                if lowered != ws && !lowered.hasPrefix(ws + "/") { return true }
-            } else if follows {
-                return true
-            }
-            return false
+            // A symlink-following walk asks wherever it starts (dev-3's #1451 review, round 3): a link the repository
+            // carries (`keys -> ../../.ssh`) takes it out of the workspace, and nothing short of following every link
+            // can tell. Such reads are rare, so asking costs little.
+            return follows
         }
     }
 
