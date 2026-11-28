@@ -21,10 +21,7 @@ enum SecretReadShape {
         if below.first?.lowercased() == "library" { return true }
         // The workspace's own dot-paths stay approvable, but only for a workspace strictly below home: one that is home,
         // or above it, would make every home dotfile its own (dev-3's #1451 review).
-        if let workspace {
-            let ws = IrisPaths.canonicalPath(workspace)
-            if components(of: ws, under: homeReal)?.isEmpty == false, components(of: resolved, under: ws) != nil { return false }
-        }
+        if let workspace, let ws = ownWorkspace(workspace, home: home), components(of: resolved, under: ws) != nil { return false }
         return below.contains { $0.hasPrefix(".") || globMayMatchHidden($0) }
     }
 
@@ -36,8 +33,14 @@ enum SecretReadShape {
         return words.dropFirst().contains { word in
             let candidate: String
             if word.hasPrefix("-") {
-                guard let eq = word.firstIndex(of: "=") else { return false }
-                candidate = String(word[word.index(after: eq)...])
+                if let eq = word.firstIndex(of: "=") {
+                    candidate = String(word[word.index(after: eq)...])
+                } else if !word.hasPrefix("--"), word.count > 2, let slash = word.firstIndex(where: { $0 == "/" || $0 == "~" || $0 == "." }) {
+                    // A short option's attached value (`-f/path`, dev-2's #1451 review): the rest of the word from its path.
+                    candidate = String(word[slash...])
+                } else {
+                    return false
+                }
             } else {
                 candidate = word
             }
@@ -60,6 +63,8 @@ enum SecretReadShape {
             }
         }
         let recursive: Bool, follows: Bool
+        // A recursive read of file contents that doesn't skip hidden files (dev-2's #1451 review): `grep -r` reads `.env`.
+        var readsHiddenContent = false
         switch program {
         case "rg", "ag", "ack", "fd", "fdfind", "tree", "du", "find":
             recursive = true
@@ -68,12 +73,16 @@ enum SecretReadShape {
         case "grep", "egrep", "fgrep":
             recursive = has("r", "--recursive") || has("R", "--dereference-recursive") || options.contains { $0.hasPrefix("--directories=recurse") || $0 == "-drecurse" }
             follows = has("R", "--dereference-recursive")
+            readsHiddenContent = recursive
         case "ls":
             recursive = has("R", "--recursive")
             follows = recursive && has("L", "--dereference")
         default:
             return false
         }
+        if program == "rg" { readsHiddenContent = has(".", "--hidden") || options.contains { $0.hasPrefix("-uu") } }
+        if program == "ag" { readsHiddenContent = has("u", "--unrestricted") || options.contains("--hidden") }
+        if program == "ack" { readsHiddenContent = true }
         guard recursive else { return false }
         // Roots: the words that aren't options (a pattern among them is judged too, on the asking side); `find`'s stop at
         // its first expression. None means the call's own directory.
@@ -93,6 +102,12 @@ enum SecretReadShape {
             let lowered = resolved.lowercased()
             if lowered == homeReal || lowered == "/" || homeReal.hasPrefix(lowered + "/") { return true }
             if asks(path: root, cwd: cwd, workspace: workspace, home: home) { return true }
+            if readsHiddenContent {
+                // Outside the workspace: asks. Inside it: asks when the workspace holds a credential-shaped file.
+                guard let workspace, let ws = ownWorkspace(workspace, home: home),
+                      lowered == ws.lowercased() || lowered.hasPrefix(ws.lowercased() + "/") else { return true }
+                if holdsCredentialFile(resolved) { return true }
+            }
             if follows, let workspace {
                 let ws = IrisPaths.canonicalPath(workspace).lowercased()
                 if lowered != ws && !lowered.hasPrefix(ws + "/") { return true }
@@ -101,6 +116,30 @@ enum SecretReadShape {
             }
             return false
         }
+    }
+
+    /// The workspace's real path when it's strictly below home, the only kind whose own files are exempt.
+    private static func ownWorkspace(_ workspace: String, home: String) -> String? {
+        let ws = IrisPaths.canonicalPath(workspace)
+        return components(of: ws, under: IrisPaths.canonicalPath(home))?.isEmpty == false ? ws : nil
+    }
+
+    static let credentialScanLimit = 20_000
+
+    /// Whether `root` holds a credential-shaped file, by a bounded walk that skips `.git` and package folders. Past the
+    /// limit it answers yes: a tree too big to check is judged on the asking side.
+    static func holdsCredentialFile(_ root: String) -> Bool {
+        guard let walker = FileManager.default.enumerator(at: URL(fileURLWithPath: root), includingPropertiesForKeys: nil,
+                                                          options: [], errorHandler: { _, _ in true }) else { return false }
+        var seen = 0
+        for case let url as URL in walker {
+            seen += 1
+            if seen > credentialScanLimit { return true }
+            let name = url.lastPathComponent
+            if [".git", "node_modules", ".build", "DerivedData"].contains(name) { walker.skipDescendants(); continue }
+            if credentialName(name) { return true }
+        }
+        return false
     }
 
     private static func resolve(_ raw: String, cwd: String?, home: String) -> String {
