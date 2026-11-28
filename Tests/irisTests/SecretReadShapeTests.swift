@@ -89,6 +89,17 @@ struct SecretReadShapeTests {
         #expect(!SecretReadShape.asks(command: "rg TODO \(h.home)/notes", cwd: h.workspace, workspace: h.workspace, home: h.home))
     }
 
+    @Test("a workspace at home or above exempts nothing: gh's token still asks, a plain note still runs (dev-3's #1451 review)",
+          arguments: [true, false])
+    func workspaceAtHomeExemptsNothing(_ atHome: Bool) throws {
+        let h = try home(); defer { try? FileManager.default.removeItem(at: h.root) }
+        let ws = atHome ? h.home : "/"
+        try "x\n".write(toFile: h.home + "/notes.md", atomically: true, encoding: .utf8)
+        #expect(SecretReadShape.asks(path: "\(h.home)/.config/gh/hosts.yml", cwd: ws, workspace: ws, home: h.home))
+        #expect(SecretReadShape.asks(command: "cat \(h.home)/.config/gh/hosts.yml", cwd: h.workspace, workspace: ws, home: h.home))
+        #expect(!SecretReadShape.asks(path: "\(h.home)/notes.md", cwd: ws, workspace: ws, home: h.home))
+    }
+
     @Test("~ and $HOME spellings resolve to the home folder")
     func spellings() throws {
         let h = try home(); defer { try? FileManager.default.removeItem(at: h.root) }

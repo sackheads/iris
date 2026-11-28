@@ -19,7 +19,12 @@ enum SecretReadShape {
         let homeReal = IrisPaths.canonicalPath(home)
         guard let below = components(of: resolved, under: homeReal) else { return false }
         if below.first?.lowercased() == "library" { return true }
-        if let workspace, components(of: resolved, under: IrisPaths.canonicalPath(workspace)) != nil { return false }
+        // The workspace's own dot-paths stay approvable, but only for a workspace strictly below home: one that is home,
+        // or above it, would make every home dotfile its own (dev-3's #1451 review).
+        if let workspace {
+            let ws = IrisPaths.canonicalPath(workspace)
+            if components(of: ws, under: homeReal)?.isEmpty == false, components(of: resolved, under: ws) != nil { return false }
+        }
         return below.contains { $0.hasPrefix(".") || globMayMatchHidden($0) }
     }
 
