@@ -366,9 +366,14 @@ struct RealGitEndToEndTests {
         let repo = try await makeRepo(home: home)
         let base = ["HOME": home.path, "PATH": "/usr/bin:/bin", "GIT_CONFIG_SYSTEM": system.path, "GIT_TERMINAL_PROMPT": "0"]
         let fillInput = Data("url=https://github.com/sackheads/iris.git\n\n".utf8)
-        _ = try? await run(["credential", "fill"], cwd: repo, env: HostVCSCommands.withoutCredentials(base), stdin: fillInput)
+        // Not `run`: its isolation sets GIT_CONFIG_NOSYSTEM, which would hide the system file this row is about.
+        func fill(_ env: [String: String]) async {
+            _ = await ProcessGroupRunner.capture(executable: Self.git!, arguments: ["credential", "fill"], environment: env,
+                                                 currentDirectory: repo.path, stdin: fillInput, timeoutSeconds: 20)
+        }
+        await fill(HostVCSCommands.withoutCredentials(base))
         #expect(!FileManager.default.fileExists(atPath: captured.path), "the system-level helper didn't run")
-        _ = try? await run(["credential", "fill"], cwd: repo, env: base, stdin: fillInput)
+        await fill(base)
         #expect(FileManager.default.fileExists(atPath: captured.path), "control: without the strip it does")
     }
 
