@@ -1050,8 +1050,9 @@ struct GitHostOverrideTests {
         // A workspace no VM mounts is left alone.
         let other = try await GitFixture.repo()
         defer { try? FileManager.default.removeItem(atPath: other.dir) }
-        let plain = await executor.runCommand("echo ${GIT_CONFIG_COUNT:-none}", cwd: other.dir + "/ws", timeoutSeconds: 30)
-        #expect(plain.hasPrefix("none"), "\(plain)")
+        // Since #1435's slice 3 every host command carries the credential strip (three keys), and nothing else.
+        let plain = await executor.runCommand("echo ${GIT_CONFIG_COUNT:-none} ${GIT_CONFIG_KEY_0}", cwd: other.dir + "/ws", timeoutSeconds: 30)
+        #expect(plain.hasPrefix("3 credential.helper"), "\(plain)")
     }
 
     @Test("the overrides follow the conversation, a linked worktree and a named folder, not only the working directory")
