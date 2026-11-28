@@ -55,29 +55,36 @@ struct RoleConfusableFoldCostTests {
     Ο χρήστης είπε ότι το σύστημα είναι έτοιμο. Όλα τα αρχεία αποθηκεύτηκαν σωστά, και η αναφορά στάλθηκε.
     """
 
-    static func cost(_ text: String) -> Double {
-        let start = TestClock.now()
-        _ = PromptInjectionGuard.stripRecordingDelimiters(text)
-        return TestClock.seconds(since: start)
+    /// The strip's folds and folded-line searches for `text`, counted through `PromptInjectionGuard.foldCounter`.
+    static func counts(_ text: String) -> (folds: Int, searches: Int) {
+        let counter = PromptInjectionGuard.FoldCounter()
+        PromptInjectionGuard.$foldCounter.withValue(counter) { _ = PromptInjectionGuard.stripRecordingDelimiters(text) }
+        return (counter.folds, counter.foldedSearches)
     }
 
-    /// A ratio, not a wall: both inputs run on the same machine in the same test, so a slow CI runner slows both.
-    /// The inputs have the same number of lines and UTF-16 units; the ASCII one has no table letter, so the
-    /// ratio is the fold's own cost. The two are timed in turn and the minimum of each kept, so one preempted run
-    /// does not decide it. Measured locally (M4 Max): main, with no fold, 1.9–2.0; ae7a2936, folding per pattern,
-    /// 7.5–7.6; folding once per pass without the role-word check, 4.1–4.4; as shipped, 2.2–2.5.
-    @Test("Russian and Greek prose strips within a small multiple of ASCII text of the same size")
-    func foldCostIsBounded() {
+    /// Counted rather than timed: a wall-time ratio on a shared CI runner came in at 3.54 against a 3.5 bound on a
+    /// commit the merge queue had passed (main run 46114119217), so it measured the runner, not the fold.
+    @Test("Russian and Greek prose folds each line a bounded number of times, not once per pattern")
+    func foldCountIsBounded() {
         let prose = Array(repeating: Self.russianProse, count: 400).joined(separator: "\n")
-        let ascii = String(prose.unicodeScalars.map { $0.isASCII ? Character($0) : "a" })
-        #expect(ascii.utf16.count == prose.utf16.count)
-        _ = PromptInjectionGuard.stripRecordingDelimiters(prose)  // warm the regex caches
-        var proseCost = Double.infinity, asciiCost = Double.infinity
-        for _ in 0..<5 {
-            proseCost = min(proseCost, Self.cost(prose))
-            asciiCost = min(asciiCost, Self.cost(ascii))
-        }
-        let ratio = proseCost / asciiCost
-        #expect(ratio < 3.5, "Russian and Greek prose cost \(ratio) times ASCII of the same size (\(proseCost) s)")
+        let lines = prose.split(separator: "\n", omittingEmptySubsequences: false).count
+        let (folds, searches) = Self.counts(prose)
+        // One pass (the prose has nothing to strip), and each line folded once both ways in it. Folding per pattern,
+        // as ae7a2936 did, is a multiple of the pattern count.
+        // Bounded below too, so a counter that's no longer reached (0 for both) can't pass (dev-2's #1460 review).
+        #expect(folds >= lines && folds <= 2 * lines, "\(folds) folds for \(lines) lines")
+        // No word of `malRolePatterns` is in any fold, so no pattern searches one (the 4.1-to-2.2 step of #1385).
+        #expect(searches == 0, "\(searches) pattern searches of folded lines")
+    }
+
+    @Test("the mixed corpus, which strips, folds a line again only when a pattern has changed it")
+    func corpusFoldCount() {
+        let corpus = Self.corpus()
+        let lines = corpus.split(separator: "\n", omittingEmptySubsequences: false).count
+        let (folds, searches) = Self.counts(corpus)
+        // As shipped: 19,760 folds and 28,313 searches for 3,000 lines. A fold per pattern, without the per-line cache,
+        // is 156,104; searching folds with no role word in them is 56,430 searches.
+        #expect(folds >= lines && folds <= 8 * lines, "\(folds) folds for \(lines) lines")
+        #expect(searches >= lines && searches <= 12 * lines, "\(searches) pattern searches of folded lines")
     }
 }
