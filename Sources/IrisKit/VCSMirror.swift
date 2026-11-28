@@ -222,10 +222,12 @@ actor VCSMirror {
         guard mergeBase.ok, let base = mergeBase.out.split(separator: "\n").first.map(String.init) else {
             return "Refused: the branch shares no history with \(VCSTool.base)."
         }
-        // Every path any commit touches, so a protected file added then removed is still seen. `-m` lists a merge's
-        // changes against each parent: without it git lists no files for a merge, so a merge whose resolution rewrote a
-        // workflow passed (dev-2's #1448 review). The net change is checked below too.
-        let touched = await git(["--git-dir=\(mirror)", "log", "-m", "--format=", "--name-only", "-z", "--no-renames", "\(base)..\(tip)"])
+        // Every path any commit touches, so a protected file added then removed is still seen. Without a merge option git
+        // lists no files for a merge, so one whose resolution rewrote a workflow passed (dev-2's #1448 review);
+        // `dense-combined` lists only what the merge changed against all its parents, so a catch-up merge of a main that
+        // changed a workflow isn't refused for main's own change (dev-3's). The net change is checked below too.
+        let touched = await git(["--git-dir=\(mirror)", "log", "--diff-merges=dense-combined", "--format=", "--name-only", "-z",
+                                 "--no-renames", "\(base)..\(tip)"])
         guard touched.ok else { return "Refused: the branch's commits couldn't be listed." }
         let paths = Set(touched.out.split(separator: "\0").map(String.init).filter { !$0.isEmpty && $0 != "\n" }
             .map { $0.trimmingCharacters(in: .newlines) })

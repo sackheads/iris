@@ -135,6 +135,20 @@ struct VCSMirrorTests {
         #expect(!(await githubHas(w, "agent/pilot/merge")))
     }
 
+    @Test("a branch that merges in a main which changed a workflow still pushes: main's change isn't the branch's (dev-3's #1448 review)")
+    func catchUpMergePushes() async throws {
+        let w = try await world()
+        try await commit(w, branch: "agent/pilot/catchup", files: ["Sources/a.swift": "let a = 1\n"], message: "work")
+        // main moves on GitHub with a workflow change, and the branch merges it in.
+        try await Self.sh(["checkout", "-q", "main"], in: w.workspace)
+        try await commit(w, branch: "main", files: [".github/workflows/ci.yml": "on: push\n"], message: "ci on main")
+        try await Self.sh(["push", "-q", w.github, "main:main"], in: w.workspace)
+        try await Self.sh(["checkout", "-q", "agent/pilot/catchup"], in: w.workspace)
+        try await Self.sh(["merge", "-q", "--no-ff", "-m", "catch up", "main"], in: w.workspace)
+        let result = await mirror(w).push(repo: "a/b", branch: "agent/pilot/catchup", force: false, caller: role, workspace: w.workspace, policy: .defaults)
+        #expect(result.hasPrefix("Pushed"), Comment(rawValue: result))
+    }
+
     /// Plants everything the agent's repository could use to run a program in the broker's git: hooks of every
     /// side, a filter and a diff driver with an attributes file, `core.fsmonitor`, `uploadpack.packObjectsHook`,
     /// a `remote.<mirror>` with its own upload-pack, and an `insteadOf` rewriting the mirror and GitHub.
