@@ -79,10 +79,21 @@ struct SecretReadShapeTests {
         #expect(SecretReadShape.asks(path: "\(h.home)/.*", cwd: h.workspace, workspace: h.workspace, home: h.home))
     }
 
+    @Test("a symlink-following recursive read rooted outside the workspace asks; inside it, it doesn't (direct: the read-only flag lists refuse these flags first today)")
+    func followsDirect() throws {
+        let h = try home(); defer { try? FileManager.default.removeItem(at: h.root) }
+        for command in ["rg -L TODO \(h.home)/notes", "grep -R TODO \(h.home)/notes", "find -L \(h.home)/notes -name x", "tree -l \(h.home)/notes"] {
+            #expect(SecretReadShape.asks(command: command, cwd: h.workspace, workspace: h.workspace, home: h.home), Comment(rawValue: command))
+        }
+        #expect(!SecretReadShape.asks(command: "rg -L TODO \(h.workspace)", cwd: h.workspace, workspace: h.workspace, home: h.home))
+        #expect(!SecretReadShape.asks(command: "rg TODO \(h.home)/notes", cwd: h.workspace, workspace: h.workspace, home: h.home))
+    }
+
     @Test("~ and $HOME spellings resolve to the home folder")
     func spellings() throws {
         let h = try home(); defer { try? FileManager.default.removeItem(at: h.root) }
-        for path in ["~/.netrc", "$HOME/.netrc", "${HOME}/.ssh/id_ed25519"] {
+        // Paths whose names alone don't ask, so only resolving the spelling to this home can.
+        for path in ["~/.config/gh/hosts.yml", "$HOME/.config/gh/hosts.yml", "${HOME}/.config/gh/hosts.yml"] {
             #expect(SecretReadShape.asks(path: path, cwd: h.workspace, workspace: h.workspace, home: h.home), Comment(rawValue: path))
         }
         #expect(!SecretReadShape.asks(path: "~/d.md", cwd: h.workspace, workspace: h.workspace, home: h.home))
