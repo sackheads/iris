@@ -62,7 +62,7 @@ struct HistoryProvenanceTests {
 
     @Test("an untagged entry, written before #1452, keeps what its own provider reads, byte for byte")
     func legacyOwnKind() throws {
-        let gemini = request(reply("answer", signature: "Q2lnbmF0dXJlLWJ5dGVzLWZvci1hLXJlYWwtdHVybi1vZi1HZW1pbmk_x+/==", by: nil))
+        let gemini = request(reply("answer", signature: "Q2lnbmF0dXJlLWJ5dGVzLWZvci1hLXJlYWwtdHVybi1vZi1HZW1pbmkAx+A==", by: nil))
         #expect(try geminiBody(HistoryProvenance.filtered(gemini, for: "gemini")) == (try geminiBody(gemini)))
         let deepseek = request(reply("answer", signature: "The user wants the file, so read it first.", by: nil))
         #expect(try openAIBody(HistoryProvenance.filtered(deepseek, for: "deepseek")) == (try openAIBody(deepseek)))
@@ -72,7 +72,7 @@ struct HistoryProvenanceTests {
     /// dev-2's #1455 probe: every conversation from before #1452 is untagged, and a switch must still not cross them.
     @Test("an untagged entry never sends a Gemini signature to an OpenAI-compatible provider, or reasoning to Gemini")
     func legacyOtherKind() throws {
-        let signature = "Q2lnbmF0dXJlLWJ5dGVzLWZvci1hLXJlYWwtdHVybi1vZi1HZW1pbmk_x+/=="
+        let signature = "Q2lnbmF0dXJlLWJ5dGVzLWZvci1hLXJlYWwtdHVybi1vZi1HZW1pbmkAx+A=="
         let gemini = request(reply("answer", signature: signature, by: nil))
         #expect(try openAIBody(gemini).contains(signature))
         #expect(!(try openAIBody(HistoryProvenance.filtered(gemini, for: "deepseek"))).contains(signature))
