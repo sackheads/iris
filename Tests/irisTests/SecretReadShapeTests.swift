@@ -100,6 +100,33 @@ struct SecretReadShapeTests {
         #expect(!SecretReadShape.asks(path: "\(h.home)/notes.md", cwd: ws, workspace: ws, home: h.home))
     }
 
+    @Test("a recursive read of hidden files asks outside the workspace, and inside it when the workspace holds a credential file (dev-2's #1451 review)")
+    func hiddenContentRecursive() throws {
+        let h = try home(); defer { try? FileManager.default.removeItem(at: h.root) }
+        func asks(_ command: String, workspace: String) -> Bool {
+            SecretReadShape.asks(command: command, cwd: workspace, workspace: workspace, home: h.home)
+        }
+        // The fixture's workspace has a .env.
+        #expect(asks("grep -r API_KEY .", workspace: h.workspace))
+        #expect(asks("grep -r PASSWORD \(h.home)/src", workspace: h.workspace), "a sibling tree, outside the workspace")
+        #expect(asks("rg --hidden PASSWORD \(h.home)/src", workspace: h.workspace))
+        #expect(asks("rg -uu PASSWORD \(h.home)/notes", workspace: h.workspace))
+        #expect(!asks("rg PASSWORD \(h.home)/notes", workspace: h.workspace), "plain rg skips hidden files")
+        // A workspace with no credential file: grep -r in it stays approvable.
+        let clean = h.home + "/src/clean"
+        try FileManager.default.createDirectory(atPath: clean + "/.git", withIntermediateDirectories: true)
+        try "x\n".write(toFile: clean + "/a.swift", atomically: true, encoding: .utf8)
+        #expect(!asks("grep -r TODO .", workspace: clean))
+        #expect(!asks("grep -r TODO \(clean)", workspace: clean))
+    }
+
+    @Test("a short option's attached path is scanned like a separate one (dev-2's #1451 review)")
+    func attachedValue() throws {
+        let h = try home(); defer { try? FileManager.default.removeItem(at: h.root) }
+        #expect(SecretReadShape.asks(command: "grep -f\(h.home)/.ssh/id_ed25519 x \(h.home)/notes", cwd: h.workspace, workspace: h.workspace, home: h.home))
+        #expect(!SecretReadShape.asks(command: "grep -in x \(h.home)/notes/todo.md", cwd: h.workspace, workspace: h.workspace, home: h.home))
+    }
+
     @Test("~ and $HOME spellings resolve to the home folder")
     func spellings() throws {
         let h = try home(); defer { try? FileManager.default.removeItem(at: h.root) }
