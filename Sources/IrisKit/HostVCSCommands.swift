@@ -6,8 +6,9 @@ import Foundation
 ///
 /// This is the host tier's line until host agents are contained (#1435's spike, S5): a person-approved command still
 /// runs as the person, so what this buys is that nothing approves these on its own, and that an approved `git push`
-/// has no token to push with. It stops the direct forms only: a script (`bash x.sh`), `security -i` or a hook a
-/// repository's `core.hooksPath` names can still reach a credential under YOLO, and no text gate can be complete.
+/// has no token to push with. It stops the direct forms only. A script, hook or interpreter on a turn the person
+/// approved, or any YOLO host turn, can still reach the login-keychain credential (`bash x.sh`, `security -i`, a
+/// `core.hooksPath` hook), and no text gate can be complete. The full fix is S5's containment (planner, #1453).
 enum HostVCSCommands {
     /// git subcommands that talk to a remote, or run another machine's program.
     static let transportSubcommands: Set<String> = [
