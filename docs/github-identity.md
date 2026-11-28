@@ -109,6 +109,7 @@ the one place Iris's credential helper runs.
   `remote`, `submodule`, …), git spelled as a path or run through another program, and git with `-c`,
   `--config-env`, `--exec-path` or `--git-dir`, are yours alone to approve: no rule, Vibecop or YOLO
   approves them, and Always allow isn't offered. Pushing and fetching are `vcs push` and `vcs fetch`.
+  **What this stops, and what it doesn't:** the direct forms. A command you approve, or one YOLO runs, can still reach a credential indirectly: through a script (`bash x.sh`), `security -i`, or a hook a repository's `core.hooksPath` names. No check on a command's text can be complete, so treat the host tier as policy until host agents are contained (#1435's S5, parked).
 - **Isolation.** None of this touches `~/.gitconfig` or any other ambient git/`gh` state. It's
   injected per `run_command` invocation, scoped to exactly the repos on the allowlist — a remote
   for any other repo behaves exactly as it did before this feature existed.
