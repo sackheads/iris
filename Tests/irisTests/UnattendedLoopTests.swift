@@ -149,7 +149,10 @@ struct UnattendedLoopTests {
         state.linkDelegate(child, of: parent)
         let call = FunctionCall(name: "run_command", args: ["command": .string("git push origin pilot/x")], id: "c1")
         let client = FakeLLMClient(responses: [reply(Part(functionCall: call)), reply(Part(text: "done"))])
-        let engine = IrisEngine(state: state, tier: .medium, principal: .subagent, client: client, retryDelays: [],
+        // `.main`, not `.subagent`: what makes the child a delegate is its link, which is all the mark reads. A
+        // `.subagent` engine's command resolves to the sandbox, and with no container runtime (CI's runner) it is
+        // refused before any approval is asked, so the row would test the runtime, not the inheritance (#1447 CI).
+        let engine = IrisEngine(state: state, tier: .medium, principal: .main, client: client, retryDelays: [],
                                 protectionEnabled: false, sessionPeerCount: 0)
         state.setWorkspace(for: child, path: root.path)
         // The parent turn's mark, as a subagent's `Task` carries it from the tick (or from a typed turn).
