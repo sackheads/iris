@@ -94,4 +94,25 @@ struct LoopWakeTests {
         #expect(ticks == 1, "\(channel): one tick, not a second for the arrival")
         state.pauseLoop(for: id)
     }
+
+    /// The planner's note on #1423, pinned so a change to it is deliberate: each arrival re-arms the tick a full interval
+    /// from its own end, so a conversation that hears more often than its interval never runs its own `/loop` prompt.
+    @Test("documents tick starvation: arrivals more often than the interval keep pushing the tick back, and no tick runs")
+    func arrivalsStarveTheTick() async throws {
+        let (state, id, sender) = try app()
+        let engine = try #require(state.engine)
+        state.startLoop(ConversationLoop(prompt: "p", intervalSeconds: 3600, cap: 5), in: id)
+        #expect(await eventually { state.loopNextTick[id] != nil })
+        var last = try #require(state.loopNextTick[id])
+        for n in 1...3 {
+            let marker = "chatty-\(n)"
+            #expect(await deliver(.peer, marker, to: id, from: sender, engine: engine) == .delivered)
+            #expect(await eventually { sent(state, id).contains { $0.contains(marker) } })
+            #expect(await eventually { !state.isThinking(in: id) && (state.loopNextTick[id].map { $0 > last } ?? false) },
+                    "arrival \(n) pushed the tick back")
+            last = try #require(state.loopNextTick[id])
+        }
+        #expect(!sent(state, id).contains { $0.hasPrefix("Loop tick") }, "the loop's own prompt never ran")
+        state.pauseLoop(for: id)
+    }
 }
