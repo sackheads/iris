@@ -219,8 +219,10 @@ enum ReadOnlyCommand {
     /// (`FilesystemPolicy`), so Vibecop's APPROVE standing in for the person on "any file read"
     /// (#600) no longer holds for one — a read gated by the FS-roots grant, or refused outright by
     /// the denial set, must go through the attended path like anything else that isn't unconditionally safe.
+    /// #1450: on the host, a read whose path has a credential's shape asks the person instead (`SecretReadShape`).
     static func vibecopGate(toolName: String, details: String, inSandbox: Bool, homeWritable: Bool = false,
-                            isOwner: Bool, cwd: String? = nil, lookup: @autoclosure () -> HostLookup) -> VibecopGate {
+                            isOwner: Bool, cwd: String? = nil, workspace: String? = nil,
+                            lookup: @autoclosure () -> HostLookup) -> VibecopGate {
         switch toolName {
         case "run_command":
             if inSandbox { return !homeWritable || isReadOnly(details) ? .run : .ask }
@@ -231,8 +233,11 @@ enum ReadOnlyCommand {
             if program == "git", !GitRead.repositoryOutOfReach(cwd: real(cwd ?? host.cwd), writableRoots: host.writableRoots) {
                 return .ask
             }
+            if SecretReadShape.asks(command: details, cwd: cwd ?? host.cwd, workspace: workspace ?? cwd, home: host.home) { return .ask }
             return .runRestricted(path: path)
-        case "read_file": return isOwner ? .run : .ask
+        case "read_file":
+            guard isOwner else { return .ask }
+            return inSandbox || !SecretReadShape.asks(path: details, cwd: cwd, workspace: workspace ?? cwd, home: lookup().home) ? .run : .ask
         default: return .ask
         }
     }

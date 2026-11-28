@@ -45,6 +45,16 @@ enum DirectoryReadRule {
         return sensitiveFragments.contains { lowered.contains($0) }
     }
 
+    /// #1450: a name that is a credential by its shape alone (an exact secret name, a key prefix, a key suffix, `.env`),
+    /// without the substring fragments, which are tuned for a folder rule's one-click prompt.
+    static func isCredentialShaped(_ name: String) -> Bool {
+        let lowered = name.lowercased()
+        if lowered == ".env" || lowered.hasPrefix(".env.") || lowered.hasSuffix(".env") { return true }
+        if sensitiveNames.contains(lowered) { return true }
+        for key in ["id_rsa", "id_dsa", "id_ecdsa", "id_ed25519"] where lowered.hasPrefix(key) { return true }
+        return sensitiveSuffixes.contains { lowered.hasSuffix($0) }
+    }
+
     /// Kept for callers that ask about a bare file name.
     static func isSecretFileName(_ name: String) -> Bool { isSensitiveName(name) }
 

@@ -5564,7 +5564,7 @@ class AppState {
                 // semantics apply the "absent means owner" rule to `.main` alone).
                 switch ReadOnlyCommand.vibecopGate(toolName: toolName, details: details, inSandbox: inSandbox,
                                                    homeWritable: homeWritable(conversationId, workspace: workspace),
-                                                   isOwner: isOwner, cwd: workspace, lookup: hostLookup()) {
+                                                   isOwner: isOwner, cwd: workspace, workspace: workspace, lookup: hostLookup()) {
                 case .run: return .vibecop(reason: decision.reason)
                 case .runRestricted(let path):
                     // #616: a damaged record may have lost a root, so a silent restricted read can't
