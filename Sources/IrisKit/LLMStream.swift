@@ -237,6 +237,8 @@ extension LLMClientProtocol {
     }
 
     var supportsStreaming: Bool { false }
+    /// #1452: a fake or wrapping client names no provider, so its replies stay untagged.
+    var producerId: String? { nil }
 }
 
 /// Splits a byte stream into lines, keeping the empty ones. `AsyncLineSequence` (`bytes.lines`)
