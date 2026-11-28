@@ -89,6 +89,10 @@ struct ApprovedCallGateConsolidationTests {
         let s = session(tainted: true)
         #expect(await run(s))
         let held = try #require(s.app.pendingContextWrites(shownIn: s.id).first)
+        // `run` sees the reply before the engine has ended its turn, and that end clears the conversation's stamp (the
+        // stamp travels with its turn, `endEngineTurn`). Stamped first, a late end on a loaded runner erased it and the
+        // release applied (main's CI, 2026-11-28). So the stamp waits for that turn to end, as a guest turn's would.
+        #expect(await eventually { !s.app.hasTurnInFlight(for: s.id) }, "the held write's own turn ended")
         s.app.markGuestSteeredBinding(nonOwnerBinding(), for: s.id)
 
         let outcome = await s.app.approveContextWrite(held.id)
