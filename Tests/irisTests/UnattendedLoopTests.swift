@@ -170,6 +170,19 @@ struct UnattendedLoopTests {
         try await value(of: run)
     }
 
+    /// dev-3's #1447 review: the root half of the taint check had no row.
+    @Test("a clean subagent of a tainted loop's tick gets exact rules only, as its root does")
+    func delegateTaintFollowsRoot() async throws {
+        let (state, root) = try setUp(); defer { try? FileManager.default.removeItem(at: root) }
+        state.permissions.allowGlobally([PermissionRule(toolName: "run_command", details: "swift test", match: .prefix)])
+        let parent = looping(state, tainted: true)
+        let child = state.createNewConversation(isBackground: false, select: false)
+        state.linkDelegate(child, of: parent)
+        #expect(state.conversations.first { $0.id == child }?.hasUntrustedToolOutput == false, "control: the delegate itself is clean")
+        #expect(await ask(state, child, "swift test --filter X", root: root) == nil, "the root read outside text, so the prefix doesn't count")
+        #expect(state.unattendedLoopDenials[parent]?.calls.count == 1)
+    }
+
     @Test("the dialog sink itself refuses on an unattended loop's turn, whatever gate asked")
     func dialogBackstop() async throws {
         let (state, root) = try setUp(); defer { try? FileManager.default.removeItem(at: root) }
