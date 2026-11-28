@@ -81,7 +81,7 @@ enum HostVCSCommands {
         if subcommand == "config", words[(j + 1)...].contains(where: { word in
             let key = word.lowercased()
             return key.hasPrefix("alias.") || key.hasPrefix("credential") || key.hasPrefix("include") || key.hasPrefix("core.sshcommand")
-                || key.hasPrefix("core.askpass")
+                || key.hasPrefix("core.askpass") || key.hasPrefix("http.") || key.hasPrefix("url.")
         }) { return true }
         return transportSubcommands.contains(subcommand)
     }

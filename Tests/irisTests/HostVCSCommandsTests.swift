@@ -26,6 +26,7 @@ struct HostVCSCommandsTests {
         "GIT_CONFIG_KEY_0=credential.helper GIT_CONFIG_VALUE_0=osxkeychain git status", "git -c credential.helper=x fetch",
         "git --config-env=credential.helper=X status", "echo $GIT_CONFIG_COUNT",
         "git config set alias.y '!sh'", "git config --file .git/config alias.z x", "git config Alias.X '!sh'",
+        "git config http.https://github.com/.extraheader 'AUTHORIZATION: bearer x'", "git config url.https://x@github.com/.insteadOf https://github.com/",
     ])
     func needsPerson(_ command: String) {
         #expect(HostVCSCommands.needsPerson(command), Comment(rawValue: command))
