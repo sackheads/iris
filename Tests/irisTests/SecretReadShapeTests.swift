@@ -125,6 +125,8 @@ struct SecretReadShapeTests {
         let h = try home(); defer { try? FileManager.default.removeItem(at: h.root) }
         #expect(SecretReadShape.asks(command: "grep -f\(h.home)/.ssh/id_ed25519 x \(h.home)/notes", cwd: h.workspace, workspace: h.workspace, home: h.home))
         #expect(!SecretReadShape.asks(command: "grep -in x \(h.home)/notes/todo.md", cwd: h.workspace, workspace: h.workspace, home: h.home))
+        // An attached value's letters aren't flags: `-f/var/...` doesn't make grep recursive.
+        #expect(!SecretReadShape.asks(command: "grep -f\(h.home)/notes/todo.md x \(h.home)/notes", cwd: h.workspace, workspace: h.workspace, home: h.home))
     }
 
     @Test("~ and $HOME spellings resolve to the home folder")

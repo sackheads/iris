@@ -58,7 +58,9 @@ enum SecretReadShape {
         func has(_ short: Character? = nil, _ long: String? = nil) -> Bool {
             options.contains { option in
                 if let long, option == long || option.hasPrefix(long + "=") { return true }
-                if let short, !option.hasPrefix("--"), option.dropFirst().contains(short) { return true }
+                // Only a cluster of flag letters (`-rn`): an attached value (`-f/var/x`) isn't flags.
+                if let short, !option.hasPrefix("--"), option.dropFirst().allSatisfy({ $0.isLetter || $0 == "." }),
+                   option.dropFirst().contains(short) { return true }
                 return false
             }
         }
