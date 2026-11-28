@@ -1495,7 +1495,15 @@ class AppState {
             // purpose: an event card is never itself a reason to call the model.
             flushPendingEventLines(for: conversationId)
             drainPendingUserMessages(for: conversationId)
+            armDueLoopTick(conversationId)
         }
+    }
+
+    /// #1423: a loop tick that fell due while a turn ran fires as that turn ends, once, unless the drain just started
+    /// another turn (whose end comes back here).
+    private func armDueLoopTick(_ id: UUID) {
+        guard let due = loopDue[id], due.at <= SuspendingClock().now, !hasTurnInFlight(for: id) else { return }
+        armLoopIfIdle(id)
     }
 
     /// Test seam only — no production caller. The timing dictionaries are private, and the tests
@@ -2319,6 +2327,7 @@ class AppState {
             if let conversationId {
                 self.flushPendingEventLines(for: conversationId)
                 self.drainPendingUserMessages(for: conversationId)
+                self.armDueLoopTick(conversationId)
             }
         }
         activeTasks[id] = (conversationId, task)
@@ -7243,12 +7252,47 @@ class AppState {
     /// armed (#190 PR 2). Transient: a loop comes back paused after a relaunch anyway.
     @ObservationIgnored var loopRequestedDelay: [UUID: Double] = [:]
 
+    /// #1423 (planner's ruling): when each conversation's next loop tick is due, on uptime. An interval loop's is its last
+    /// tick's start plus the interval, but never sooner than `loopRestSeconds` after that tick ended, so a tick that
+    /// outlasts its interval doesn't run the next back to back. A self-paced loop's is what the model last asked for, from
+    /// the end of the turn that asked. A turn that isn't a tick keeps it: a peer writing more often than the interval used
+    /// to push every tick back, so the loop's own prompt never ran. Cleared to be taken afresh at the next arm (a
+    /// self-paced tick, `schedule_next_tick`, resume). Not for an alarm, which keeps its own early return in
+    /// `armLoopTick`. Transient, as the loop comes back paused.
+    @ObservationIgnored var loopDue: [UUID: (loopId: UUID, at: SuspendingClock.Instant)] = [:]
+    /// An interval loop's tick that has started and whose end hasn't armed the next one yet (#1423).
+    @ObservationIgnored var loopTickStarted: [UUID: (loopId: UUID, at: SuspendingClock.Instant)] = [:]
+    /// The least rest after an interval loop's tick ends, the shortest interval `/loop` takes. A test shortens it.
+    @ObservationIgnored var loopRestSeconds: Double = ConversationLoop.minimumInterval
+
+    /// When the next tick of `loop` fires: its due time (taken now when there is none), and never sooner than `notBefore`
+    /// seconds from now. A due time that has passed fires at once, once: a missed tick has no catch-up burst.
+    func loopFireTime(for id: UUID, loop: ConversationLoop, delay: Double, notBefore: Double = 0) -> SuspendingClock.Instant {
+        let now = SuspendingClock().now
+        let due: SuspendingClock.Instant
+        if loop.isAlarm {
+            due = now + .seconds(delay)
+        } else if let started = loopTickStarted.removeValue(forKey: id), started.loopId == loop.id {
+            // The tick's own turn ending: an interval from its start, with at least the rest from now.
+            due = max(started.at + .seconds(loop.intervalSeconds), now + .seconds(loopRestSeconds))
+            loopDue[id] = (loop.id, due)
+        } else if let kept = loopDue[id], kept.loopId == loop.id {
+            due = kept.at
+        } else {
+            due = now + .seconds(delay)
+            loopDue[id] = (loop.id, due)
+        }
+        return max(due, now + .seconds(notBefore))
+    }
+
     /// `schedule_next_tick`: records the clamped delay for this conversation's self-paced loop, or
     /// nil when it has none (the dispatcher's refusal).
     func scheduleNextLoopTick(for id: UUID, requested: Double) -> String? {
         guard conversations.first(where: { $0.id == id })?.loop?.selfPaced == true else { return nil }
         let (seconds, result) = ConversationLoop.clampedDelay(requested.isFinite ? requested : ConversationLoop.selfPacedDefault)
         loopRequestedDelay[id] = seconds
+        // The turn that reschedules moves the due time; one that doesn't keeps it (#1423).
+        loopDue[id] = nil
         return result
     }
 
@@ -7379,6 +7423,7 @@ class AppState {
             armLoopIfIdle(id)
             return
         }
+        loopDue[id] = nil
         appendMessage(role: .system, content: "Loop resumed: the next tick in \(ConversationLoop.describe(seconds: loop.selfPaced ? loopRequestedDelay[id] ?? ConversationLoop.selfPacedDefault : loop.intervalSeconds)).", to: id)
         armLoopIfIdle(id)
     }
@@ -7391,6 +7436,8 @@ class AppState {
         conversations[idx].loop = nil
         loopNextTick[id] = nil
         loopRequestedDelay[id] = nil
+        loopDue[id] = nil
+        loopTickStarted[id] = nil
         cancelWaitingLoopTick(id)
         markChanged(id, .metadata)
         return true
@@ -7421,8 +7468,8 @@ class AppState {
     enum LoopTake: Equatable { case run(String), busy, none }
 
     /// Takes one tick of loop `loopId` in `id`. `.none` when that loop has ended, been replaced or
-    /// paused, or has no ticks left. `.busy` when a turn is running: this tick is skipped, not
-    /// queued, and the next is an interval away.
+    /// paused, or has no ticks left. `.busy` when a turn is running: this tick waits for that turn's end
+    /// (`endEngineTurn` re-arms it, #1423), and an alarm comes back soon.
     func takeLoopTick(for id: UUID, loopId: UUID) -> LoopTake {
         loopNextTick[id] = nil
         guard let idx = conversations.firstIndex(where: { $0.id == id }), let loop = conversations[idx].loop,
@@ -7437,6 +7484,10 @@ class AppState {
         conversations[idx].loop?.ticksLeft -= 1
         // Each tick asks for its own next delay; without a call it falls back to the default.
         loopRequestedDelay[id] = nil
+        // #1423: the next tick's due time is taken as this tick's turn ends (`loopFireTime`), and no turn between ticks
+        // moves it.
+        loopDue[id] = nil
+        if !loop.selfPaced, !loop.isAlarm { loopTickStarted[id] = (loop.id, SuspendingClock().now) }
         markChanged(id, .metadata)
         let number = loop.cap - loop.ticksLeft + 1
         appendMessage(role: .system, content: loop.isAlarm ? "⏰ Alarm: \(loop.prompt)" : "↻ Loop tick \(number) of \(loop.cap)", to: id)

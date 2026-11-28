@@ -19,6 +19,8 @@ struct LoopTests {
                              createIfEmpty: false, emitLaunchNotices: false)
         let home = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("iris-190-\(UUID().uuidString)")
         state.permissions = PermissionManager(paths: IrisPaths(root: home))
+        // These loops tick every 50 ms; the minute's rest after a tick (#1423) is a case of its own (`LoopWakeTests`).
+        state.loopRestSeconds = 0
         let engine = IrisEngine(state: state, tier: .medium,
                                 client: FakeLLMClient(responses: (1...replies).map { text("reply \($0)") },
                                                       latency: .init(minMs: latencyMs, maxMs: latencyMs)),
