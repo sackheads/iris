@@ -71,7 +71,8 @@ struct RoleConfusableFoldCostTests {
         let (folds, searches) = Self.counts(prose)
         // One pass (the prose has nothing to strip), and each line folded once both ways in it. Folding per pattern,
         // as ae7a2936 did, is a multiple of the pattern count.
-        #expect(folds <= 2 * lines, "\(folds) folds for \(lines) lines")
+        // Bounded below too, so a counter that's no longer reached (0 for both) can't pass (dev-2's #1460 review).
+        #expect(folds >= lines && folds <= 2 * lines, "\(folds) folds for \(lines) lines")
         // No word of `malRolePatterns` is in any fold, so no pattern searches one (the 4.1-to-2.2 step of #1385).
         #expect(searches == 0, "\(searches) pattern searches of folded lines")
     }
@@ -83,7 +84,7 @@ struct RoleConfusableFoldCostTests {
         let (folds, searches) = Self.counts(corpus)
         // As shipped: 19,760 folds and 28,313 searches for 3,000 lines. A fold per pattern, without the per-line cache,
         // is 156,104; searching folds with no role word in them is 56,430 searches.
-        #expect(folds <= 8 * lines, "\(folds) folds for \(lines) lines")
-        #expect(searches <= 12 * lines, "\(searches) pattern searches of folded lines")
+        #expect(folds >= lines && folds <= 8 * lines, "\(folds) folds for \(lines) lines")
+        #expect(searches >= lines && searches <= 12 * lines, "\(searches) pattern searches of folded lines")
     }
 }
