@@ -3919,6 +3919,17 @@ actor IrisEngine {
             // #689: a cloud guard call during this turn (Vibecop on an approval, the tier-3 canary
             // on a tool's output) is charged to this conversation, and so to its job run.
             let guardSink = await MainActor.run { [state] in GuardUsage.charging(conversationId, in: state) }
+            // #1425: a turn the person didn't type, in a conversation whose loop is unattended, decides its approvals
+            // without a dialog (`UnattendedLoop`). Only the composer's sends are "UI". A delegate (a subagent, a grader)
+            // takes the mark of the turn that started it, which its `Task` carries (dev-1's #1447 review): a subagent of
+            // an unattended tick asks nobody either, and one of the person's typed turn still asks.
+            let inherited = UnattendedLoop.turn
+            let unattendedLoopTurn = await MainActor.run { [state] () -> Bool in
+                guard let state, let c = state.conversations.first(where: { $0.id == conversationId }) else { return inherited }
+                if c.isSubagent || state.delegationParent(of: conversationId) != nil { return inherited }
+                return source != "UI" && !c.isBackground && c.loop?.unattended == true
+            }
+            await UnattendedLoop.$turn.withValue(unattendedLoopTurn) {
             await GuardUsage.$sink.withValue(guardSink) {
             await Self.$isReflectionTurn.withValue(false) {
                 await Self.$turnTier.withValue(tier) {
@@ -3932,6 +3943,7 @@ actor IrisEngine {
                     }
                 }
                 }
+            }
             }
             }
             PerformanceProfiler.shared.endTurn(turnID, totalMs: UptimeClock.live.seconds(since: turnStart) * 1000.0)
@@ -4807,6 +4819,9 @@ actor IrisEngine {
         let nonOwnerTurn = guestSensitiveOffered && bindingGated ? !(await callIsOwner(conversationId)) : false
         toolsList = Self.hardStrip(toolsList, isUnattended: isUnattended, principal: principal, guestOrigin: guestOrigin,
                                    nonOwner: nonOwnerTurn, keepUnattended: isEmittingJobRun ? Self.jobRunInboxTools : [])
+        // #1425: an unattended loop's turn isn't offered what a job run isn't, bar the session and inbox tools, and,
+        // being stripped, a call to one is refused as not offered (#811). Beside the hard strip, so no sticky set brings one back.
+        if UnattendedLoop.turn { toolsList.removeAll { UnattendedLoop.strippedTools.contains($0.name) } }
         if stickyApplies {
             let declared = toolsList.map(\.name)
             await MainActor.run { localState?.stickyTools.record(declared, for: conversationId) }
@@ -8568,7 +8583,8 @@ actor IrisEngine {
                     }
                 } else {
                     result = isUnattended ? Self.unattendedDeniedToolResult(tool: functionCall.name)
-                                          : Self.deniedToolResult
+                        : UnattendedLoop.turn ? UnattendedLoop.deniedToolResult(tool: functionCall.name)
+                        : Self.deniedToolResult
                 }
             } else {
                 await recordApproval(outboundApproval ?? .ungated, pillId: pillId, conversationId: conversationId)
