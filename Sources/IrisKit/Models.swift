@@ -56,6 +56,9 @@ struct Content: Codable, Sendable {
     /// the UI and every other provider. nil for other providers, for a reply with no thinking
     /// block, for a reply an AfterModel hook rewrote, and for every row written before #314.
     var anthropicBlocks: String? = nil
+    /// #1452: the provider whose reply this is (`LLMClientProtocol.producerId`), so a request to another provider
+    /// drops what only this one can read (`HistoryProvenance`). nil for anything else and for rows written before.
+    var producedBy: String? = nil
 }
 
 public struct Part: Codable, Sendable {
@@ -292,7 +295,7 @@ struct PromptFeedback: Codable, Sendable {
 }
 
 extension Content {
-    private enum CodingKeys: String, CodingKey { case role, parts, anthropicBlocks }
+    private enum CodingKeys: String, CodingKey { case role, parts, anthropicBlocks, producedBy }
 
     /// `parts` is absent on a candidate Gemini stopped early. This type is also the persisted
     /// conversation history, so absence must decode, never throw (#136). `anthropicBlocks` is
@@ -302,6 +305,8 @@ extension Content {
         role = try c.decodeIfPresent(String.self, forKey: .role)
         parts = try c.decodeIfPresent([Part].self, forKey: .parts) ?? []
         anthropicBlocks = try c.decodeIfPresent(String.self, forKey: .anthropicBlocks)
+        // #1452: absent on every row older than it (invariant 1).
+        producedBy = try c.decodeIfPresent(String.self, forKey: .producedBy)
     }
 }
 

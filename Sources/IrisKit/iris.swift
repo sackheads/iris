@@ -5111,6 +5111,8 @@ actor IrisEngine {
                 if !replyRewritten {
                     modelContent.anthropicBlocks = response.candidates?.first?.content?.anthropicBlocks
                 }
+                // #1452: which provider wrote it, so a request to another drops what only this one reads.
+                modelContent.producedBy = client.producerId
                 await MainActor.run { 
                     localState?.appendContentToHistory(for: conversationId, content: modelContent) 
                 }

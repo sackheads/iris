@@ -8,6 +8,9 @@ protocol LLMClientProtocol: Sendable {
     func streamContent(request: GeminiRequest, tier: ModelTier) -> AsyncThrowingStream<LLMStreamEvent, Error>
     /// True only when `streamContent` reads the provider's stream natively. Default false.
     var supportsStreaming: Bool { get }
+    /// #1452: the provider a call goes to, as history records it (`Content.producedBy`). nil for a client that isn't a
+    /// real provider (a test's fake), whose replies stay untagged.
+    var producerId: String? { get }
 }
 
 extension LLMClient: LLMClientProtocol {}
@@ -42,6 +45,14 @@ struct LLMClient {
     private func family(_ config: ConfigManager) -> String? {
         Self.family(route: route, primary: config.primaryProvider)
     }
+
+    /// #1452: a route's provider id, else the primary family's (`ProviderSlug.id(of:)`, the ids a route uses).
+    static func producerId(route: ProviderRoute?, primary: @autoclosure () -> String) -> String? {
+        if let route { return route.providerId }
+        return LLMProvider(rawValue: primary()).map(ProviderSlug.id(of:))
+    }
+
+    var producerId: String? { Self.producerId(route: route, primary: ConfigManager.shared.primaryProvider) }
 
     /// A routed endpoint's call: its own base URL and key, the no-redirect session, and the key
     /// scrubbed from any error body.
@@ -167,8 +178,9 @@ struct LLMClient {
     static func encodeGeminiBody(_ request: GeminiRequest) throws -> Data {
         // #314: Anthropic's own blocks are not Gemini's; an unknown field is a 400.
         var wire = request
-        for i in wire.contents.indices { wire.contents[i].anthropicBlocks = nil }
+        for i in wire.contents.indices { wire.contents[i].anthropicBlocks = nil; wire.contents[i].producedBy = nil }
         wire.systemInstruction?.anthropicBlocks = nil
+        wire.systemInstruction?.producedBy = nil
         let encoder = JSONEncoder()
         encoder.keyEncodingStrategy = .useDefaultKeys
         encoder.outputFormatting = [.sortedKeys]
@@ -225,6 +237,7 @@ struct LLMClient {
     }
 
     func streamContent(request: GeminiRequest, tier: ModelTier) -> AsyncThrowingStream<LLMStreamEvent, Error> {
+        let request = HistoryProvenance.filtered(request, for: producerId)
         let config = ConfigManager.shared
         let provider = family(config)
         let modelName = route?.model ?? config.getModel(for: tier)
@@ -300,6 +313,7 @@ struct LLMClient {
     /// `model` replaces the tier's configured model for this one call (#620: Vibecop's cloud
     /// model); nil is the tier's own. The tier still names the call in the metrics.
     func generateContent(request: GeminiRequest, tier: ModelTier, model: String?) async throws -> GeminiResponse {
+        let request = HistoryProvenance.filtered(request, for: producerId)
         let config = ConfigManager.shared
         let provider = family(config)
         
