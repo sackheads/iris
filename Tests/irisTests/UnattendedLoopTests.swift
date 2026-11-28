@@ -140,6 +140,36 @@ struct UnattendedLoopTests {
                 "\(records.map(\.layer))")
     }
 
+    /// dev-1's #1447 review: a delegate's turn recomputed the mark from its own conversation (no loop) and showed dialogs.
+    @Test("a subagent of an unattended tick asks nobody, and its call is held on the loop's conversation", arguments: [true, false])
+    func delegateInheritsTheMark(parentTick: Bool) async throws {
+        let (state, root) = try setUp(); defer { try? FileManager.default.removeItem(at: root) }
+        let parent = looping(state)
+        let child = state.createNewConversation(isBackground: false, select: false)
+        state.linkDelegate(child, of: parent)
+        let call = FunctionCall(name: "run_command", args: ["command": .string("git push origin pilot/x")], id: "c1")
+        let client = FakeLLMClient(responses: [reply(Part(functionCall: call)), reply(Part(text: "done"))])
+        let engine = IrisEngine(state: state, tier: .medium, principal: .subagent, client: client, retryDelays: [],
+                                protectionEnabled: false, sessionPeerCount: 0)
+        state.setWorkspace(for: child, path: root.path)
+        // The parent turn's mark, as a subagent's `Task` carries it from the tick (or from a typed turn).
+        let run = Task { await UnattendedLoop.$turn.withValue(parentTick) {
+            await engine.processInput("subtask", source: "System", conversationId: child)
+        } }
+        for _ in 0..<80 where state.pendingApprovals.isEmpty && state.unattendedLoopDenials[parent] == nil {
+            try? await Task.sleep(nanoseconds: 25_000_000)
+        }
+        if parentTick {
+            #expect(state.pendingApprovals.isEmpty, "a subagent of an unattended tick shows no dialog")
+            #expect(state.unattendedLoopDenials[parent]?.calls.count == 1, "held on the loop's conversation")
+            #expect(notices(state, parent).count == 1)
+        } else {
+            #expect(state.pendingApprovals.count == 1, "a subagent of the person's typed turn still asks")
+            state.denyPendingApprovals(for: child)
+        }
+        try await value(of: run)
+    }
+
     @Test("the dialog sink itself refuses on an unattended loop's turn, whatever gate asked")
     func dialogBackstop() async throws {
         let (state, root) = try setUp(); defer { try? FileManager.default.removeItem(at: root) }

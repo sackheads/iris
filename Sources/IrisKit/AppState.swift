@@ -5536,7 +5536,10 @@ class AppState {
         let guestOrigin = conversationId.map { isGuestOriginTurn($0) || isGuestOriginTurn(delegationRoot(of: $0)) } ?? false
         // #1425 fork 2: on an unattended loop's turn, Always-allow prefixes and directory rules count only while the
         // conversation hasn't read outside text; once it has, only exact rules do, as for a job run.
-        let exactRulesOnly = loopUnattended && (conversationId.flatMap { id in conversations.first { $0.id == id } }?.hasUntrustedToolOutput ?? true)
+        // A delegate counts as tainted when it or the turn's root conversation has read outside text.
+        let exactRulesOnly = loopUnattended && (conversationId.map { id in
+            [id, delegationRoot(of: id)].contains { cid in conversations.first { $0.id == cid }?.hasUntrustedToolOutput ?? true }
+        } ?? true)
         if let match = permissions.match(toolName: toolName, details: details, workspace: workspace, isBackground: exactRulesOnly,
                                          isGuestOrigin: guestOrigin, isOwner: isOwner) {
             return .allowlist(match)
@@ -5610,7 +5613,10 @@ class AppState {
     func recordUnattendedLoopDenial(toolName: String, details: String, args: [String: JSONValue], workspace: String?,
                                     conversationId: UUID?) {
         LoopApprovalProbe.current?.noteHeld()
-        guard let id = conversationId, let loop = conversations.first(where: { $0.id == id })?.loop else { return }
+        // A delegate's call is held on the loop of the conversation it works for, where the person sees it.
+        guard let child = conversationId else { return }
+        let id = delegationRoot(of: child)
+        guard let loop = conversations.first(where: { $0.id == id })?.loop else { return }
         var entry = unattendedLoopDenials[id].flatMap { $0.loopId == loop.id ? $0 : nil } ?? (loopId: loop.id, calls: [])
         let call = BlockedCall(toolName: toolName, args: args, cwd: workspace, reason: .approval)
         guard !entry.calls.contains(where: { $0.toolName == call.toolName && $0.args == call.args && $0.cwd == call.cwd }) else { return }
