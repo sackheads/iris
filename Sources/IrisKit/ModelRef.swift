@@ -18,7 +18,8 @@ struct ModelRef: Codable, Equatable, Hashable, Sendable {
     static func parse(_ text: String) -> Result<ModelRef, ParseError> {
         let trimmed = text.trimmingCharacters(in: .whitespaces)
         guard let slash = trimmed.firstIndex(of: "/") else { return .failure(.noSlash) }
-        let provider = String(trimmed[..<slash]), model = String(trimmed[trimmed.index(after: slash)...])
+        // A provider id is lowercase; `Anthropic/…` means the same one (dev-2's #1457 review). The model keeps its case.
+        let provider = trimmed[..<slash].lowercased(), model = String(trimmed[trimmed.index(after: slash)...])
         let allowed = Set("abcdefghijklmnopqrstuvwxyz0123456789-")
         guard (1...32).contains(provider.count), provider.allSatisfy(allowed.contains), provider.first != "-", provider.last != "-"
         else { return .failure(.badProvider(provider)) }

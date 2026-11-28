@@ -40,20 +40,25 @@ struct ModelRefTests {
     @Test("a model with no provider, a provider that isn't an id, or a model that isn't one, is refused")
     func refuses() {
         #expect(ModelRef.parse("claude-sonnet-5-5") == .failure(.noSlash))
-        #expect(ModelRef.parse("Anthropic/claude") == .failure(.badProvider("Anthropic")))
+        #expect(ModelRef.parse("Anthropic/Claude-X") == .success(ModelRef(providerId: "anthropic", model: "Claude-X")))
+        #expect(ModelRef.parse("an_thropic/claude") == .failure(.badProvider("an_thropic")))
         #expect(ModelRef.parse("/claude") == .failure(.badProvider("")))
         #expect(ModelRef.parse("-x/claude") == .failure(.badProvider("-x")))
         #expect(ModelRef.parse("anthropic/") == .failure(.badModel("")))
         #expect(ModelRef.parse("anthropic/has space") == .failure(.badModel("has space")))
     }
 
-    @Test("a profile's model: is read, and a bad one makes the profile unreadable with the reason")
+    @Test("a profile's model: is read, and a bad one is ignored with a notice, the profile still loading")
     func profileFrontmatter() throws {
         let read = try profile("model: deepseek/deepseek-v4-pro").get()
-        #expect(read.model == ModelRef(providerId: "deepseek", model: "deepseek-v4-pro"))
+        #expect(read.model == ModelRef(providerId: "deepseek", model: "deepseek-v4-pro") && read.modelProblem == nil)
         #expect(try profile("tier: hard").get().model == nil, "no model: means the default")
-        guard case .failure(let why) = profile("model: claude-sonnet-5-5") else { Issue.record("must refuse"); return }
-        #expect(why.message == ModelRef.ParseError.noSlash.message)
+        // Claude Code's agent files say `model: sonnet`: a ported one still loads (dev-2's #1457 review).
+        let ported = try profile("model: sonnet\ntier: hard").get()
+        #expect(ported.model == nil && ported.tier == .hard)
+        let line = try #require(KnownCapabilities(tools: [], mcpServers: [], skills: []).unknownLine(for: ported))
+        #expect(line.contains("`model: sonnet` doesn't read") && line.contains(ModelRef.ParseError.noSlash.message) && line.hasSuffix("It is ignored."))
+        #expect(KnownCapabilities(tools: [], mcpServers: [], skills: []).unknownLine(for: read) == nil)
     }
 
     @Test("the snapshot keeps the model, so a file edit doesn't move a conversation, and an old snapshot decodes with none")
