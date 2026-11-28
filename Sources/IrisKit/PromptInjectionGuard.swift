@@ -95,7 +95,20 @@ struct PromptInjectionGuard {
         text.unicodeScalars.contains { (0x0370...0x052F).contains($0.value) && roleFolds[1][$0] != nil }
     }
 
+    /// Test seam (#1385): counts the strip's folds and its pattern searches of a folded line, for the task that binds
+    /// it. A count, not a clock, so the fold's cost is pinned the same on any machine. Nil outside that test.
+    final class FoldCounter: @unchecked Sendable {
+        private let lock = NSLock()
+        private var _folds = 0, _foldedSearches = 0
+        var folds: Int { lock.withLock { _folds } }
+        var foldedSearches: Int { lock.withLock { _foldedSearches } }
+        func fold() { lock.withLock { _folds += 1 } }
+        func foldedSearch() { lock.withLock { _foldedSearches += 1 } }
+    }
+    @TaskLocal static var foldCounter: FoldCounter?
+
     static func foldRoleConfusables(_ text: String, alternate: Bool = false) -> String {
+        foldCounter?.fold()
         let table = roleFolds[alternate ? 1 : 0]
         var scalars = String.UnicodeScalarView()
         scalars.append(contentsOf: text.unicodeScalars.map { table[$0] ?? $0 })
@@ -294,6 +307,7 @@ struct PromptInjectionGuard {
         for alternate in [false, true] {
             guard let fold = folds?.folded(result, alternate: alternate), fold.roleWord || wordRegexes[pattern] == nil else { continue }
             let folded = fold.text
+            foldCounter?.foldedSearch()
             let matches = foldedRegex.matches(in: folded, range: NSRange(folded.startIndex..., in: folded))
             guard !matches.isEmpty else { continue }
             let line = NSMutableString(string: result)
