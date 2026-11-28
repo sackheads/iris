@@ -109,7 +109,12 @@ the one place Iris's credential helper runs.
   `remote`, `submodule`, …), git spelled as a path or run through another program, and git with `-c`,
   `--config-env`, `--exec-path` or `--git-dir`, are yours alone to approve: no rule, Vibecop or YOLO
   approves them, and Always allow isn't offered. Pushing and fetching are `vcs push` and `vcs fetch`.
-  **What this stops, and what it doesn't:** the direct forms. A command you approve, or one YOLO runs, can still reach a credential indirectly: through a script (`bash x.sh`), `security -i`, or a hook a repository's `core.hooksPath` names. No check on a command's text can be complete, so treat the host tier as policy until host agents are contained (#1435's S5, parked).
+  **What this stops, and what it doesn't:**
+  - The strip and the person-only list stop the **direct** forms: a `git` command, a helper, `security`, or a git variable in the command itself.
+  - A script, a hook or an interpreter on a turn you approved, or **any host turn under YOLO**, can still reach the credential in your login keychain. For example: `bash x.sh`, `security -i`, a hook a repository's `core.hooksPath` names, or `python -c`. No check on a command's text can be complete.
+  - The full fix is containing host agents: #1435's S5, parked.
+
+  **Until then, on your side:** in **Keychain Access**, open the `github.com` internet password, go to **Access Control**, choose **Confirm before allowing access**, and remove `git-credential-osxkeychain` from the always-allow list. Any helper read then raises a macOS prompt you can refuse, whoever asks. The same goes for any other token you keep there that an agent shouldn't read silently.
 - **Isolation.** None of this touches `~/.gitconfig` or any other ambient git/`gh` state. It's
   injected per `run_command` invocation, scoped to exactly the repos on the allowlist — a remote
   for any other repo behaves exactly as it did before this feature existed.
