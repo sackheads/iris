@@ -28,8 +28,23 @@ enum HostVCSCommands {
     /// A command the tokenizer can't model is judged by its text, on the side of asking.
     static func needsPerson(_ command: String) -> Bool {
         guard let segments = CommandPattern.segments(command) else { return textNeedsPerson(command) }
+        // Any word naming a git variable (`GIT_CONFIG_COUNT=0 git …`, `export GIT_CONFIG_COUNT=0; git …`,
+        // `unset GIT_CONFIG_COUNT`) can undo the credential strip, in whichever part of the command it sits.
+        if segments.contains(where: { $0.words.contains(where: touchesGitEnvironment) }) { return true }
         return segments.contains { needsPerson(words: $0.words) }
     }
+
+    static func touchesGitEnvironment(_ word: String) -> Bool {
+        let name = word.drop { $0 == "$" || $0 == "{" }
+        return name.hasPrefix("GIT_") || name.hasPrefix("SSH_ASKPASS")
+    }
+
+    /// The keychain CLI's subcommands that print or export a secret (planner, #1435): git's helper reads the person's
+    /// Keychain with no prompt, and `security` can too.
+    static let securitySecretSubcommands: Set<String> = [
+        "find-internet-password", "find-generic-password", "find-key", "find-certificate", "dump-keychain", "export",
+        "unlock-keychain", "set-keychain-settings", "add-internet-password", "add-generic-password",
+    ]
 
     static func needsPerson(words: [String]) -> Bool {
         var i = 0
@@ -47,6 +62,9 @@ enum HostVCSCommands {
         let name = basename(program)
         // `git-credential-osxkeychain` and the other `git-*` programs, run directly, read or move credentials too.
         if name == "gh" || name.hasPrefix("git-") { return true }
+        if name == "security" {
+            return words[(i + 1)...].first { !$0.hasPrefix("-") }.map(securitySecretSubcommands.contains) ?? false
+        }
         guard name == "git" else { return false }
         if wrapped || program.contains("/") { return true }
         var j = i + 1
@@ -77,7 +95,8 @@ enum HostVCSCommands {
                         #"/git([^A-Za-z0-9_.-]|$)"#,
                         #"(^|[^A-Za-z0-9_.-])git\s+(-c|--config-env|--exec-path|--git-dir|--work-tree)"#,
                         #"(^|[^A-Za-z0-9_.-])git(-|\s+)credential"#,
-                        #"GIT_[A-Z_]+="#,
+                        #"GIT_[A-Z_]+"#,
+                        #"(^|[^A-Za-z0-9_.-])security\s+(\S+\s+)*?(find-internet-password|find-generic-password|find-key|dump-keychain|export)"#,
                         #"(^|[^A-Za-z0-9_.-])git\s+(\S+\s+)*?(push|fetch|pull|clone|ls-remote|remote|submodule|send-email|archive)([^A-Za-z0-9_.-]|$)"#]
         return patterns.contains { command.range(of: $0, options: .regularExpression) != nil }
     }
