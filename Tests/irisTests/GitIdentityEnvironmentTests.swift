@@ -350,6 +350,28 @@ struct RealGitEndToEndTests {
         #expect(FileManager.default.fileExists(atPath: captured.path), "control: the global helper runs without the strip")
     }
 
+    @Test("the strip also clears a system-level helper, as the Command Line Tools' or Homebrew's gitconfig ships osxkeychain (planner, #1435)")
+    func systemHelperCleared() async throws {
+        guard Self.git != nil else { return }
+        let home = FileManager.default.temporaryDirectory.appendingPathComponent("iris-gitid-sys-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: home) }
+        let captured = home.appendingPathComponent("captured.txt")
+        let stub = home.appendingPathComponent("stub.sh")
+        try "#!/bin/sh\ncat > \(PluginAuthRunner.shellQuoted(captured.path))\necho password=leaked\n".write(to: stub, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: stub.path)
+        // A system gitconfig of our own, standing in for the one git ships (GIT_CONFIG_SYSTEM, git 2.32+).
+        let system = home.appendingPathComponent("system-gitconfig")
+        try "[credential]\n\thelper = !\(PluginAuthRunner.shellQuoted(stub.path))\n".write(to: system, atomically: true, encoding: .utf8)
+        let repo = try await makeRepo(home: home)
+        let base = ["HOME": home.path, "PATH": "/usr/bin:/bin", "GIT_CONFIG_SYSTEM": system.path, "GIT_TERMINAL_PROMPT": "0"]
+        let fillInput = Data("url=https://github.com/sackheads/iris.git\n\n".utf8)
+        _ = try? await run(["credential", "fill"], cwd: repo, env: HostVCSCommands.withoutCredentials(base), stdin: fillInput)
+        #expect(!FileManager.default.fileExists(atPath: captured.path), "the system-level helper didn't run")
+        _ = try? await run(["credential", "fill"], cwd: repo, env: base, stdin: fillInput)
+        #expect(FileManager.default.fileExists(atPath: captured.path), "control: without the strip it does")
+    }
+
     @Test("a push URL resolves to https for an allowed repo even under a pre-existing global SSH insteadOf rule (dev-3's review, reproduced)")
     func pushURLResolvesToHTTPSDespiteAGlobalSSHRewrite() async throws {
         guard Self.git != nil else { return }

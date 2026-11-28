@@ -92,8 +92,9 @@ as the control — see "What the credential is," below).
 
 ## The account as a git contributor
 
-Beyond the two tools, `run_command`'s own host git also acts as the account when it touches an
-allowed repo. #1435 moved pushing into `vcs push`, and a later slice takes the credential off agent git.
+Beyond the two tools, `run_command`'s own host git commits as the account when it touches an allowed
+repo. Since #1435's slice 3 it holds **no credential**: a push or fetch goes through `vcs`, whose mirror is
+the one place Iris's credential helper runs.
 
 - **Identity.** Commits attribute to the account (`user.name` is its username, `user.email` GitHub's
   `<id>+<account>@users.noreply.github.com` noreply address — no separate email to configure). The
@@ -101,9 +102,13 @@ allowed repo. #1435 moved pushing into `vcs push`, and a later slice takes the c
   recognizes the bare `<account>@users.noreply.github.com` form for an account that enabled "Keep
   my email address private" before July 18, 2017; any account set up for this feature now gets
   only the id-based form, so that's the one used (#1188).
-- **Credential.** A git credential helper (`iris --git-credential-helper`, invoked by git itself,
-  never by the model) hands out the same Keychain token for a push or fetch to an allowed repo,
-  checked against the live allowlist on every request.
+- **No credential on host git (#1435, Brian's F5).** Every host `run_command` runs its git with
+  `credential.helper` emptied at command scope, which clears any helper from your own config (a
+  keychain helper included), and with no askpass and no ssh. So neither Iris's token nor yours is
+  reachable from it. `gh`, and git's remote commands (`push`, `fetch`, `pull`, `clone`, `ls-remote`,
+  `remote`, `submodule`, …), git spelled as a path or run through another program, and git with `-c`,
+  `--config-env`, `--exec-path` or `--git-dir`, are yours alone to approve: no rule, Vibecop or YOLO
+  approves them, and Always allow isn't offered. Pushing and fetching are `vcs push` and `vcs fetch`.
 - **Isolation.** None of this touches `~/.gitconfig` or any other ambient git/`gh` state. It's
   injected per `run_command` invocation, scoped to exactly the repos on the allowlist — a remote
   for any other repo behaves exactly as it did before this feature existed.
